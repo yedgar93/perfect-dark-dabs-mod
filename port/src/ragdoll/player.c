@@ -201,7 +201,7 @@ s32 ragdollWantPlayerBody(void)
 	s32 pn = g_Vars.currentplayernum;
 
 	if (!g_RagdollsEnabled || !g_RagdollDeathCam || !g_RagdollLevelLoaded || !pdphysIsReady()
-			|| g_Vars.normmplayerisrunning || g_Vars.stagenum >= STAGE_TITLE
+			|| g_Vars.normmplayerisrunning || !STAGE_IS_LEVEL(g_Vars.stagenum)
 			|| pn < 0 || pn >= MAX_PLAYERS) {
 		return false;
 	}

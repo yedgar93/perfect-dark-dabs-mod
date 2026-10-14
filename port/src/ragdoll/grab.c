@@ -13,7 +13,7 @@
  * Grabbing bodies (Skyrim/Fallout style). Hold Use (E, or B on a pad) while
  * aiming at a body within reach: the part under the crosshair is pulled to
  * a point in front of the camera by a spring that also carries the part's
- * own weight, with the force capped (Ragdoll.RagdollGrabStrength Ã— 700 N, about
+ * own weight, with the force capped (Ragdoll.RagdollGrabStrength × 700 N, about
  * a body's weight). Limbs follow easily; lifting a whole body by the head is
  * slow and saggy. Let go to drop it, keeping its momentum.
  */

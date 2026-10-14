@@ -1899,6 +1899,17 @@ static MenuItemHandlerResult menuhandlerCrosshairSize(s32 operation, struct menu
 	return 0;
 }
 
+static MenuItemHandlerResult menuhandlerCrosshairAimOnly(s32 operation, struct menuitem *item, union handlerdata *data)
+{
+	if (operation == MENUOP_GET) {
+		return g_PlayerExtCfg[g_ExtMenuPlayer].crosshairaimonly;
+	}
+	if (operation == MENUOP_SET) {
+		g_PlayerExtCfg[g_ExtMenuPlayer].crosshairaimonly = data->checkbox.value;
+	}
+	return 0;
+}
+
 static MenuItemHandlerResult menuhandlerCrosshairHealth(s32 operation, struct menuitem *item, union handlerdata *data)
 {
 	static const char *opts[] = {
@@ -2048,6 +2059,14 @@ struct menuitem g_ExtendedGameMenuItems[] = {
 		(uintptr_t)"Crosshair Size",
 		4,
 		menuhandlerCrosshairSize,
+	},
+	{
+		MENUITEMTYPE_CHECKBOX,
+		0,
+		MENUITEMFLAG_LITERAL_TEXT,
+		(uintptr_t)"Crosshair Only While Aiming",
+		0,
+		menuhandlerCrosshairAimOnly,
 	},
 	{
 		MENUITEMTYPE_SELECTABLE,

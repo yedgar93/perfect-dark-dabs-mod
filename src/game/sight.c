@@ -1702,6 +1702,12 @@ Gfx *sightDraw(Gfx *gdl, bool sighton, s32 sight)
 	sightTick(sighton);
 
 #ifndef PLATFORM_N64
+	// Keep targeting updates running while hiding the crosshair at the hip.
+	if (PLAYER_EXTCFG().crosshairaimonly && !sighton) {
+		g_ScaleX = 1;
+		return gdl;
+	}
+
 	// GoldenEye's own crosshair for anything of GoldenEye's in the hand on GE
 	// Plus's levels (gehud.c): shown while aiming, as GoldenEye shows it, and
 	// for a player who keeps a target on screen all the time, then too

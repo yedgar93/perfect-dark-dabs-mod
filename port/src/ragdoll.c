@@ -1915,7 +1915,8 @@ void ragdollSysShutdown(void)
 void ragdollTick(void)
 {
 #ifdef PD_PHYSICS
-	if (!g_RagdollLevelLoaded || g_Vars.stagenum >= STAGE_TITLE) {
+	// Dab's converted and modded levels can have IDs above the menu stages.
+	if (!g_RagdollLevelLoaded || !STAGE_IS_LEVEL(g_Vars.stagenum)) {
 		return;
 	}
 

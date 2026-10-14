@@ -35,7 +35,7 @@ void ragdollTestSpawnTick(void)
 
 	if (!g_RagdollTestSpawnKey
 			|| g_Vars.normmplayerisrunning
-			|| g_Vars.stagenum >= STAGE_TITLE
+			|| !STAGE_IS_LEVEL(g_Vars.stagenum)
 			|| g_Vars.tickmode != TICKMODE_NORMAL
 			|| g_Vars.in_cutscene
 			|| lvIsPaused()
