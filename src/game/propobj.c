@@ -84,6 +84,9 @@
 #include "gehitpuff.h"
 #include "types.h"
 #include "string.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h" // MOD: ragdoll physics
+#endif
 #ifndef PLATFORM_N64
 #include "system.h"
 #include "game/modrules.h"
@@ -8776,7 +8779,15 @@ void platformDisplaceProps(struct prop *platform, s16 *propnums, struct coord *p
 			struct chrdata *chr = prop->chr;
 			s32 nodetype;
 
+#ifdef PD_PHYSICS
+			// MOD: ragdoll physics - a body is carried by the physics lift
+			// (ragdollCarryOnLift). Moving its prop here also moved its death
+			// animation onto the body's position each frame, so the animation
+			// blend chased itself off the lift.
+			if (chr->fallspeed.y == 0.0f && !ragdollIsChrRagdolled(chr)) {
+#else
 			if (chr->fallspeed.y == 0.0f) {
+#endif
 				chr->ground += newpos->y - prevpos->y;
 				chr->manground += newpos->y - prevpos->y;
 				chr->sumground = chr->manground * (PAL ? 8.417509f : 9.999998f);
@@ -22316,6 +22327,35 @@ void doorsCalcFrac(struct doorobj *door)
 			}
 		}
 	}
+#ifdef PD_PHYSICS
+
+	// MOD: ragdoll physics - a closing door shoves bodies out of its way, but
+	// if one is pinned where the door is going (against the frame or the
+	// other door) it can't close any further; after 2 s held open, it opens again
+	if (checkcollision && cdresult != CDRESULT_COLLISION) {
+		loopdoor = door;
+
+		while (loopdoor) {
+			if (loopdoor->mode == DOORMODE_CLOSING && ragdollBlocksDoor(loopdoor)) {
+				cdresult = CDRESULT_COLLISION;
+
+				// Held open by a body for a while: open again (not airlocks,
+				// where opening one door closes the other)
+				if ((door->base.flags2 & OBJFLAG2_AIRLOCKDOOR) == 0 && ragdollDoorStuckOnBody(door)) {
+					doorsRequestMode(door, DOORMODE_OPENING);
+				}
+
+				break;
+			}
+
+			loopdoor = loopdoor->sibling;
+
+			if (loopdoor == door) {
+				break;
+			}
+		}
+	}
+#endif
 
 	// Finalise the frac
 	loopdoor = door;

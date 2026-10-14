@@ -1,5 +1,8 @@
 #include <ultra64.h>
 #include "constants.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h"
+#endif
 #include "game/activemenu.h"
 #include "game/modoptions.h"
 #include "game/bondbike.h"
@@ -1136,6 +1139,13 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 					// Handle B button activation
 					if (allowc1buttons && controlmode != CONTROLMODE_PC) {
 						for (i = 0; i < numsamples; i++) {
+#ifdef PD_PHYSICS
+							// Consume Use throughout a drag, including the frame it is released.
+							if (ragdollIsHolding()) {
+								g_Vars.currentplayer->usedowntime = -1;
+								continue;
+							}
+#endif
 							if (joyGetButtonsOnSample(i, contpad1, c1allowedbuttons & B_BUTTON)
 									|| joyGetButtonsOnSample(i, contpad2, c2allowedbuttons & B_BUTTON)) {
 								if (g_Vars.currentplayer->usedowntime >= -1) {
@@ -1674,6 +1684,13 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 						B_BUTTON;
 					if (allowc1buttons) {
 						for (i = 0; i < numsamples; i++) {
+#ifdef PD_PHYSICS
+							// Consume Use throughout a drag, including the frame it is released.
+							if (ragdollIsHolding()) {
+								g_Vars.currentplayer->usedowntime = -1;
+								continue;
+							}
+#endif
 							if (joyGetButtonsOnSample(i, contpad1, c1allowedbuttons & usemask)) {
 								if (g_Vars.currentplayer->usedowntime >= -1) {
 									if (controlmode != CONTROLMODE_PC) {

@@ -5,6 +5,9 @@
 #endif
 #include <ultra64.h>
 #include "constants.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h" // MOD: ragdoll physics
+#endif
 #include "bss.h"
 #include "data.h"
 #include "game/activemenu.h"
@@ -389,6 +392,9 @@ void lvReset(s32 stagenum)
 		s32 j;
 
 		tilesReset();
+#ifdef PD_PHYSICS
+		ragdollStageLoad(); // MOD: ragdoll physics
+#endif
 		bgReset(g_Vars.stagenum);
 		bgBuildTables(g_Vars.stagenum);
 		skyReset(g_Vars.stagenum);
@@ -2848,6 +2854,13 @@ void lvTick(void)
 			}
 		}
 	}
+#ifdef PD_PHYSICS
+
+	// MOD: ragdoll physics. After the props have moved (lifts, doors) and
+	// with this frame's lvupdate, so bodies on a lift are drawn where the
+	// lift is now, not where it was last frame (stutter at high framerates)
+	ragdollTick();
+#endif
 }
 
 const char var7f1b7738[] = "cutsceneframe: %d\n";
@@ -2883,6 +2896,9 @@ void lvTickPlayer(void)
 
 void lvStop(void)
 {
+#ifdef PD_PHYSICS
+	ragdollStageUnload(); // MOD: ragdoll physics
+#endif
 	paksStop(true);
 
 	if (g_MiscAudioHandle && sndGetState(g_MiscAudioHandle)) {

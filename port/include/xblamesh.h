@@ -400,6 +400,8 @@ void xblaMeshNodeRestOffset(const struct modelnode *node, f32 out[3]);
  * returned; with f NULL nothing is written, so it doubles as "does this
  * model draw a release mesh").
  */
+// Draw fitted HD cut caps; returns 1 when this model has a prepared HD rim.
+s32 xblaMeshRenderCutCaps(Gfx **out, struct chrdata *chr, u32 alpha);
 void xblaMeshTrace(FILE *f);
 s32 xblaMeshTraceModel(FILE *f, const struct model *model, const char *indent);
 

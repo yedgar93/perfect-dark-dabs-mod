@@ -426,7 +426,7 @@ Gfx *titleRenderLegal(Gfx *gdl)
 				font2 = g_FontHandelGothicLg;
 #if !defined(PLATFORM_N64) && defined(VERSION_HASH)
 				if (elem->textid == L_OPTIONS_084) {
-					elem->textptr = VERSION_HASH " (" VERSION_TARGET ")";
+					elem->textptr = "Yedgar Hybrid v3.14.0 r7";
 
 					// Gold, once, when this is the first run of a build Check
 					// for Updates put in place. The version is already the
@@ -451,7 +451,7 @@ Gfx *titleRenderLegal(Gfx *gdl)
 				} else if (elem->textid == L_OPTIONS_083) {
 					elem->textptr = VERSION_ROMID;
 				} else if (elem->textid == L_OPTIONS_082) {
-					elem->textptr = "Perfect Dark (" VERSION_BRANCH ")";
+					elem->textptr = "Dab's Mod + Chesluk Physics";
 				}
 #endif
 				break;
@@ -482,6 +482,22 @@ Gfx *titleRenderLegal(Gfx *gdl)
 				font2 = g_FontHandelGothicLg;
 				break;
 			}
+
+#ifndef PLATFORM_N64
+            // Fit the repack name in the existing value column on both legal screens.
+            if (elem->textptr && (elem->textid == L_OPTIONS_082 || elem->textid == L_OPTIONS_084)) {
+                s32 height, width;
+                const s32 available = viGetWidth() - elem->x - 49;
+                textMeasure(&height, &width, (char *)elem->textptr, font1, font2, 0);
+                if (width > available) {
+                    font1 = g_CharsHandelGothicMd; font2 = g_FontHandelGothicMd;
+                    textMeasure(&height, &width, (char *)elem->textptr, font1, font2, 0);
+                    if (width > available) {
+                        font1 = g_CharsHandelGothicSm; font2 = g_FontHandelGothicSm;
+                    }
+                }
+            }
+#endif
 
 			if (elem->type == LEGALELEMENTTYPE_LINE) {
 				gdl = text0f153780(gdl);
@@ -3409,3 +3425,4 @@ Gfx *titleRender(Gfx *gdl)
 
 	return gdl;
 }
+

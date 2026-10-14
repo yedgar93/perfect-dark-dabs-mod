@@ -17,6 +17,9 @@
 #include "xblamesh.h"
 #include "system.h"
 #endif
+#ifdef PD_PHYSICS
+#include "ragdoll.h" // MOD: ragdoll physics
+#endif
 
 /**
  * This file handles memory usage for graphics related tasks.
@@ -159,6 +162,13 @@ void gfxReset(void)
 	{
 		u32 gfxsize = g_GfxSizesByPlayerCount[PLAYERCOUNT() - 1];
 		u32 vtxsize = g_VtxSizesByPlayerCount[PLAYERCOUNT() - 1];
+
+#ifdef PD_PHYSICS
+		if (g_RagdollsEnabled) {
+			gfxsize += RD_EXTRA_GFX_RAGDOLLS;
+			vtxsize += RD_EXTRA_VTX_RAGDOLLS;
+		}
+#endif
 
 #ifndef PLATFORM_N64
 		gfxsize *= GFX_POOL_SCALE;

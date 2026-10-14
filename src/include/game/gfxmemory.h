@@ -20,6 +20,9 @@ bool gfxHasVtxSpace(u32 size);
 #endif
 void gfxSwapBuffers(void);
 s32 gfxGetFreeGfx(Gfx *gdl);
+#ifdef PD_PHYSICS
+u32 gfxGetFreeVtx(void); // MOD: ragdoll physics (was missing)
+#endif
 #ifndef PLATFORM_N64
 // The last frame's use of the master display list (in Gfx commands) and the
 // vtx pool (in bytes), for the F3 trace dump.
