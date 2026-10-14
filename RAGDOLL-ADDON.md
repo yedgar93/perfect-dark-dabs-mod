@@ -1,6 +1,6 @@
 # Dab's Mod + Chesluk Physics — Yedgar Repack
 
-Unofficial integration for Jon / yedgar93. Windows 64-bit, revision 4.
+Unofficial integration for Jon / yedgar93. Windows 64-bit, revision 5.
 Base: DabDavis's official Dab's Mod v3.14.0 release, commit
 90c8622e74b35be669d60d177effc6d7d2d7621c.
 
@@ -30,8 +30,10 @@ in-game updater can also replace this custom executable with an official one.
 
 Options > Extended Options > Ragdolls & Dismemberment:
 
-- Ragdolls and Dismemberment are enabled by default.
-- Enable Body Dragging (Hold Use); it starts off by default.
+- Ragdolls, Dismemberment and Body Dragging (Hold Use) are all enabled by default.
+- On the first launch of revision 5, all three are enabled once even if the
+  previous settings file had them off. RepackDefaultsVersion=1 records this
+  upgrade, and any later choices you make in the menu remain saved.
 - Drag Strength controls the pulling force (default 1.20x).
 
 Look at a nearby corpse and hold your configured Use button (E by default
@@ -55,18 +57,25 @@ Built from the exact v3.14.0 release tag with the integration applied, using
 GCC 16.2, CMake, Jolt v5.6.0 and the stable update channel. OpenGL and Vulkan
 are enabled. The build compiled and linked successfully.
 
-The original ntsc-final ROM started and exited normally at a specified frame,
+The preceding revision 4 build started the original ntsc-final ROM and exited normally at a specified frame,
 and Jolt's self-test passed. On converted GoldenEye Runway (stage 0x5e), a
 debugger-created guard ragdoll moved over 30 frames, from pelvis y=-109.50
 to y=-164.57. This confirms that the converted-stage physics loop advances.
 
-A focused debugger check acquired a body, issued 27 calls to the CE pulling
+A focused revision 4 debugger check acquired a body, issued 27 calls to the CE pulling
 function, consumed Use, released the body and respected the off switch.
 The normal-interaction priority guard was exercised with an injected target.
 That check does not establish ordinary-play dragging quality or real door
 operation. Its short lift observation did not raise the pelvis; it is not
 treated as proof of successful body movement under dragging. Gameplay testing
 is left to Jon at his request; no further game runs are being performed.
+
+Revision 5 changes only the feature defaults and their one-time settings
+upgrade. It compiled and linked successfully; no further gameplay tests were
+run, at Jon's request. CE's dismemberment damage threshold (2.0) and chance
+(40%) are unchanged. Qualifying head/limb hits can cut; ordinary torso shots
+require at least 50 damage to split the torso, and knockouts do not dismember.
+Not observing a cut so far is not being treated as a confirmed bug.
 
 Original v3.14.0 sight.c and types.h are unchanged. Normal enemy firing retains
 the original func0f041a74 call. This supersedes the old v3.11.0 test packages.

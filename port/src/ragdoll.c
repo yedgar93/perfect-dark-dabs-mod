@@ -20,7 +20,8 @@ s32 g_RagdollMaxBodies = 0;    // corpses kept as ragdolls; oldest fades out. 0 
 s32 g_RagdollMaxPhysical = 0;  // bodies kept in the physics world; older ones freeze in place. 0 = unlimited
 s32 g_RagdollChrPush = 0;       // living chrs and players push bodies around
 s32 g_RdPropMeshLogged = 0;
-s32 g_RagdollGrab = 0;          // hold Use (E / B) on a body to drag the part you're aiming at
+s32 g_RagdollGrab = 1;          // hold Use (E / B) on a body to drag the part you're aiming at
+static s32 g_RagdollRepackDefaultsVersion = 0;
 f32 g_RagdollGrabStrength = 1.2f; // how much the player can lift (1 = about a body's weight)
 s32 g_RagdollMuscles = 1;       // powered ragdoll, joints follow the death animation at first
 f32 g_RagdollMuscleStrength = 3.0f; // motor torque multiplier (0-3)
@@ -1876,6 +1877,15 @@ bool ragdollUpdateNodeMtx(struct modelrenderdata *renderdata, struct model *mode
 void ragdollSysInit(void)
 {
 #ifdef PD_PHYSICS
+	// Apply the requested enabled defaults once, including upgrades from r4.
+	// The marker is saved with these settings, so later switch choices persist.
+	if (g_RagdollRepackDefaultsVersion < 1) {
+		g_RagdollsEnabled = 1;
+		g_RagdollGrab = 1;
+		g_RagdollDismember = 1;
+		g_RagdollRepackDefaultsVersion = 1;
+	}
+
 	// Physics is always initialised, so ragdolls can be switched on from the
 	// Extended > Physics menu without restarting
 	if (!g_RagdollsEnabled) {
@@ -2051,6 +2061,7 @@ void ragdollPresetApply(s32 preset)
 
 PD_CONSTRUCTOR static void ragdollConfigInit(void)
 {
+	configRegisterInt("Ragdoll.RepackDefaultsVersion", &g_RagdollRepackDefaultsVersion, 0, 1);
 	configRegisterInt("Ragdoll.Ragdolls", &g_RagdollsEnabled, 0, 1);
 	RD_PRESET_INT("Ragdoll.RagdollGrab", &g_RagdollGrab, 0, 1);
 	RD_PRESET_FLOAT("Ragdoll.RagdollGrabStrength", &g_RagdollGrabStrength, 0.25f, 4.0f);

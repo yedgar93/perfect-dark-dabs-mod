@@ -434,3 +434,8 @@ their work. No game assets are published with this source.
 
 Body dragging uses Chesluk-Industries's original CE pulling implementation.
 OpenAI Codex connected its settings and Use handling to the v3.14.0 base.
+
+At Jon / yedgar93's request, revision 5 enables ragdolls, body dragging
+and dismemberment by default, with a one-time upgrade for existing settings.
+OpenAI Codex performed this change with AI assistance. CE's dismemberment
+probabilities and damage rules are retained.
