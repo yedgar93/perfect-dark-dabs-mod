@@ -626,6 +626,7 @@ extern struct rdvolley g_RdVolley;
 struct modelnode *ragdollWalkNext(struct model *model, struct modelnode *node);
 void ragdollApplyRelations(struct model *model);
 s32 ragdollPieceOf(struct ragdoll *rd, s32 part);
+s32 ragdollPartOfNode(struct ragdoll *rd, struct modelnode *node);
 void ragdollRestoreSeams(struct ragdoll *rd);
 void ragdollFreeCaps(struct ragdoll *rd);
 s32 ragdollHasCutPieces(struct chrdata *chr);

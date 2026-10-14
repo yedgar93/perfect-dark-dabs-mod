@@ -1,6 +1,6 @@
-# Dab's Mod + Chesluk Physics — Yedgar Repack
+# Dab's Mod + Chesluk Physics â€” Yedgar Hybrid
 
-Unofficial integration for Jon / yedgar93. Windows 64-bit, revision 5.
+Unofficial integration for Jon / yedgar93. Windows 64-bit, revision 6.
 Base: DabDavis's official Dab's Mod v3.14.0 release, commit
 90c8622e74b35be669d60d177effc6d7d2d7621c.
 
@@ -75,7 +75,23 @@ upgrade. It compiled and linked successfully; no further gameplay tests were
 run, at Jon's request. CE's dismemberment damage threshold (2.0) and chance
 (40%) are unchanged. Qualifying head/limb hits can cut; ordinary torso shots
 require at least 50 damage to split the torso, and knockouts do not dismember.
-Not observing a cut so far is not being treated as a confirmed bug.
+Jon subsequently confirmed dismemberment in regular PD and reported ragdolls
+and dismemberment working across modes. XBLA dismemberment visibly stretched
+meshes across cuts. Revision 6 isolates skin weights to each connected body
+piece and removes triangles crossing disconnected pieces, for all HD drawing
+passes. Severed HD bodies use a per-frame CPU pose; shared meshes and living
+characters retain their existing rendering path. Corpse room/cleanup behavior
+is unchanged. This addresses stretching, not multiplayer corpse retention.
+
+The startup screen identifies this as Dab's Mod + Chesluk Physics and Yedgar
+Hybrid v3.14.0 r6, reducing the value font when necessary to fit its column.
+Original Rare/4J notices and full contributor credits are retained.
+
+The r6 Windows build compiled and linked. Synthetic mesh checks passed for
+piece-weight grouping, normalization, nested cuts, crossing-triangle rejection
+and invalid indices. No gameplay runs were performed for r6. Jon must verify
+clean separation on fresh XBLA/GoldenEye corpses; seam appearance and all
+replacement-model variations are not yet confirmed.
 
 Original v3.14.0 sight.c and types.h are unchanged. Normal enemy firing retains
 the original func0f041a74 call. This supersedes the old v3.11.0 test packages.

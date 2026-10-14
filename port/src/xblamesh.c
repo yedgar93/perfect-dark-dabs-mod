@@ -46,6 +46,10 @@
 #include "geguns.h"
 #include "files.h"
 #include "xblamesh.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h"
+#endif
+#include "ragdollskin.h"
 #include "handtint.h"
 #include "headfit.h"
 #include "xblatex.h"
@@ -322,6 +326,13 @@ struct xblameshbuilt {
 	// thirteen copies of himself a frame and fill the arena with twelve of
 	// them. One entry is enough: the renderer walks a model's tree in one go,
 	// so a model's parts are drawn one after another.
+    // Per-instance frame copies: shared HD meshes and other characters stay intact.
+    const struct model *cutmodel;
+    u32 cutframe;
+    u32 cutmask;
+    f32 *cutweights;
+    s16 *cutpieces;
+    Gfx *cutlists[11];
 	const struct model *posedmodel;
 	u32 posedframe;
 	Vtx *posedvtx;
@@ -2171,6 +2182,7 @@ void xblaMeshResetModels(void)
 	g_XblaMeshNumSlots = 0;
 
 	for (s32 i = 0; i < numRecords && built; i++) {
+		built[i].cutmodel = NULL;
 		built[i].posedmodel = NULL;
 		built[i].bruisemodel = NULL;
 		built[i].envmodel = NULL;
@@ -7905,7 +7917,7 @@ static f32 *xblaMeshGpuPalette(struct xblameshbuilt *m, struct model *model, Mtx
  * NULL when there is no room this frame, and the caller draws the bind pose.
  */
 static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *root,
-		Mtxf **outmtx, s32 *outfine, s32 normals, const f32 *headshift, const f32 *disp)
+		Mtxf **outmtx, s32 *outfine, s32 normals, const f32 *headshift, const f32 *disp, const f32 *skinweights)
 {
 	Mtxf pal[XBLAMESH_MAXMTX];
 	Mtxf lin[XBLAMESH_MAXMTX];
@@ -8004,7 +8016,7 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 	// env mapping style, and Perfect Dark's OBJFLAG_ORTHOGONAL - stood as a big
 	// pane of glass well away from its frame (F3 20260922-232054, Dam's towers).
 	// Whole units under the game's own matrix, which the rewrite does carry.
-	fine = orthogonal ? 1 : xblaMeshPoseFineness(m, pal);
+	fine = skinweights || orthogonal ? 1 : xblaMeshPoseFineness(m, pal);
 
 	if (fine > 1) {
 		fmtx = xblaMeshFrameAlloc(sizeof(Mtxf));
@@ -8072,7 +8084,7 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 
 	for (s32 i = 0; i < m->numvertices; i++) {
 		const f32 *pos = &m->bindpos[i * 3];
-		const f32 *weight = &m->weights[i * 3];
+		const f32 *weight = &(skinweights ? skinweights : m->weights)[i * 3];
 		const u8 *bone = &m->bones[i * 4];
 		const s32 num = bone[3] < 3 ? bone[3] : 3;
 		struct coord in;
@@ -8131,7 +8143,7 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 		for (s32 k = 0; k < m->numenvidx; k++) {
 			const u32 i = m->envidx[k];
 			const f32 *n = &m->normals[i * 3];
-			const f32 *weight = &m->weights[i * 3];
+			const f32 *weight = &(skinweights ? skinweights : m->weights)[i * 3];
 			const u8 *bone = &m->bones[i * 4];
 			const s32 num = bone[3] < 3 ? bone[3] : 3;
 			f32 ox = 0.0f, oy = 0.0f, oz = 0.0f;
@@ -11278,6 +11290,111 @@ static const f32 *xblaMeshRestShift(const struct xblameshbuilt *m, struct xblame
 	return use->restfit == 2 ? use->restshift : NULL;
 }
 
+/* A severed HD body still has its original smooth skin weights. Cross-cut
+ * influences and triangles would connect independently moving pieces, making
+ * long elastic strips. Split only this model's frame copy; living characters
+ * and uncut corpses retain the ordinary GPU path and shared mesh data. */
+static s32 xblaMeshPrepareCut(struct xblameshbuilt *m, struct model *model)
+{
+#ifdef PD_PHYSICS
+    s16 pieces[XBLAMESH_MAXMTX];
+    if (!m->bindpos || !m->weights || !m->bones || m->nummatrices <= 0
+            || m->nummatrices > XBLAMESH_MAXMTX) return 0;
+    u32 mask = (u32)ragdollGetModelCutPieces(model, pieces, m->nummatrices);
+    if (!mask) {
+        if (m->cutmodel == model && m->cutframe == frameCount) {
+            m->cutmodel = NULL; m->posedmodel = NULL;
+        }
+        return 0;
+    }
+    if (m->cutmodel == model && m->cutframe == frameCount && m->cutmask == mask) return 1;
+    f32 *weights = xblaMeshFrameAlloc((u32)m->numvertices * 3 * sizeof(f32));
+    s16 *owners = xblaMeshFrameAlloc((u32)m->numvertices * sizeof(s16));
+    if (!weights || !owners) return -1;
+    for (s32 i = 0; i < m->numvertices; i++) {
+        const u8 *bone = &m->bones[i * 4];
+        owners[i] = (s16)ragdollSkinWeights(bone, &m->weights[i * 3], bone[3],
+                pieces, m->nummatrices, &weights[i * 3]);
+    }
+    m->cutmodel = model;
+    m->cutframe = frameCount;
+    m->cutmask = mask;
+    m->cutweights = weights;
+    m->cutpieces = owners;
+    memset(m->cutlists, 0, sizeof(m->cutlists));
+    m->posedmodel = NULL;
+    return 1;
+#else
+    return 0;
+#endif
+}
+
+static const Gfx *xblaMeshCutList(struct xblameshbuilt *m, struct model *model, const Gfx *list)
+{
+    Gfx *bases[] = {m->gdl, m->envgdl, m->sheengdl, m->metalgdl, m->logobase,
+        m->logogdl[0], m->logogdl[1], m->logogdl[2], m->logoglint, m->logometal, m->tintgdl};
+    if (!list || m->cutmodel != model || m->cutframe != frameCount || !m->cutpieces) return list;
+    for (s32 b = 0; b < ARRAYCOUNT(bases); b++) {
+        const uintptr_t begin = (uintptr_t)bases[b];
+        const uintptr_t address = (uintptr_t)list;
+        const size_t bytes = (size_t)m->numgfx * sizeof(Gfx);
+        if (!begin || address < begin || address >= begin + bytes) continue;
+        if (!m->cutlists[b]) {
+            Gfx *out = xblaMeshFrameAlloc((u32)bytes);
+            s32 slots[32];
+            if (!out) return NULL;
+            memcpy(out, bases[b], bytes);
+            for (s32 k = 0; k < 32; k++) slots[k] = -1;
+            for (s32 c = 0; c < m->numgfx; c++) {
+                Gfx *cmd = &out[c];
+                const u32 op = (u8)(cmd->words.w0 >> 24);
+                if (op == (u8)G_VTX) {
+                    const uintptr_t ptr = cmd->words.w1;
+                    const s32 first = (cmd->words.w0 >> 16) & 0xf;
+                    const s32 count = (cmd->words.w0 & 0xffff) / sizeof(Vtx);
+                    s32 index = -1;
+                    if (ptr <= 0xffffffff && ((ptr >> 24) & 0xf) == SPSEGMENT_MODEL_VTX)
+                        index = (UNSEGADDR(ptr) & 0xffffff) / sizeof(Vtx);
+                    else if (ptr >= (uintptr_t)m->vertices && ptr < (uintptr_t)(m->vertices + m->numvertices))
+                        index = (ptr - (uintptr_t)m->vertices) / sizeof(Vtx);
+                    for (s32 k = 0; k < count && first + k < 32; k++)
+                        slots[first+k] = index >= 0 && index+k < m->numvertices ? index+k : -1;
+                } else if (op == (u8)G_TRI1) {
+                    u32 w = (u32)cmd->words.w1;
+                    s32 a = ((w >> 16) & 0xff) / 10, b = ((w >> 8) & 0xff) / 10, d = (w & 0xff) / 10;
+                    if (a >= 32 || b >= 32 || d >= 32 || !ragdollSkinTriangle(m->cutpieces, m->numvertices, slots[a], slots[b], slots[d]))
+                        gSP1Triangle(cmd, 0, 0, 0, 0);
+                } else if (op == (u8)G_TRI4) {
+                    u32 w0 = (u32)cmd->words.w0, w1 = (u32)cmd->words.w1;
+                    for (s32 t = 0; t < 4; t++) {
+                        s32 a = (w1 >> (t*8)) & 0xf, b = (w1 >> (t*8+4)) & 0xf, d = (w0 >> (t*4)) & 0xf;
+                        if (!ragdollSkinTriangle(m->cutpieces, m->numvertices, slots[a], slots[b], slots[d])) {
+                            w1 &= ~(0xffu << (t*8)); w0 &= ~(0xfu << (t*4));
+                        }
+                    }
+                    cmd->words.w0 = w0; cmd->words.w1 = w1;
+                } else if (op == (u8)G_DL) {
+                    uintptr_t target = cmd->words.w1;
+                    if (target >= begin && target < begin + bytes)
+                        cmd->words.w1 = (uintptr_t)out + (target - begin);
+                } else if (op == (u8)G_ENDDL) {
+                    for (s32 k = 0; k < 32; k++) slots[k] = -1;
+                }
+            }
+            m->cutlists[b] = out;
+        }
+        return (const Gfx *)((uintptr_t)m->cutlists[b] + address - begin);
+    }
+    return list;
+}
+
+static void xblaMeshDrawCutList(struct modelrenderdata *data, struct xblameshbuilt *m,
+        struct model *model, s32 cut, const Gfx *list)
+{
+    const Gfx *draw = cut ? xblaMeshCutList(m, model, list) : list;
+    if (draw) gSPDisplayList(data->gdl++, draw);
+}
+
 // How much of a destroyed GoldenEye prop's colours is left (xblaMeshRenderNode())
 #define XBLAMESH_SCORCH 64
 
@@ -11467,6 +11584,9 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 
 		return 0;
 	}
+
+    const s32 cut = xblaMeshPrepareCut(m, model);
+    if (cut < 0) return 0;
 
 	// A GoldenEye tinted pane on its way to opaque: GoldenEye's own pane is
 	// drawn as well, at the same opacity (xblaMeshKeptLists()). Only for a
@@ -11733,7 +11853,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 					m->posedvtx) {
 				pose = m->posedvtx;
 				finemtx = m->posedmtx;
-			} else if (m->gpumodel == model && m->gpuframe == frameCount && m->gpupal) {
+			} else if (!cut && m->gpumodel == model && m->gpuframe == frameCount && m->gpupal) {
 				gpupal = m->gpupal;
 				finemtx = m->gpumtx;
 			} else {
@@ -11757,7 +11877,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				// reflections are posed there too, from a copy of the vertices
 				// made once (xblaMeshEnvStatic()), which a mesh that reflects
 				// has to have.
-				if (!disp && envforce != XBLAMESH_ENV_LOGO && m->bindpos && m->weights && m->bones
+				if (!cut && !disp && envforce != XBLAMESH_ENV_LOGO && m->bindpos && m->weights && m->bones
 						&& (!normals || (!m->envown && m->normals && xblaMeshEnvStatic(m)))
 						&& gfxMeshGpuAvailable()) {
 					gpupal = xblaMeshGpuPalette(m, model, root, headshift, &finemtx);
@@ -11772,7 +11892,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				}
 
 				if (!gpupal) {
-					pose = xblaMeshPose(m, model, root, &finemtx, &fine, normals, headshift, disp);
+					pose = xblaMeshPose(m, model, root, &finemtx, &fine, normals, headshift, disp, cut ? m->cutweights : NULL);
 
 					if (pose) {
 						framePoses++;
@@ -11935,7 +12055,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 	// trimmed or crumpled copy is drawn as it always was, and so is whatever
 	// the renderer cannot do on the GPU (it loads those lists on the CPU,
 	// posing them by the same palette).
-	if (posed == m->vertices && (gpupal || !m->bindpos || !m->nummatrices || !optPose || !root)
+	if (!cut && posed == m->vertices && (gpupal || !m->bindpos || !m->nummatrices || !optPose || !root)
 			&& gfxMeshGpuAvailable()) {
 		meshdraw = xblaMeshFrameAlloc(sizeof(*meshdraw));
 
@@ -12185,7 +12305,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 			}
 		}
 
-		gSPDisplayList(renderdata->gdl++, logo ? m->logobase + (list - m->gdl) : list);
+		xblaMeshDrawCutList(renderdata, m, model, cut, logo ? m->logobase + (list - m->gdl) : list);
 		frameDraws++;
 
 		// An alpha span that is not going to the translucent pass is a cutout
@@ -12228,7 +12348,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, 0);
 			}
 
-			gSPDisplayList(renderdata->gdl++, &m->gdl[xlupart]);
+			xblaMeshDrawCutList(renderdata, m, model, cut, &m->gdl[xlupart]);
 
 			if (renderdata->unk30 == 9) {
 				gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
@@ -12290,13 +12410,13 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 					renderdata->gdl = roomSheenTexgenTurn(renderdata->gdl);
 					gSPSetGeometryMode(renderdata->gdl++, G_LIGHTING | G_TEXTURE_GEN);
 					gSPSetExtraGeometryModeEXT(renderdata->gdl++, G_ADDITIVE_EXT | G_TEXGEN_EYE_EXT | G_TEXGEN_TURN_EXT);
-					gSPDisplayList(renderdata->gdl++, m->metalgdl + (list - m->gdl));
+					xblaMeshDrawCutList(renderdata, m, model, cut, m->metalgdl + (list - m->gdl));
 				} else {
 					renderdata->gdl = roomSheenTexgenShift(renderdata->gdl);
 					gSPSetGeometryMode(renderdata->gdl++, G_LIGHTING | G_TEXTURE_GEN);
 					gSPClearExtraGeometryModeEXT(renderdata->gdl++, G_TEXGEN_TURN_EXT);
 					gSPSetExtraGeometryModeEXT(renderdata->gdl++, G_ADDITIVE_EXT | G_TEXGEN_EYE_EXT);
-					gSPDisplayList(renderdata->gdl++, m->sheengdl + (list - m->gdl));
+					xblaMeshDrawCutList(renderdata, m, model, cut, m->sheengdl + (list - m->gdl));
 				}
 
 				gSPClearExtraGeometryModeEXT(renderdata->gdl++, G_ADDITIVE_EXT | G_TEXGEN_EYE_EXT | G_TEXGEN_TURN_EXT);
@@ -12335,7 +12455,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				// A map of a GoldenEye prop's own is looked up at the vertices
 				// (xblaMeshEnvironmentVertices())
 				gSPSetExtraGeometryModeEXT(renderdata->gdl++, G_ADDITIVE_EXT | (m->envown ? 0 : G_ENVMAP_EXT));
-				gSPDisplayList(renderdata->gdl++, m->envgdl + (list - m->gdl));
+				xblaMeshDrawCutList(renderdata, m, model, cut, m->envgdl + (list - m->gdl));
 				gSPClearExtraGeometryModeEXT(renderdata->gdl++, G_ADDITIVE_EXT | G_ENVMAP_EXT);
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_VTX, osVirtualToPhysical(posed));
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_COL1, osVirtualToPhysical(boundcol));
@@ -12422,7 +12542,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 								0, 0, 0, COMBINED, 0, 0, 0, COMBINED);
 					}
 
-					gSPDisplayList(renderdata->gdl++, m->logogdl[k] + (list - m->gdl));
+					xblaMeshDrawCutList(renderdata, m, model, cut, m->logogdl[k] + (list - m->gdl));
 				}
 			}
 
@@ -12433,7 +12553,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				gDPSetEnvColor(renderdata->gdl++, 0, 0, 0, xblaLogoGlintShare * fade / 255);
 				gDPSetCombineLERP(renderdata->gdl++, TEXEL0, 0, SHADE, 0, 0, 0, 0, ENVIRONMENT,
 						0, 0, 0, COMBINED, 0, 0, 0, COMBINED);
-				gSPDisplayList(renderdata->gdl++, m->logoglint + (list - m->gdl));
+				xblaMeshDrawCutList(renderdata, m, model, cut, m->logoglint + (list - m->gdl));
 				gSPClearExtraGeometryModeEXT(renderdata->gdl++, G_ADDITIVE_EXT);
 			}
 
@@ -12448,7 +12568,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				gDPSetEnvColor(renderdata->gdl++, 0, 0, 0, xblaLogoAddMetalShare * fade / 255);
 				gDPSetCombineLERP(renderdata->gdl++, 0, 0, 0, TEXEL0, 0, 0, 0, ENVIRONMENT,
 						0, 0, 0, COMBINED, 0, 0, 0, COMBINED);
-				gSPDisplayList(renderdata->gdl++, m->logometal + (list - m->gdl));
+				xblaMeshDrawCutList(renderdata, m, model, cut, m->logometal + (list - m->gdl));
 				gSPClearExtraGeometryModeEXT(renderdata->gdl++, G_ADDITIVE_EXT);
 			}
 
@@ -12486,7 +12606,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		xblaMeshSetSpanMode(renderdata, node,
 				renderdata->zbufferenabled ? G_RM_AA_ZB_XLU_SURF2 : G_RM_AA_XLU_SURF2,
 				renderdata->zbufferenabled ? G_RM_AA_ZB_XLU_SURF : G_RM_AA_XLU_SURF);
-		gSPDisplayList(renderdata->gdl++, xlulist);
+		xblaMeshDrawCutList(renderdata, m, model, cut, xlulist);
 	}
 
 	// The soft span's second draw: all of it, blended by its texels' alpha
@@ -12503,7 +12623,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 			gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, 0);
 		}
 
-		gSPDisplayList(renderdata->gdl++, &m->gdl[xlupart]);
+		xblaMeshDrawCutList(renderdata, m, model, cut, &m->gdl[xlupart]);
 
 		if (renderdata->unk30 == 9) {
 			gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
@@ -12544,7 +12664,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		gDPSetRenderMode(renderdata->gdl++, G_RM_AA_ZB_XLU_SURF, G_RM_AA_ZB_XLU_SURF2);
 		gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0,
 				renderdata->unk30 == 9 ? (renderdata->envcolour >> 8) & 0xff : 0);
-		gSPDisplayList(renderdata->gdl++, fadelist);
+		xblaMeshDrawCutList(renderdata, m, model, cut, fadelist);
 
 		// A tinted pane's far look: GoldenEye's own pane, drawn by the game
 		// after the mesh at the same opacity (xblaMeshKeptLists()), so the
@@ -12559,7 +12679,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				&& tintStockNode != node) {
 			gDPSetPrimColor(renderdata->gdl++, 0, 0, XBLAMESH_TINT_R, XBLAMESH_TINT_G, XBLAMESH_TINT_B,
 					(renderdata->envcolour >> 8) & 0xff);
-			gSPDisplayList(renderdata->gdl++, m->tintgdl + (fadelist - m->gdl));
+			xblaMeshDrawCutList(renderdata, m, model, cut, m->tintgdl + (fadelist - m->gdl));
 			gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
 		}
 	}

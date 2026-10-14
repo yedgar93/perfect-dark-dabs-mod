@@ -86,7 +86,7 @@ static Gfx *rdResolveGdl(const struct modelrodata_dl *rodata, Gfx *gdl)
 }
 
 // The skeleton part a node is drawn with (nodes that aren't parts belong to the part above them)
-static s32 ragdollPartOfNode(struct ragdoll *rd, struct modelnode *node)
+s32 ragdollPartOfNode(struct ragdoll *rd, struct modelnode *node)
 {
 	while (node) {
 		u32 type = node->type & 0xff;
