@@ -1,3 +1,6 @@
+#ifdef PD_PHYSICS
+#include "ragdoll.h"
+#endif
 #include <ultra64.h>
 #include "constants.h"
 #include "game/body.h"
@@ -377,6 +380,9 @@ static bool modBodyHandOff(struct chrdata *chr)
 	body->ailist = NULL;
 	body->sleep = 0;
 
+#ifdef PD_PHYSICS
+	ragdollOnChrHandOff(chr, body);
+#endif
 	body->keptbody60 = chr->keptbody60;
 	chr->keptbody60 = -1;
 
@@ -789,6 +795,9 @@ static void modBodyPoseConcat(struct chrdata *chr, struct modbodypose *pose, Mtx
  */
 bool modBodyPoseApply(struct chrdata *chr, struct modelrenderdata *renderdata)
 {
+#ifdef PD_PHYSICS
+	if (ragdollIsChrRagdolled(chr)) return false;
+#endif
 	struct modbodypose *pose = modBodyPoseCapture(chr, renderdata);
 	Mtxf *matrices;
 
@@ -828,6 +837,9 @@ bool modBodyPoseApply(struct chrdata *chr, struct modelrenderdata *renderdata)
  */
 bool modBodyPoseHold(struct chrdata *chr, struct modelrenderdata *renderdata)
 {
+#ifdef PD_PHYSICS
+	if (ragdollIsChrRagdolled(chr)) return false;
+#endif
 	struct prop *prop = chr->prop;
 	struct modbodypose *pose;
 	Mtxf *cached;
@@ -878,6 +890,9 @@ bool modBodyPoseHold(struct chrdata *chr, struct modelrenderdata *renderdata)
  */
 bool modBodyPoseDraw(struct chrdata *chr)
 {
+#ifdef PD_PHYSICS
+	if (ragdollIsChrRagdolled(chr)) return false;
+#endif
 	struct model *model = chr->model;
 	struct modbodypose *pose;
 	u32 size;

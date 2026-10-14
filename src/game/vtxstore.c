@@ -14,6 +14,9 @@
 #include "lib/rng.h"
 #include "data.h"
 #include "types.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h" // MOD: ragdoll physics
+#endif
 #ifndef PLATFORM_N64
 #include "system.h"
 #endif
@@ -209,6 +212,9 @@ void *vtxstoreAllocate(s32 count, s32 index, struct modelnode *node, s32 level)
 				// when it is full anyway the hit goes without its blood
 				// rather than the room going without its dead.
 				&& !modBodyIsKept(chr)
+#endif
+#ifdef PD_PHYSICS
+				&& !ragdollIsChrRagdolled(chr)
 #endif
 				&& chr->act_dead.fadewheninvis == false) {
 			if (tally < 6) {

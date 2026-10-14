@@ -13,6 +13,9 @@
 #include "game/modoptions.h"
 #include "game/gfxmemory.h"
 #include "game/prop.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h"
+#endif
 #include "game/propsnd.h"
 #include "game/objectives.h"
 #include "game/floor.h"
@@ -1647,9 +1650,18 @@ void handTickAttack(s32 handnum)
 					// (chrprop.c), where Perfect Dark's fire six
 					s32 pellets = WEAPON_IS_GE(weaponnum) ? 5 : 6;
 
+#ifdef PD_PHYSICS
+					ragdollShotgunVolleyBegin();
+#endif
 					while (pellets-- > 0) {
+#ifdef PD_PHYSICS
+						ragdollShotgunPellet();
+#endif
 						shotCreate(handnum, true, true, 1, true);
 					}
+#ifdef PD_PHYSICS
+					ragdollShotgunVolleyEnd();
+#endif
 #else
 					shotCreate(handnum, true, true, 1, true);
 					shotCreate(handnum, true, true, 1, true);
@@ -1667,7 +1679,17 @@ void handTickAttack(s32 handnum)
 			break;
 		case HANDATTACKTYPE_MELEE:
 			chrUncloakTemporarily(g_Vars.currentplayer->prop->chr);
+#ifdef PD_PHYSICS
+			ragdollMeleeAttackBegin(); // MOD: ragdoll physics - Reaper blades cut, its bullets don't
+#endif
 			handInflictMeleeDamage(handnum, &gset, false);
+#ifdef PD_PHYSICS
+			ragdollMeleeAttackEnd();
+
+			if (weaponnum == WEAPON_REAPER) {
+				ragdollReaperGrind(); // MOD: ragdoll physics - and bodies
+			}
+#endif
 
 			// The blow landing, and the one report a swing always makes: the
 			// other melee type below is the arm coming up, which only weapons
@@ -1679,7 +1701,13 @@ void handTickAttack(s32 handnum)
 #endif
 			break;
 		case HANDATTACKTYPE_MELEENOUNCLOAK:
+#ifdef PD_PHYSICS
+			ragdollMeleeAttackBegin(); // MOD: ragdoll physics
+#endif
 			handInflictMeleeDamage(handnum, &gset, true);
+#ifdef PD_PHYSICS
+			ragdollMeleeAttackEnd();
+#endif
 			break;
 		case HANDATTACKTYPE_DETONATE:
 			playerActivateRemoteMineDetonator(g_Vars.currentplayernum);
@@ -3177,6 +3205,15 @@ bool propIsOfCdType(struct prop *prop, u32 types)
 					|| (chr->hidden & CHRHFLAG_PERIMDISABLED)) {
 				result = false;
 			}
+#ifdef PD_PHYSICS
+
+			// MOD: ragdoll physics - a ragdoll stays ACT_DIE until it settles,
+			// and a dying chr's standing cylinder stopped shots where the body
+			// had been: to the game a ragdoll is as a dead chr
+			if (result && chr->actiontype == ACT_DIE && ragdollIsChrRagdolled(chr)) {
+				result = false;
+			}
+#endif
 		}
 	} else if (prop->type == PROPTYPE_OBJ || prop->type == PROPTYPE_WEAPON) {
 		struct defaultobj *obj = prop->obj;

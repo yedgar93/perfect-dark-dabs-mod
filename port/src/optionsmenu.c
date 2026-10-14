@@ -50,6 +50,9 @@
 #include "roomsheen.h"
 #include "modenhance.h"
 #include "optionsmenu.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h"
+#endif
 #include "game/hudmsg.h"
 #include "langpack.h"
 
@@ -7693,7 +7696,32 @@ struct menudialogdef g_ExtendedAdvancedMenuDialog = {
 	NULL,
 };
 
+#ifdef PD_PHYSICS
+static MenuItemHandlerResult menuhandlerRagdollSwitch(s32 operation, struct menuitem *item, union handlerdata *data)
+{
+    s32 *value = item->param == 0 ? &g_RagdollsEnabled : &g_RagdollDismember;
+    if (operation == MENUOP_GET) return *value;
+    if (operation == MENUOP_SET) *value = data->checkbox.value;
+    return 0;
+}
+
+static struct menuitem g_RagdollMenuItems[] = {
+    { MENUITEMTYPE_CHECKBOX, 0, MENUITEMFLAG_LITERAL_TEXT, (uintptr_t)"Ragdolls\n", 0, menuhandlerRagdollSwitch },
+    { MENUITEMTYPE_CHECKBOX, 1, MENUITEMFLAG_LITERAL_TEXT, (uintptr_t)"Dismemberment\n", 0, menuhandlerRagdollSwitch },
+    { MENUITEMTYPE_SELECTABLE, 0, MENUITEMFLAG_SELECTABLE_CLOSESDIALOG, L_OPTIONS_213, 0, NULL },
+    { MENUITEMTYPE_END },
+};
+static struct menudialogdef g_RagdollMenuDialog = {
+    MENUDIALOGTYPE_DEFAULT, (uintptr_t)"Ragdolls & Dismemberment", g_RagdollMenuItems,
+    NULL, MENUDIALOGFLAG_LITERAL_TEXT, NULL,
+};
+#endif
+
 struct menuitem g_ExtendedMenuItems[] = {
+#ifdef PD_PHYSICS
+	{ MENUITEMTYPE_SELECTABLE, 0, MENUITEMFLAG_SELECTABLE_OPENSDIALOG | MENUITEMFLAG_LITERAL_TEXT,
+	  (uintptr_t)"Ragdolls & Dismemberment\n", 0, (void *)&g_RagdollMenuDialog },
+#endif
 	{
 		MENUITEMTYPE_SELECTABLE,
 		0,

@@ -45,6 +45,9 @@
 #include "utils.h"
 #include "gebean.h"
 #include "modenhance.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h" // MOD: ragdoll physics
+#endif
 
 u32 g_OsMemSize = 0;
 // Upstream's 16 is the N64's 8MB with room to spare. This fork spends memory the
@@ -132,6 +135,9 @@ static void cleanup(void)
 	texpackDumpFlush();
 	inputSaveBinds();
 	configSave(CONFIG_PATH);
+#ifdef PD_PHYSICS
+	ragdollSysShutdown(); // MOD: ragdoll physics
+#endif
 	videoShutdown();
 	// After it, for the same reason as the pack worker: the renderer is what
 	// asks for an XBLA mesh's texture, so nothing may close the package it
@@ -264,6 +270,10 @@ int main(int argc, const char **argv)
 	g_ValidGbcRomFound = romdataCheckGbcRom();
 
 	gameInit();
+
+#ifdef PD_PHYSICS
+	ragdollSysInit(); // MOD: ragdoll physics
+#endif
 
 	if (fsGetModDir()) {
 		modConfigLoad(MOD_CONFIG_FNAME);

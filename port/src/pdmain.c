@@ -63,6 +63,9 @@
 #include "lib/snd.h"
 #include "lib/memp.h"
 #include "lib/mema.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h" // MOD: ragdoll physics
+#endif
 #include "lib/model.h"
 #include "lib/profile.h"
 #include "lib/videbug.h"
@@ -473,6 +476,9 @@ void mainLoop(void)
 				memasize += modGetBodiesKept() * 500 * 12;
 			}
 
+#ifdef PD_PHYSICS
+			if (g_RagdollsEnabled) memasize += RD_MAINMEMA_EXTRA;
+#endif
 			memaReset(mempAlloc(memasize, MEMPOOL_STAGE), memasize);
 		}
 		langReset(g_StageNum);

@@ -1,5 +1,8 @@
 #include <ultra64.h>
 #include "constants.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h" // MOD: ragdoll physics
+#endif
 #include "game/game_096700.h"
 #include "game/acosfasinf.h"
 #include "game/quaternion.h"
@@ -828,6 +831,13 @@ void modelUpdateChrNodeMtx(struct modelrenderdata *arg0, struct model *model, st
 	Mtxf sp38;
 
 	if (rodata->chrinfo.mtxindex);
+#ifdef PD_PHYSICS
+
+	// MOD: ragdoll physics - pose comes from the ragdoll, not the animation
+	if (ragdollUpdateNodeMtx(arg0, model, node)) {
+		return;
+	}
+#endif
 
 	if (node->parent) {
 		sp24c = modelFindNodeMtx(model, node->parent, 0);
@@ -1160,6 +1170,13 @@ void modelUpdatePositionNodeMtx(struct modelrenderdata *renderdata, struct model
 	struct coord translate4;
 	struct coord scale4;
 
+#ifdef PD_PHYSICS
+	// MOD: ragdoll physics - pose comes from the ragdoll, not the animation
+	if (ragdollUpdateNodeMtx(renderdata, model, node)) {
+		return;
+	}
+
+#endif
 	anim = model->anim;
 
 	if (anim != NULL) {
@@ -1666,11 +1683,22 @@ void modelSetMatrices(struct modelrenderdata *renderdata, struct model *model)
 	renderdata->unk10 += model->definition->nummatrices;
 
 #if VERSION >= VERSION_PAL_BETA
+#ifdef PD_PHYSICS
+	// MOD: ragdoll physics - ragdolls must take the C path (the fast path reads the animation directly)
+	if (ragdollModelHasPose(model)
+			|| var8005efb0_2 || !modelasm00018680(renderdata, model)) {
+#else
 	if (var8005efb0_2 || !modelasm00018680(renderdata, model)) {
+#endif
 		modelUpdateMatrices(renderdata, model);
 	}
 #else
+#ifdef PD_PHYSICS
+	if (ragdollModelHasPose(model)
+			|| !modelasm00018680(renderdata, model)) { // MOD: ragdoll physics
+#else
 	if (!modelasm00018680(renderdata, model)) {
+#endif
 		modelUpdateMatrices(renderdata, model);
 	}
 #endif

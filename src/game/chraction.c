@@ -1,5 +1,8 @@
 #include <ultra64.h>
 #include "constants.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h" // MOD: ragdoll physics
+#endif
 #include "game/acosfasinf.h"
 #include "game/atan2f.h"
 #include "game/bg.h"
@@ -3525,6 +3528,11 @@ void chrBeginDeath(struct chrdata *chr, struct coord *dir, f32 relangle, s32 hit
 
 		chrDropConcealedItems(chr);
 	}
+#ifdef PD_PHYSICS
+
+	// MOD: ragdoll physics - real deaths of humans become ragdolls
+	ragdollOnChrDeath(chr, dir, hitpart, gset, knockout);
+#endif
 }
 
 #ifndef PLATFORM_N64
@@ -4228,6 +4236,12 @@ static bool chrYeetFromPosWithAction(struct chrdata *chr, struct coord *exppos, 
 		if (row->endframe >= 0.0f) {
 			modelSetAnimEndFrame(model, row->endframe);
 		}
+#ifdef PD_PHYSICS
+
+		// MOD: ragdoll physics - humans killed by a blast become ragdolls and
+		// are thrown by the explosion instead of the scripted animation
+		ragdollOnChrYeet(chr, exppos);
+#endif
 
 		return true;
 	}
@@ -5686,6 +5700,10 @@ void chrDamage(struct chrdata *chr, f32 damage, struct coord *vector, struct gse
 
 			// Handle one-hit knockouts
 			if (onehitko && chr->aibot == NULL && race == RACE_HUMAN) {
+#ifdef PD_PHYSICS
+				// MOD: ragdoll physics - knockouts fall as ragdolls
+				ragdollOnChrKnockOut(chr, vector, hitpart, gset);
+#endif
 				chrKnockOut(chr, angle, hitpart, gset);
 				psStopSound(chr->prop, PSTYPE_CHRTALK, 0);
 
@@ -5838,6 +5856,10 @@ void chrDamage(struct chrdata *chr, f32 damage, struct coord *vector, struct gse
 
 					if (makedizzy && chr->damage >= chr->maxdamage) {
 						chr->damage = chr->maxdamage - 0.1f;
+#ifdef PD_PHYSICS
+						// MOD: ragdoll physics - knockouts fall as ragdolls
+						ragdollOnChrKnockOut(chr, vector, hitpart, gset);
+#endif
 						chrKnockOut(chr, angle, hitpart, gset);
 					}
 
@@ -9790,7 +9812,12 @@ void chrFadeCorpse(struct chrdata *chr)
 
 void chrFadeCorpseWhenOffScreen(struct chrdata *chr)
 {
+#ifdef PD_PHYSICS
+	// MOD: ragdoll physics - ragdoll corpses stay (Ragdoll.RagdollMaxBodies limits them)
+	if (chr->actiontype == ACT_DEAD && !ragdollIsChrRagdolled(chr)) {
+#else
 	if (chr->actiontype == ACT_DEAD) {
+#endif
 		chr->act_dead.fadewheninvis = true;
 	}
 }
@@ -9945,6 +9972,7 @@ void chrTickDead(struct chrdata *chr)
  * from there next time the function is called. The function is called on
  * subsequent ticks while the chr is still in their injured or dying action.
  */
+
 void chrAlertOthersOfInjury(struct chrdata *chr, bool dying)
 {
 	s32 index = 0;
@@ -10099,6 +10127,19 @@ void chrTickDie(struct chrdata *chr)
 		return;
 	}
 
+#ifdef PD_PHYSICS
+	// MOD: ragdoll physics - the ragdoll decides when the chr is dead
+	if (ragdollIsChrRagdolled(chr)) {
+		if (ragdollIsChrSettled(chr)) {
+			chrBeginDead(chr);
+		} else {
+			ragdollAlertOthersOfDeath(chr); // looks a little above the body, not at its pelvis by the floor
+		}
+
+		return;
+	}
+
+#endif
 	// Human or Skedar
 	// If due, play thud 1 sound
 	if (chr->act_die.thudframe1 >= 0 && modelGetCurAnimFrame(model) >= chr->act_die.thudframe1) {
@@ -10145,6 +10186,13 @@ void chrTickDie(struct chrdata *chr)
 			modelSetAnimSpeed(model, 0.5, animGetNumFrames(ANIM_003C) - 51.0f);
 			return;
 		}
+#ifdef PD_PHYSICS
+
+		// MOD: ragdoll physics - a scripted death fall ends as a ragdoll
+		if (ragdollOnSpecialDieEnd(chr)) {
+			return;
+		}
+#endif
 
 		chrBeginDead(chr);
 	}
@@ -10225,6 +10273,11 @@ void chrTickDruggedComingUp(struct chrdata *chr)
 		}
 
 		chrDropConcealedItems(chr);
+#ifdef PD_PHYSICS
+
+		// MOD: ragdoll physics - a knockout falls as a ragdoll
+		ragdollOnKnockOutFall(chr);
+#endif
 	}
 }
 
@@ -10247,6 +10300,25 @@ void chrTickDruggedDrop(struct chrdata *chr)
 	};
 
 	static s32 thudindex = 0;
+#ifdef PD_PHYSICS
+
+	// MOD: ragdoll physics - a ragdolled knockout is out cold once the body
+	// comes to rest (the ragdoll makes its own thuds)
+	if (ragdollIsChrRagdolled(chr)) {
+		if (ragdollIsChrSettled(chr)) {
+			chr->actiontype = ACT_DRUGGEDKO;
+			chr->act_dead.fadetimer60 = chr->aibot ? 0 : -1;
+			chr->act_dead.fadenow = false;
+			chr->act_dead.fadewheninvis = false;
+			chr->act_dead.invistimer60 = 0;
+			chr->act_dead.notifychrindex = 0;
+			chr->sleep = 0;
+		}
+
+		ragdollAlertOthersOfDeath(chr); // looks a little above the body, not at its pelvis by the floor
+		return;
+	}
+#endif
 
 	// If due, play thud 1 sound
 	if (chr->act_die.thudframe1 >= 0 && modelGetCurAnimFrame(model) >= chr->act_die.thudframe1) {
@@ -15552,8 +15624,14 @@ void chraTickBg(void)
 				}
 
 #if VERSION >= VERSION_NTSC_1_0
+#ifdef PD_PHYSICS
+				if ((chr->actiontype == ACT_DEAD
+						|| (chr->actiontype == ACT_DRUGGEDKO && (chr->chrflags & CHRCFLAG_KEEPCORPSEKO) == 0))
+						&& !ragdollIsChrRagdolled(chr)) { // MOD: ragdoll physics - own limits
+#else
 				if (chr->actiontype == ACT_DEAD
 						|| (chr->actiontype == ACT_DRUGGEDKO && (chr->chrflags & CHRCFLAG_KEEPCORPSEKO) == 0)) {
+#endif
 					if (chr->hidden2 & CHRH2FLAG_SPAWNED) {
 						spawns[spawnslen] = chr;
 						spawnslen++;
@@ -15638,8 +15716,14 @@ void chraTickBg(void)
 				}
 #endif
 
+#ifdef PD_PHYSICS
+				if ((chr->actiontype == ACT_DEAD
+						|| (chr->actiontype == ACT_DRUGGEDKO && chr->prop && (chr->chrflags & CHRCFLAG_KEEPCORPSEKO) == 0))
+						&& !ragdollIsChrRagdolled(chr)) { // MOD: ragdoll physics - own limits (Ragdoll.RagdollMaxBodies)
+#else
 				if (chr->actiontype == ACT_DEAD
 						|| (chr->actiontype == ACT_DRUGGEDKO && chr->prop && (chr->chrflags & CHRCFLAG_KEEPCORPSEKO) == 0)) {
+#endif
 					if (chr->prop->flags & PROPFLAG_ONANYSCREENPREVTICK) {
 						// On-screen
 						if (chr->act_dead.fadetimer60 < 0 && !chr->act_dead.fadenow) {
