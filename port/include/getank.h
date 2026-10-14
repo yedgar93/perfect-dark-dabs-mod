@@ -17,6 +17,9 @@ void geTankReset(void);
 
 s32 geTankIsDriving(void);
 
+// the cannon in hand: its sight held in the middle of the view (bondmove.c)
+s32 geTankHoldsSight(void);
+
 // this player, whoever the current one is
 s32 geTankPlayerDriving(struct player *player);
 
@@ -73,5 +76,8 @@ struct prop *geTankShellTank(struct prop *ownerprop);
 
 // GoldenEye's tank model placed as a plain object: its cannon's flash off
 void geTankUpdateParkedModel(struct prop *prop);
+
+// The current player died, in the tank or not (playerDieByShooter()).
+void geTankPlayerDied(void);
 
 #endif

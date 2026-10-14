@@ -660,6 +660,9 @@ void setupCreateObject(struct defaultobj *obj, s32 cmdindex)
 				if (cdFindFloorRoomYColourFlagsAtPos(&prop2->pos, prop2->rooms, &y, &floorcol, NULL) > 0) {
 					obj->floorcol = floorcol;
 				}
+
+				// and its rooms GoldenEye's way (chrpropUpdateRoomList())
+				geRoomObjRooms(obj);
 			}
 #endif
 
@@ -1323,10 +1326,32 @@ void setupCreateDoor(struct doorobj *door, s32 cmdindex)
 
 	setupLoadModeldef(modelnum);
 
+#ifndef PLATFORM_N64
+	// GoldenEye's airlock pairs - Dam's two gates, one shut before the other
+	// opens - are the mission's, for its truck. In a Combat Simulator match
+	// a simulant walking up to one gate held it open and the other shut for
+	// as long as it stood there, and whoever was on the wrong side was shut
+	// in (F3 20261002-234813, 20260930-012121). An arena's doors open on
+	// their own.
+	if (g_Vars.normmplayerisrunning && geRoomActive()) {
+		door->base.flags2 &= ~OBJFLAG2_AIRLOCKDOOR;
+	}
+#endif
+
 	if (door->doorflags & DOORFLAG_ROTATEDPAD) {
 		padRotateForDoor(door->base.pad);
 	}
 
+#ifndef PLATFORM_N64
+	// A converted GoldenEye mission's door carries the portal GoldenEye's own
+	// setupDoor() gives it, worked out by the conversion on GoldenEye's tiles
+	// from the tile the door's pad names (geconvert.c's geSoloDoors(); -1 for
+	// none, the byte after laserfade marking it given). Read before
+	// doorInit() writes -1 over it.
+	if (geRoomActive() && door->unusedmaybe[0] == GE_DOOR_PORTAL_GIVEN) {
+		portalnum = door->portalnum;
+	} else
+#endif
 	if (door->base.flags & OBJFLAG_DOOR_HASPORTAL) {
 		portalnum = setupGetPortalByDoorPad(door->base.pad);
 	}
@@ -1476,17 +1501,25 @@ void setupCreateDoor(struct doorobj *door, s32 cmdindex)
 
 #ifndef PLATFORM_N64
 			// A converted level's door is drawn in both of its portal's rooms,
-			// or a shut door is missing from one side of itself (geroom.h)
-			if (prop && door->portalnum >= 0 && geRoomActive()) {
+			// or a shut door is missing from one side of itself (geroom.h) -
+			// where the conversion has not given it GoldenEye's own rooms
+			if (prop && door->portalnum >= 0 && geRoomActive() && !geRoomDoorRoomsGiven(door)) {
 				geRoomDoorPortalRooms(prop, door->portalnum);
 			}
 #endif
 		}
 
 #ifndef PLATFORM_N64
-		// and in the rooms of the floor either side of it, portal or none
+		// A converted mission's door is in the rooms GoldenEye's setupDoor()
+		// gives it - its tile's, and the side room - which the conversion
+		// worked out on GoldenEye's tiles (geconvert.c's geSoloDoors());
+		// otherwise in the rooms of the floor either side of it, portal or none
 		if (prop && geRoomActive()) {
-			geRoomDoorSideRooms(prop, &pad);
+			if (geRoomDoorRoomsGiven(door)) {
+				geRoomDoorGivenRooms(prop, door);
+			} else {
+				geRoomDoorSideRooms(prop, &pad);
+			}
 		}
 #endif
 
@@ -1554,6 +1587,11 @@ void setupLoadBriefing(s32 stagenum, u8 *buffer, s32 bufferlen, struct briefing 
 		// objectives are its own (Mod.GePlusRevisionFixes)
 		if (gexFrontGetRevisionFixes()) {
 			setupfilenum = modloaderGetStageRevisionSetup(g_Stages[stageindex].id, setupfilenum);
+		}
+
+		// and in the HD look the Community Edition's copy (geRoomCeData())
+		if (geRoomCeData()) {
+			setupfilenum = modloaderGetStageCeFile(g_Stages[stageindex].id, setupfilenum);
 		}
 #endif
 #ifdef PLATFORM_N64 // bug?
@@ -1673,6 +1711,8 @@ void setupLoadFiles(s32 stagenum)
 	modBorrowStageModels(stagenum);
 	// and a Stage Loader map's own models (the GoldenEye remake's props)
 	modloaderApplyStageModels(stagenum);
+	// and whose guns: a GoldenEye ROM hack's own on its stages (geguns.c)
+	gegunsStageSet(stagenum);
 	// and whose unarmed it is: GoldenEye's slappers on its own levels
 	geslappersStageLoad(stagenum);
 #endif
@@ -1694,6 +1734,13 @@ void setupLoadFiles(s32 stagenum)
 		// (geconvert.c's revisionSetup())
 		if (gexFrontGetRevisionFixes()) {
 			filenum = modloaderGetStageRevisionSetup(stagenum, filenum);
+		}
+
+		// and in the HD look the Community Edition's copy, where one of its
+		// fixes changes the setup (geRoomCeData(), geconvert.c's
+		// g_RomPatchesOn); the N64 look keeps the cartridge's
+		if (geRoomCeData()) {
+			filenum = modloaderGetStageCeFile(stagenum, filenum);
 		}
 #endif
 
@@ -1718,7 +1765,13 @@ void setupLoadFiles(s32 stagenum)
 
 		g_LoadType = LOADTYPE_PADS;
 
+#ifndef PLATFORM_N64
+		g_StageSetup.padfiledata = fileLoadToNew(geRoomCeData()
+				? modloaderGetStageCeFile(stagenum, g_Stages[g_StageIndex].padsfileid)
+				: g_Stages[g_StageIndex].padsfileid, FILELOADMETHOD_DEFAULT, LOADTYPE_PADS);
+#else
 		g_StageSetup.padfiledata = fileLoadToNew(g_Stages[g_StageIndex].padsfileid, FILELOADMETHOD_DEFAULT, LOADTYPE_PADS);
+#endif
 
 		g_StageSetup.waypoints = NULL;
 		g_StageSetup.waygroups = NULL;
@@ -2014,6 +2067,12 @@ void setupCreateProps(s32 stagenum)
 	escstepx = 0;
 	escstepy = 0;
 	g_Vars.textoverrides = NULL;
+
+#ifndef PLATFORM_N64
+	// a converted mission's collectables, on Perfect Dark's key cards, by
+	// GoldenEye's names; a rename the setup makes below goes before them
+	gegadgetsCreateProps();
+#endif
 
 	for (j = 0; j != ARRAYCOUNT(g_Briefing.objectivenames); j++) {
 		g_Briefing.objectivenames[j] = 0;
@@ -2616,6 +2675,9 @@ void setupCreateProps(s32 stagenum)
 						}
 
 						invInsertTextOverride(override);
+#ifndef PLATFORM_N64
+						gegadgetsTextOverride(override);
+#endif
 					}
 					break;
 				case OBJTYPE_BRIEFING:

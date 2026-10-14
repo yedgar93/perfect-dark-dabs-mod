@@ -1689,14 +1689,24 @@ void menuPushDialog(struct menudialogdef *dialogdef)
 
 			if (sibling);
 
-			menuPlaySound(MENUSOUND_OPENDIALOG);
+#ifndef PLATFORM_N64
+			// A dialog pushed under GE Plus's intro or folder is Perfect
+			// Dark's, and is not seen: it is not heard either. Back from a
+			// GoldenEye mission the Perfect Menu and the pause under the
+			// folder each played Perfect Dark's dialog sound over GoldenEye's
+			// report page (F3 20260930-002952).
+			if (!geIntroIsActive() && !gexFrontIsActive())
+#endif
+			{
+				menuPlaySound(MENUSOUND_OPENDIALOG);
 
-			if (dialogdef->type == MENUDIALOGTYPE_DANGER) {
-				menuPlaySound(MENUSOUND_ERROR);
-			}
+				if (dialogdef->type == MENUDIALOGTYPE_DANGER) {
+					menuPlaySound(MENUSOUND_ERROR);
+				}
 
-			if (dialogdef->type == MENUDIALOGTYPE_SUCCESS) {
-				menuPlaySound(MENUSOUND_SUCCESS);
+				if (dialogdef->type == MENUDIALOGTYPE_SUCCESS) {
+					menuPlaySound(MENUSOUND_SUCCESS);
+				}
 			}
 		}
 	}
@@ -2288,14 +2298,21 @@ Gfx *menuRenderModel(Gfx *gdl, struct menumodel *menumodel, s32 modeltype)
 						menumodel->headmodeldef = modeldefLoad(headfilenum, menumodel->allocstart + bodyfilelen2, totalfilelen - bodyfilelen2, &texpool);
 						fileGetLoadedSize(headfilenum);
 #ifndef PLATFORM_N64
-						headfitSetBodyModel(menumodel->bodymodeldef);
-#endif
+						bodyCalculateHeadOffsetForBody(menumodel->headmodeldef, headnum, bodynum, menumodel->bodymodeldef);
+#else
 						bodyCalculateHeadOffset(menumodel->headmodeldef, headnum, bodynum);
+#endif
 						modelAllocateRwData(menumodel->headmodeldef);
 					}
 
 					modelInit(&menumodel->bodymodel, menumodel->bodymodeldef, menumodel->rwdata, true);
 					animInit(&menumodel->bodyanim);
+#ifndef PLATFORM_N64
+					// A preview's files and textures share one allocation;
+					// what the textures left of it, negative if they ran over
+					traceNoteEvent("menu preview: body %d head %d, files %d of %u bytes, %d left for textures",
+							bodynum, headnum, totalfilelen, menumodel->alloclen, texGetPoolFreeBytes(&texpool));
+#endif
 
 #ifdef PLATFORM_64BIT
 					menumodel->bodymodel.rwdatalen = 256 + 128;
@@ -2351,6 +2368,11 @@ Gfx *menuRenderModel(Gfx *gdl, struct menumodel *menumodel, s32 modeltype)
 					menumodel->bodymodeldef = modeldefLoad(menumodel->newparams, menumodel->allocstart, totalfilelen, &texpool);
 
 					fileGetLoadedSize(menumodel->newparams);
+#ifndef PLATFORM_N64
+					traceNoteEvent("menu preview: model file 0x%x, file %d of %u bytes, %d left for textures",
+							MENUMODELPARAMS_GET_FILENUM(menumodel->newparams), totalfilelen, menumodel->alloclen,
+							texGetPoolFreeBytes(&texpool));
+#endif
 					modelAllocateRwData(menumodel->bodymodeldef);
 					modelInit(&menumodel->bodymodel, menumodel->bodymodeldef, menumodel->rwdata, true);
 					animInit(&menumodel->bodyanim);
@@ -4812,7 +4834,20 @@ void dialogTick(struct menudialog *dialog, struct menuinputs *inputs, u32 tickfl
 				}
 			}
 		} else {
+#ifndef PLATFORM_N64
+			// A dialog waits for the menus' background to have faded in, and
+			// the fade from none waits for the blur's still - which is put off
+			// for as long as GE Plus's intro or folder hides the level
+			// (schedConsiderScreenshot()). After a GE Plus mission the
+			// Perfect Menu under the folder had not faded in yet, so F3's
+			// Report a Problem over the folder stayed a title bar and no more
+			// (F3 20261002-012728). Over the folder the folder is the
+			// background, and the dialog opens.
+			if (g_MenuData.nextbg == 255 || g_MenuData.bg != 0
+					|| geIntroIsActive() || gexFrontIsActive()) {
+#else
 			if (g_MenuData.nextbg == 255 || g_MenuData.bg != 0) {
+#endif
 				dialog->state = MENUDIALOGSTATE_OPENING;
 				dialog->redrawtimer = 0.0f;
 				dialog->statefrac = 0.5f;
@@ -6017,7 +6052,11 @@ Gfx *menuRender(Gfx *gdl)
 	// A blurred backdrop held back while the folder was up
 	// (schedConsiderScreenshot()) is taken from this frame: the level alone,
 	// not the menus over it
-	if (g_MenuBlurDeferred && g_MenuData.screenshottimer) {
+	// - but never F3's Report a Problem over the folder, which held no blur
+	// and was drawn on none of those frames: while the folder is up the blur
+	// is put off for good, so the dialog was never drawn at all and the
+	// tester typed into it blind (F3 20260930-002736, 012311)
+	if (g_MenuBlurDeferred && g_MenuData.screenshottimer && !overfront) {
 		return gdl;
 	}
 

@@ -25,6 +25,7 @@
 #include <math.h>
 #include <ultra64.h>
 #include <PR/ultratypes.h>
+#include "xblaswitch.h"
 #include "constants.h"
 #include "types.h"
 #include "config.h"
@@ -56,8 +57,14 @@
 #include "game/dlights.h"
 #include "game/game_0b0fd0.h"
 #include "game/playermgr.h"
+#include "game/file.h"
+#include "bss.h"
+#include "game/modeldef.h"
+#include "modloader.h"
 #include "lib/lib_2f490.h"
 #include "data.h"
+#include "trace.h"
+#include "gfxmesh.h"
 
 #ifndef PLATFORM_N64
 
@@ -321,6 +328,17 @@ struct xblameshbuilt {
 	Mtxf *posedmtx;    // the matrix that copy is drawn under, when it is not the bone's own
 	s32 posedfine;     // and how many steps of that copy make one of the game's units
 
+	// The renderer's copy of the mesh on the GPU (G_MESH_EXT, gfxmesh.h), and
+	// the palette that poses it there instead, made once a frame per model the
+	// way the posed copy is: see xblaMeshGpuPalette()
+	struct gfxmesh gpu;
+	struct gfxmesh envgpu;   // the same over envst, for the reflection passes
+	Vtx *envst;              // the vertices with each reflecting one's atlas cell in s and t: see xblaMeshEnvStatic()
+	const struct model *gpumodel;
+	u32 gpuframe;
+	f32 *gpupal;
+	Mtxf *gpumtx;
+
 	// The bruised colours made this frame, and who for; NULL for a model with
 	// no bruise on it, which draws the mesh's own. See xblaMeshBruiseColours().
 	const struct model *bruisemodel;
@@ -330,6 +348,9 @@ struct xblameshbuilt {
 	const struct model *deformmodel;   // objDeform()'s vertices, mirrored for one model a frame
 	u32 deformframe;
 	Vtx *deformvtx;
+	const struct model *deformoffmodel;   // and the offsets they are made from
+	u32 deformoffframe;
+	f32 *deformoff;
 
 	// The trimmed copy already made this frame, for a door the game is
 	// drawing from trimmed vertices - see xblaMeshNodeTrim(). Keyed the way
@@ -355,6 +376,7 @@ struct xblameshbuilt {
 	Gfx *logoglint;    // gdl with the materials that glint, on the glint's picture
 	Gfx *logometal;    // gdl with the materials the levels' metal is added over
 	Gfx *tintgdl;      // gdl with only the tinted panes, in a flat colour: see xblaMeshTintCopy()
+	s32 tintonly;      // and the mesh is nothing but those panes (the window prop)
 	Col *logocol;      // the bind normals as colours, for the logo passes' lighting
 	s32 logotried;
 	s32 numenvcells;
@@ -424,6 +446,7 @@ struct xblameshbuilt {
 	s32 neckbackmtx;   // its matrix there (-1 for none)
 	f32 neckbackofs[3]; // and the head's joint from it at rest
 	s32 beanrow;       // the row it was built from, for the hood's test (gebeanRowKeepsHood())
+	s32 beangen;       // romdataFilesGeneration() it was built under: see xblaMeshResetBeanMeshes()
 	// What handtint.c asks of a skinned mesh (xblaMeshAnalyse()): the
 	// textures its materials bind, with how many triangles of each hang off
 	// each bone, and - for a character - the colour each bone is painted,
@@ -437,6 +460,20 @@ struct xblameshbuilt {
 	u8 beanscreenfit;  // a monitor's screens moved onto Bean's own (gebeanmats.screenfit)
 	f32 beanscreenquad[4][4][3]; // and where to (gebeanmats.screenquad)
 	u8 beanscreenrecess; // screens on Bean's recess, drawn as decals (gebeanmats.screenrecess)
+	// A rigid prop's list whose own triangles the mesh leaves out, drawn in
+	// GoldenEye's look inside it (gebeanmats.keepvtx, xblaMeshKeptLists()):
+	// the vertices kept, the list node, and the lists made from the node's
+	// for this stage, with what they were made from
+	u8 *beankeepvtx;
+	s32 beannumkeepvtx;
+	s32 beankeeplist;
+	Gfx *beankeptgdl[2];
+	const Gfx *beankeptsrc[2];
+	// Parts turned about hubs of their own (gebeanmats.hubmtx, xblaMeshHubShift())
+	s32 beannumhubs;
+	s8 beanhubmtx[GEBEAN_MAXHUBS];
+	s8 beanhubparent[GEBEAN_MAXHUBS];
+	f32 beanhubshift[GEBEAN_MAXHUBS][3];
 };
 
 // The pictures a build's materials draw with, when they are not records.
@@ -540,6 +577,7 @@ static f32 xblaMeshBEF32(const u8 *p)
 }
 
 static void xblaMeshRegisterPackModel(struct modeldef *modeldef, u16 fileid);
+static void xblaMeshPreloadModel(struct modeldef *modeldef);
 static void xblaMeshFreePackMeshes(void);
 static void xblaMeshDropKeptSlot(void);
 static void xblaMeshResetBeanMeshes(void);
@@ -550,6 +588,11 @@ static void xblaMeshResetBeanMeshes(void);
 
 static void xblaMeshCloseUp(void)
 {
+	for (s32 i = 0; built && i < numRecords; i++) {
+		gfxMeshForget(&built[i].gpu);
+		gfxMeshForget(&built[i].envgpu);
+	}
+
 	x360StfsStreamClose(&packed);
 	x360StfsClose(&stfs);
 	free(recOffset);
@@ -888,7 +931,7 @@ static s16 xblaMeshNodeMtx(const u8 *file, u32 len, u32 nodeoff)
  */
 static s32 xblaMeshEntryLive(const struct xblameshentry *e)
 {
-	return optEnabled || e->releaseonly;
+	return xblaMeshGetEnabled() || e->releaseonly;
 }
 
 static struct xblameshentry *xblaMeshSlotFor(const struct modelnode *node)
@@ -1929,7 +1972,7 @@ static void xblaMeshMatchModel(struct modeldef *modeldef, u16 fileid)
 	// drew no mesh at all and said nothing: nothing unpacked, so nothing was
 	// ever matched, and the checkbox that would have unpacked it was already
 	// on. Off, this is still the speculative pass that keeps the switch live.
-	if (!xblaMeshOpen(optEnabled)) {
+	if (!xblaMeshOpen(xblaMeshGetEnabled())) {
 		return;
 	}
 
@@ -2078,6 +2121,10 @@ void xblaMeshRegisterModel(struct modeldef *modeldef, u16 fileid)
 	// matcher's rather than over it: a node can have both, and which of the
 	// two draws is decided at the draw, live.
 	xblaMeshRegisterPackModel(modeldef, fileid);
+
+	// While a GoldenEye stage loads in the HD look, its GoldenEye meshes are
+	// built now rather than on their first frame on screen
+	xblaMeshPreloadModel(modeldef);
 }
 
 // Both sides of the pose arena: kilobytes held and chunks taken.
@@ -2103,6 +2150,8 @@ static void xblaMeshArenaStats(u32 *kb, s32 *chunks);
  * memory they name. This reset is then what clears the ones whose model is
  * never loaded again.
  */
+static void xblaMeshHatSeatsReset(void);
+
 void xblaMeshResetModels(void)
 {
 	// Read before the table is emptied: this is the level that is ending.
@@ -2132,6 +2181,9 @@ void xblaMeshResetModels(void)
 	// are node-local to models in the pool being handed back.
 	xblaMeshFreePackMeshes();
 	xblaMeshResetBeanMeshes();
+
+	// the hats' seats are the stage's chrs'
+	xblaMeshHatSeatsReset();
 
 	// What the meshes built so far are holding. They are kept for the life of
 	// the process on purpose - a mesh is the same in every level that uses it,
@@ -5069,6 +5121,10 @@ static Gfx *xblaMeshLogoCopy(const struct xblameshbuilt *m, s32 which,
 #define XBLAMESH_TINT_G 21
 #define XBLAMESH_TINT_B 20
 
+// The tinted pane xblaMeshRenderNode() has just drawn whose own GoldenEye pane
+// the game draws after it (xblaMeshKeptLists()), NULL for none
+static const struct modelnode *tintStockNode;
+
 /**
  * A GoldenEye tinted pane's far colour, as a copy of gdl: the tinted panes
  * (gebeanmats.tinted) under a combiner that is the primitive colour and alpha
@@ -5081,13 +5137,16 @@ static Gfx *xblaMeshLogoCopy(const struct xblameshbuilt *m, s32 which,
  * and Glass See-Through's cap on the opacity holds it back the same way.
  * NULL for a mesh with no tinted pane.
  */
-static Gfx *xblaMeshTintCopy(const struct xblameshbuilt *m, const void *const *panes, s32 num)
+static Gfx *xblaMeshTintCopy(const struct xblameshbuilt *m, const void *const *panes, s32 num, s32 *only)
 {
 	Gfx *copy;
 	Gfx combine;
 	Gfx *cc = &combine;
 	s32 keep = 0;
 	s32 any = 0;
+	s32 other = 0;
+
+	*only = 0;
 
 	if (num == 0) {
 		return NULL;
@@ -5129,6 +5188,7 @@ static Gfx *xblaMeshTintCopy(const struct xblameshbuilt *m, const void *const *p
 			if (!keep) {
 				copy[i].words.w0 = (uintptr_t)G_NOOP << 24;
 				copy[i].words.w1 = 0;
+				other |= op == (u8)G_TRI1 || op == (u8)G_TRI4;
 			} else {
 				any = 1;
 			}
@@ -5139,6 +5199,8 @@ static Gfx *xblaMeshTintCopy(const struct xblameshbuilt *m, const void *const *p
 		free(copy);
 		return NULL;
 	}
+
+	*only = !other;
 
 	return copy;
 }
@@ -6102,6 +6164,8 @@ static void xblaMeshDropStale(struct xblameshbuilt *m, s32 fileid)
 	if (m->state > 0 && m->packgen != modelpackGetGeneration() &&
 			(m->frompack || (fileid > 0 && modelpackFindXbla(fileid)))) {
 		sysLogPrintf(LOG_NOTE, "xblamesh: the model pack changed; a mesh is built again (the old one is kept, not freed)");
+		gfxMeshForget(&m->gpu);
+		gfxMeshForget(&m->envgpu);
 		memset(m, 0, sizeof(*m));
 	}
 }
@@ -6477,6 +6541,8 @@ static struct xblameshbuilt *xblaMeshBuildPack(const struct xblameshentry *e)
 		// build holds nothing, and is dropped so that the next pack's file for
 		// the same model is not refused for the last pack's file's sake.
 		if (m->state > 0) {
+			gfxMeshForget(&m->gpu);
+			gfxMeshForget(&m->envgpu);
 			packBuilt[fileid] = NULL;
 			m = NULL;
 		} else {
@@ -6637,6 +6703,9 @@ static void xblaMeshFreePackMeshes(void)
 			n++;
 		}
 
+		gfxMeshForget(&m->gpu);
+		gfxMeshForget(&m->envgpu);
+		free(m->envst);
 		free(m->gdl);
 		free(m->vertices);
 		free(m->colours);
@@ -6668,6 +6737,9 @@ static void xblaMeshFreePackMeshes(void)
 // the table names every time it loads. One that would not build is tried
 // again at the next stage, in case the copy was missing then.
 static struct xblameshbuilt **beanBuilt[2];
+
+// How many of them keep some of their model's own triangles (xblaMeshKeptLists())
+static s32 beanNumKeeping;
 
 /**
  * Builds the character for a GoldenEye X model: a mesh in 4J's layout from
@@ -6747,6 +6819,7 @@ static struct xblameshbuilt *xblaMeshBuildBeanOnce(const struct xblameshentry *e
 			free(bmats->env[i]);
 		}
 
+		free(bmats->keepvtx);
 		free(bmats);
 		return NULL;
 	}
@@ -6782,6 +6855,8 @@ static struct xblameshbuilt *xblaMeshBuildBeanOnce(const struct xblameshentry *e
 			twosided |= 1ull << bmats->hood[k];
 		}
 	}
+
+	twosided |= bmats->twosided;
 	memcpy(m->beanbare, bmats->bare, sizeof(m->beanbare));
 	memcpy(m->beanspentgroup, bmats->spent, sizeof(m->beanspentgroup));
 
@@ -6802,9 +6877,20 @@ static struct xblameshbuilt *xblaMeshBuildBeanOnce(const struct xblameshentry *e
 	m->beanfromchar = bmats->fromchar;
 	m->beanopenrim = bmats->openrim;
 	m->beanrow = e->beanrow;
+	m->beangen = romdataFilesGeneration();
 	m->beanscreenfit = bmats->screenfit;
 	memcpy(m->beanscreenquad, bmats->screenquad, sizeof(m->beanscreenquad));
 	m->beanscreenrecess = bmats->screenrecess;
+	beanNumKeeping += bmats->keepvtx && !m->beankeepvtx;
+	beanNumKeeping -= !bmats->keepvtx && m->beankeepvtx;
+	free(m->beankeepvtx);
+	m->beankeepvtx = bmats->keepvtx;
+	m->beannumkeepvtx = bmats->keepvtx ? bmats->numkeepvtx : 0;
+	m->beankeeplist = bmats->keepvtx ? bmats->keeplist : -1;
+	m->beannumhubs = bmats->numhubs;
+	memcpy(m->beanhubmtx, bmats->hubmtx, sizeof(m->beanhubmtx));
+	memcpy(m->beanhubparent, bmats->hubparent, sizeof(m->beanhubparent));
+	memcpy(m->beanhubshift, bmats->hubshift, sizeof(m->beanhubshift));
 
 	// The tinted panes, by their picture
 	for (s32 i = 0; i < mats.num; i++) {
@@ -6835,7 +6921,7 @@ static struct xblameshbuilt *xblaMeshBuildBeanOnce(const struct xblameshentry *e
 	}
 
 	if (ok) {
-		m->tintgdl = xblaMeshTintCopy(m, tintpanes, numtint);
+		m->tintgdl = xblaMeshTintCopy(m, tintpanes, numtint, &m->tintonly);
 	}
 
 	return ok ? m : NULL;
@@ -6885,15 +6971,124 @@ s32 xblaMeshPrebuildBean(struct modeldef *modeldef)
 			|| e->packpart == XBLAMESH_NOPART || !e->fileid
 			|| modelpackFindN64(e->fileid) != NULL
 			|| (e->matched && xblaMeshEntryLive(e) && opened > 0)
-			|| !(optEnabled || gebeanRowIsPool(e->beanrow) || gebeanRowIsFirstPerson(e->beanrow))) {
+			|| !(xblaMeshGetEnabled() || gebeanRowIsPool(e->beanrow) || gebeanRowIsFirstPerson(e->beanrow))) {
 		return -1;
 	}
 
-	return xblaMeshBuildBean(e, !optEnabled) ? 1 : 0;
+	return xblaMeshBuildBean(e, !xblaMeshGetEnabled()) ? 1 : 0;
+}
+
+/* -------------------------------------------------------------------------
+ * A GoldenEye stage's HD meshes, built while it loads
+ *
+ * A GoldenEye model's HD mesh was built on the game thread the first frame it
+ * was drawn: 20-100 ms for a first-person gun, 4-15 ms for a character, a
+ * freeze each time something new came into view or into the hand (F3
+ * 20261003-123556). While a GE Plus or converted stage loads in the HD look,
+ * every model it loads has its mesh built as it registers - its characters,
+ * heads, props and the guns its guards and pickups carry - and hdpreload.c
+ * loads the first-person models of the guns the stage hands out, here, into
+ * memory of their own, long enough to build them. The meshes are the cache
+ * the draw reads (beanBuilt), so the draw then finds them made.
+ * ------------------------------------------------------------------------- */
+
+static s32 preloadOn;
+static s32 preloadBuilt;
+static u64 preloadUs;
+
+void xblaMeshPreloadSet(s32 on)
+{
+	preloadOn = on;
+
+	if (on) {
+		preloadBuilt = 0;
+		preloadUs = 0;
+	}
+}
+
+s32 xblaMeshPreloading(void)
+{
+	return preloadOn;
+}
+
+void xblaMeshPreloadStats(s32 *built, u64 *us)
+{
+	*built = preloadBuilt;
+	*us = preloadUs;
+}
+
+static void xblaMeshPreloadModel(struct modeldef *modeldef)
+{
+	u32 before;
+	u64 t0;
+
+	if (!preloadOn || !modeldef) {
+		return;
+	}
+
+	before = g_XblaMeshNumMeshes;
+	t0 = sysGetMicroseconds();
+	xblaMeshPrebuildBean(modeldef);
+	preloadUs += sysGetMicroseconds() - t0;
+	preloadBuilt += g_XblaMeshNumMeshes != before;
+}
+
+s32 xblaMeshPreloadModelFile(u16 fileid)
+{
+	struct fileinfo saved;
+	struct modeldef *modeldef;
+	const u8 prevloadtype = g_LoadType;
+	const u32 before = g_XblaMeshNumMeshes;
+	u32 size;
+	u8 *mem;
+	u8 *at;
+
+	if (!preloadOn || !fileid || fileid >= NUM_FILE_SLOTS) {
+		return 0;
+	}
+
+	// built or tried already, this stage or one before it
+	if (beanBuilt[0] && beanBuilt[0][fileid] && beanBuilt[0][fileid]->state) {
+		return 0;
+	}
+
+	// Loaded the way bgunTickGunLoad() loads a gun, into memory of its own,
+	// and the file's record put back after: the gun's own load is untouched
+	size = ALIGN64(fileGetInflatedSize(fileid, LOADTYPE_MODEL)) + 0x8000;
+	mem = malloc(size + 64);
+
+	if (!mem) {
+		return 0;
+	}
+
+	at = (u8 *)ALIGN64((uintptr_t)mem);
+	saved = g_FileInfo[fileid];
+	g_FileInfo[fileid].loadedsize = 0;
+	g_LoadType = LOADTYPE_GUN;
+	modeldef = fileLoadToAddr(fileid, FILELOADMETHOD_EXTRAMEM, at, size);
+	g_LoadType = prevloadtype;
+
+	if (fileGetLoadedSize(fileid) != 0 && modeldef) {
+		modelPromoteTypeToPointer(modeldef);
+		modelPromoteOffsetsToPointers(modeldef, 0x05000000, (uintptr_t)modeldef);
+
+		// builds it (preloadOn), then everything filed against this memory
+		// goes before the memory does: the mesh is kept by file, not by model
+		xblaMeshRegisterModel(modeldef, fileid);
+		xblaMeshForgetModel(modeldef);
+	}
+
+	g_FileInfo[fileid] = saved;
+	free(mem);
+
+	return g_XblaMeshNumMeshes != before;
 }
 
 static void xblaMeshResetBeanMeshes(void)
 {
+	const s32 generation = romdataFilesGeneration();
+	s32 dropped = 0;
+
 	for (s32 look = 0; look < ARRAYCOUNT(beanBuilt); look++) {
 		if (!beanBuilt[look]) {
 			continue;
@@ -6906,7 +7101,32 @@ static void xblaMeshResetBeanMeshes(void)
 				continue;
 			}
 
+			// Built from whatever file had this slot before romdataResetFiles()
+			// (a mod swap): the slot can name another model now, and every
+			// draw path reads the mesh by slot. Let go of here, at the stage's
+			// end, where nothing of the next stage has looked it up yet. Leaked
+			// rather than freed, as xblaMeshDropStale() does for the same
+			// reason: the render thread may still be in its lists. The next
+			// load builds again (xblaMeshPreloadBegin()).
+			if (m->state > 0 && m->beangen != generation) {
+				beanNumKeeping -= m->beankeepvtx != NULL;
+				free(m->beankeepvtx);
+				free(m->beankeptgdl[0]);
+				free(m->beankeptgdl[1]);
+				m->beankeepvtx = NULL;
+				m->beankeptgdl[0] = m->beankeptgdl[1] = NULL;
+				gfxMeshForget(&m->gpu);
+				gfxMeshForget(&m->envgpu);
+				beanBuilt[look][i] = NULL;
+				dropped++;
+				continue;
+			}
+
 			if (m->state < 0) {
+				beanNumKeeping -= m->beankeepvtx != NULL;
+				free(m->beankeepvtx);
+				free(m->beankeptgdl[0]);
+				free(m->beankeptgdl[1]);
 				memset(m, 0, sizeof(*m));
 				continue;
 			}
@@ -6916,7 +7136,18 @@ static void xblaMeshResetBeanMeshes(void)
 			m->envmodel = NULL;
 			m->keptmodel = NULL;
 			m->neckbackdef = NULL;
+
+			// made from the stage's own copy of the model's lists
+			for (s32 k = 0; k < ARRAYCOUNT(m->beankeptgdl); k++) {
+				free(m->beankeptgdl[k]);
+				m->beankeptgdl[k] = NULL;
+				m->beankeptsrc[k] = NULL;
+			}
 		}
+	}
+
+	if (dropped) {
+		sysLogPrintf(LOG_NOTE, "xblamesh: %d GoldenEye meshes let go: their file slots were emptied (a mod swap)", dropped);
 	}
 }
 
@@ -7089,6 +7320,7 @@ static u32 frameCount;
 // trace dump: opaque lists emitted, poses written, poses the arena refused.
 static u32 frameDraws, frameDrawsLast;
 static u32 framePoses, framePosesLast;
+static u32 frameGpuPoses, frameGpuPosesLast; // models posed on the GPU (xblaMeshGpuPalette())
 static u32 framePoseFails, framePoseFailsLast;
 
 static void xblaMeshReportOverlaps(void);
@@ -7119,7 +7351,8 @@ void xblaMeshFrameReset(void)
 	frameDrawsLast = frameDraws;
 	framePosesLast = framePoses;
 	framePoseFailsLast = framePoseFails;
-	frameDraws = framePoses = framePoseFails = 0;
+	frameGpuPosesLast = frameGpuPoses;
+	frameDraws = framePoses = framePoseFails = frameGpuPoses = 0;
 }
 
 /**
@@ -7476,59 +7709,49 @@ static s32 xblaMeshNeckBack(struct xblameshbuilt *m, const struct modeldef *def,
 	return 1;
 }
 
+static f32 *xblaMeshDeformOffsets(struct xblameshbuilt *m, struct model *model,
+		struct xblameshuse *use, s32 slot);
+
 /**
- * Poses one mesh into a copy of its vertices, and hands back the copy.
- *
- * Palette entry i is posed by whatever the game has done to the node carrying
- * part i, so the transform for it is: out of the bind pose (invbind), into the
- * game's pose for that bone (its matrix), and then back out of the matrix the
- * list is going to be drawn under, which is the first part's. The last step is
- * what keeps the vertices small enough to be the s16 a Perfect Dark vertex
- * holds - they come out in the first part's own space rather than the view's.
- *
- * The copy is written **finer than the game's units**, and the matrix it is
- * drawn under is handed back divided by the same number. See
- * xblaMeshPoseFineness() for why, and for what picks the number.
- *
- * NULL when there is no room this frame, and the caller draws the bind pose.
+ * The palette a pose is made with: for entry i, out of the bind pose
+ * (invbind), into the game's pose for the bone (its matrix, lifted by
+ * headshift), and back out of the matrix the list is drawn under (invroot) -
+ * see xblaMeshPose(). lin, when asked for, is the same without the bind, for
+ * objDeform()'s offsets. Hands back how many entries the model has matrices
+ * for; the rest follow the first.
  */
-static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *root,
-		Mtxf **outmtx, s32 *outfine, s32 normals, const f32 *headshift)
+/**
+ * A part the mesh turns about a hub of its own (gebeanmats.hubmtx: the Cradle
+ * helicopter's rotors, which the release put elsewhere than GoldenEye's): its
+ * vertices are about that hub and its matrix turns them about GoldenEye's
+ * node, so the matrix is moved on by the hub's offset from the node, as the
+ * matrix over it turns that - which puts the hub back where the release has
+ * it and leaves the turn about it.
+ */
+static void xblaMeshHubShift(const struct xblameshbuilt *m, const struct model *model, s32 i, s32 posable, Mtxf *mtx)
 {
-	Mtxf pal[XBLAMESH_MAXMTX];
-	Mtxf invroot;
-	Vtx *out;
-	Mtxf *fmtx = NULL;
-	f32 *nrm;
+	for (s32 h = 0; h < m->beannumhubs; h++) {
+		const s32 parent = m->beanhubparent[h];
+		const f32 *d = m->beanhubshift[h];
+
+		if (m->beanhubmtx[h] != i || parent < 0 || parent >= posable) {
+			continue;
+		}
+
+		for (s32 j = 0; j < 3; j++) {
+			mtx->m[3][j] += model->matrices[parent].m[0][j] * d[0]
+				+ model->matrices[parent].m[1][j] * d[1]
+				+ model->matrices[parent].m[2][j] * d[2];
+		}
+	}
+}
+
+static s32 xblaMeshPoseMatrices(struct xblameshbuilt *m, struct model *model, Mtxf *invroot,
+		const f32 *headshift, Mtxf *pal, Mtxf *lin)
+{
 	s32 posable;
-	s32 fine;
+	const s32 disp = lin != NULL;
 
-	*outmtx = NULL;
-	*outfine = 1;
-
-	if (m->nummatrices > XBLAMESH_MAXMTX || !model->definition) {
-		return NULL;
-	}
-
-	out = xblaMeshFrameAlloc((u32)m->numvertices * sizeof(Vtx));
-
-	if (!out) {
-		return NULL;
-	}
-
-	xblaMeshInvert(root, &invroot);
-
-	// Entry i of the mesh's palette is matrix i of the model, and that is the
-	// whole of the mapping: not the part number, which only looked like it
-	// because a small model has few of both.
-	//
-	// It is checked the way the mesh id was. Take every model that names a
-	// mesh, and for each of its joints compare the offset the model file
-	// states from its parent joint against the offset the palette implies for
-	// the same two entries, turned into the parent's frame. Under this mapping
-	// they agree; under the palette read one, two or three entries along they
-	// do not, and the identity wins for 166 of the 170 models with a palette.
-	// It is the same argument as the mesh id's, on the same kind of evidence.
 	posable = m->nummatrices;
 
 	if (posable > model->definition->nummatrices) {
@@ -7551,6 +7774,12 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 				mtx4Copy(&pal[0], &pal[i]);
 			} else {
 				mtx4LoadIdentity(&pal[i]);
+			}
+
+			if (lin && posable > 0) {
+				mtx4Copy(&lin[0], &lin[i]);
+			} else if (lin) {
+				mtx4LoadIdentity(&lin[i]);
 			}
 
 			continue;
@@ -7587,8 +7816,133 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 			mtx4MultMtx4(&model->matrices[src], bind, &step);
 		}
 
-		mtx4MultMtx4(&invroot, &step, &pal[i]);
+		if (m->beannumhubs) {
+			xblaMeshHubShift(m, model, i, posable, &step);
+		}
+
+		mtx4MultMtx4(invroot, &step, &pal[i]);
+
+		// Without the bind, for objDeform()'s offsets, which are in the
+		// bone's own space as the game's lists are
+		if (disp) {
+			mtx4MultMtx4(invroot, &model->matrices[src], &lin[i]);
+		}
 	}
+
+	return posable;
+}
+
+/**
+ * The palette for the GPU to pose the mesh with (G_MESH_EXT): xblaMeshPose()'s
+ * matrices as the renderer takes them, GFXMESH_PALETTE_FLOATS an entry, and the
+ * matrix the lists go under - the bone's own as floats, stage scale and all,
+ * which is what xblaMeshPose() hands over when it divides by one. Not under
+ * the orthogonal projection, for the reason it gives. NULL when the frame
+ * arena has no room, and the mesh is posed on the CPU.
+ */
+static f32 *xblaMeshGpuPalette(struct xblameshbuilt *m, struct model *model, Mtxf *root,
+		const f32 *headshift, Mtxf **outmtx)
+{
+	Mtxf pal[XBLAMESH_MAXMTX];
+	Mtxf invroot;
+	Mtxf *fmtx = NULL;
+	f32 *out;
+
+	*outmtx = NULL;
+
+	if (m->nummatrices > XBLAMESH_MAXMTX || m->nummatrices > GFXMESH_PALETTE_MAX || !model->definition) {
+		return NULL;
+	}
+
+	out = xblaMeshFrameAlloc((u32)m->nummatrices * GFXMESH_PALETTE_FLOATS * sizeof(f32));
+
+	if (!orthogonal) {
+		fmtx = xblaMeshFrameAlloc(sizeof(Mtxf));
+	}
+
+	if (!out || (!orthogonal && !fmtx)) {
+		return NULL;
+	}
+
+	xblaMeshInvert(root, &invroot);
+	xblaMeshPoseMatrices(m, model, &invroot, headshift, pal, NULL);
+
+	for (s32 i = 0; i < m->nummatrices; i++) {
+		f32 *row = &out[i * GFXMESH_PALETTE_FLOATS];
+
+		for (s32 j = 0; j < 3; j++) {
+			row[j * 4 + 0] = pal[i].m[0][j];
+			row[j * 4 + 1] = pal[i].m[1][j];
+			row[j * 4 + 2] = pal[i].m[2][j];
+			row[j * 4 + 3] = pal[i].m[3][j];
+		}
+	}
+
+	if (fmtx) {
+		*fmtx = *root;
+		mtxApplyGfxScale(fmtx);
+	}
+
+	*outmtx = fmtx;
+
+	return out;
+}
+
+/**
+ * Poses one mesh into a copy of its vertices, and hands back the copy.
+ *
+ * Palette entry i is posed by whatever the game has done to the node carrying
+ * part i, so the transform for it is: out of the bind pose (invbind), into the
+ * game's pose for that bone (its matrix), and then back out of the matrix the
+ * list is going to be drawn under, which is the first part's. The last step is
+ * what keeps the vertices small enough to be the s16 a Perfect Dark vertex
+ * holds - they come out in the first part's own space rather than the view's.
+ *
+ * The copy is written **finer than the game's units**, and the matrix it is
+ * drawn under is handed back divided by the same number. See
+ * xblaMeshPoseFineness() for why, and for what picks the number.
+ *
+ * NULL when there is no room this frame, and the caller draws the bind pose.
+ */
+static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *root,
+		Mtxf **outmtx, s32 *outfine, s32 normals, const f32 *headshift, const f32 *disp)
+{
+	Mtxf pal[XBLAMESH_MAXMTX];
+	Mtxf lin[XBLAMESH_MAXMTX];
+	Mtxf invroot;
+	Vtx *out;
+	Mtxf *fmtx = NULL;
+	f32 *nrm;
+	s32 posable;
+	s32 fine;
+
+	*outmtx = NULL;
+	*outfine = 1;
+
+	if (m->nummatrices > XBLAMESH_MAXMTX || !model->definition) {
+		return NULL;
+	}
+
+	out = xblaMeshFrameAlloc((u32)m->numvertices * sizeof(Vtx));
+
+	if (!out) {
+		return NULL;
+	}
+
+	xblaMeshInvert(root, &invroot);
+
+	// Entry i of the mesh's palette is matrix i of the model, and that is the
+	// whole of the mapping: not the part number, which only looked like it
+	// because a small model has few of both.
+	//
+	// It is checked the way the mesh id was. Take every model that names a
+	// mesh, and for each of its joints compare the offset the model file
+	// states from its parent joint against the offset the palette implies for
+	// the same two entries, turned into the parent's frame. Under this mapping
+	// they agree; under the palette read one, two or three entries along they
+	// do not, and the identity wins for 166 of the 170 models with a palette.
+	// It is the same argument as the mesh id's, on the same kind of evidence.
+	posable = xblaMeshPoseMatrices(m, model, &invroot, headshift, pal, disp ? lin : NULL);
 
 	if (xblaMeshVerbose && !m->posedlog) {
 		m->posedlog = 1;
@@ -7750,6 +8104,20 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 			x += moved.x * weight[j];
 			y += moved.y * weight[j];
 			z += moved.z * weight[j];
+		}
+
+		// A destroyed GoldenEye prop: objDeform()'s crumpling, mirrored
+		// (xblaMeshDeformOffsets()), turned with each bone but not moved
+		if (disp) {
+			const f32 *d = &disp[i * 3];
+
+			for (s32 j = 0; j < num; j++) {
+				const Mtxf *l = &lin[bone[j]];
+
+				x += (l->m[0][0] * d[0] + l->m[1][0] * d[1] + l->m[2][0] * d[2]) * weight[j];
+				y += (l->m[0][1] * d[0] + l->m[1][1] * d[1] + l->m[2][1] * d[2]) * weight[j];
+				z += (l->m[0][2] * d[0] + l->m[1][2] * d[1] + l->m[2][2] * d[2]) * weight[j];
+			}
 		}
 
 		out[i] = m->vertices[i];
@@ -8176,8 +8544,8 @@ static s32 xblaMeshHeadBeanRow(struct model *model)
 		if (e && e->node == node && e->modeldef == head && !e->suppress
 				&& e->beanrow >= 0 && e->packpart != XBLAMESH_NOPART
 				&& !(e->fileid && modelpackFindN64(e->fileid))
-				&& (optEnabled || gebeanRowIsPool(e->beanrow))) {
-			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !optEnabled);
+				&& (xblaMeshGetEnabled() || gebeanRowIsPool(e->beanrow))) {
+			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
 
 			return m && e->packpart < m->numgroups && !(m->groupabsent & (1ull << e->packpart))
 				? e->beanrow : -1;
@@ -8208,6 +8576,17 @@ static s32 xblaMeshHeadBeanRow(struct model *model)
  */
 s32 xblaMeshBeanSeat(struct modeldef *def, s32 head, f32 *out, s32 *outneckless)
 {
+	return xblaMeshBeanSeatAt(def, head, out, outneckless, 0.5f);
+}
+
+/**
+ * The same, at another point of the directions sorted by height: 0.5 is the
+ * middle, 0.75 a head's rim a quarter of the way down from its highest (the
+ * nape of a neck whose throat reaches further, with one stray hit on the chin
+ * above it left out).
+ */
+s32 xblaMeshBeanSeatAt(struct modeldef *def, s32 head, f32 *out, s32 *outneckless, f32 frac)
+{
 	struct modelnode *node = def ? def->rootnode : NULL;
 
 	for (s32 walked = 0; node && walked < 512; walked++) {
@@ -8215,8 +8594,8 @@ s32 xblaMeshBeanSeat(struct modeldef *def, s32 head, f32 *out, s32 *outneckless)
 
 		if (e && e->node == node && e->modeldef == def && !e->suppress
 				&& e->beanrow >= 0 && e->packpart != XBLAMESH_NOPART
-				&& (optEnabled || gebeanRowIsPool(e->beanrow))) {
-			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !optEnabled);
+				&& (xblaMeshGetEnabled() || gebeanRowIsPool(e->beanrow))) {
+			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
 			f32 found[GEBEAN_SEAT_SAMPLES];
 			s32 n = 0;
 
@@ -8237,10 +8616,89 @@ s32 xblaMeshBeanSeat(struct modeldef *def, s32 head, f32 *out, s32 *outneckless)
 				}
 			}
 
-			*out = n & 1 ? found[n / 2] : (found[n / 2 - 1] + found[n / 2]) * 0.5f;
+			if (frac == 0.5f) {
+				*out = n & 1 ? found[n / 2] : (found[n / 2 - 1] + found[n / 2]) * 0.5f;
+			} else {
+				s32 at = (s32)(frac * (f32)n);
+
+				*out = found[at < 0 ? 0 : at >= n ? n - 1 : at];
+			}
 
 			if (outneckless) {
 				*outneckless = m->beanopenrim > GEBEAN_OPENRIM_JAW;
+			}
+
+			return 1;
+		}
+
+		if (node->child && (node->type & 0xff) != MODELNODETYPE_HEADSPOT) {
+			node = node->child;
+		} else {
+			while (node && !node->next) {
+				node = node->parent;
+			}
+
+			node = node ? node->next : NULL;
+		}
+	}
+
+	return 0;
+}
+
+/**
+ * Each vertex of the release's mesh for a model, drawn in this look, at rest:
+ * the matrix that moves it most, and where it is in that joint's own frame
+ * (in the first's, `rigid`, for a head's mesh on its own).
+ * For measuring one of Perfect Dark's bodies as the release has it
+ * (headfit.c), whose N64 geometry says nothing about the mesh: the Dinner
+ * Jacket's release mesh has no neck at all where the ROM's has GoldenEye's.
+ * 0 when the model is not drawn so in this look.
+ */
+s32 xblaMeshReleaseRestVertices(struct modeldef *def, s32 rigid, void (*fn)(s32 mtx, const f32 local[3], void *arg), void *arg)
+{
+	struct modelnode *node = def ? def->rootnode : NULL;
+
+	for (s32 walked = 0; node && walked < 512; walked++) {
+		const struct xblameshentry *e = xblaMeshSlotFor(node);
+
+		if (e && e->node == node && e->modeldef == def && e->matched && !e->suppress
+				&& e->beanrow < 0 && xblaMeshEntryLive(e)
+				&& !(e->fileid && modelpackFindN64(e->fileid))) {
+			const struct xblameshbuilt *m = xblaMeshBuild(e->slot);
+
+			if (!m || !m->invbind || !m->bindpos || !m->bones || !m->weights) {
+				return 0;
+			}
+
+			for (s32 i = 0; i < m->numvertices; i++) {
+				const u8 *bone = &m->bones[i * 4];
+				const f32 *weight = &m->weights[i * 3];
+				const s32 num = bone[3] < 3 ? bone[3] : 3;
+				s32 most = 0;
+				struct coord in;
+				struct coord local;
+				f32 p[3];
+
+				for (s32 j = 1; j < num; j++) {
+					if (weight[j] > weight[most]) {
+						most = j;
+					}
+				}
+
+				if (num <= 0 || bone[most] >= m->nummatrices) {
+					continue;
+				}
+
+				in.x = m->bindpos[i * 3];
+				in.y = m->bindpos[i * 3 + 1];
+				in.z = m->bindpos[i * 3 + 2];
+				// A head's mesh has entries past the one matrix its file has,
+				// which the pose puts under the first (xblaMeshPose())
+				mtx4TransformVec(&m->invbind[rigid ? 0 : bone[most]], &in, &local);
+				p[0] = local.x;
+				p[1] = local.y;
+				p[2] = local.z;
+				fn(bone[most], p, arg);
 			}
 
 			return 1;
@@ -8378,7 +8836,7 @@ static void xblaMeshPoolHeadSeat(const struct xblameshbuilt *head, const struct 
 				return;
 			}
 
-			body = xblaMeshBuildBean(e, !optEnabled);
+			body = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
 
 			if (!body || !body->beanhasneckshift) {
 				return;
@@ -8457,7 +8915,7 @@ static s32 xblaMeshPoolNeckOwn(struct model *model)
 		const struct xblameshentry *e = xblaMeshSlotFor(node);
 
 		if (e && e->node == node && e->modeldef == model->definition && !e->suppress && e->beanrow >= 0) {
-			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !optEnabled);
+			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
 
 			for (s32 k = 0; m && k < 64; k++) {
 				if (m->beanownneck[k] >= 0 && m->beanownneck[k] < m->numgroups
@@ -8515,7 +8973,7 @@ static s32 xblaMeshBodyDrawsBare(struct model *model)
 		const struct xblameshentry *e = xblaMeshSlotFor(node);
 
 		if (e && e->node == node && e->modeldef == model->definition && !e->suppress && e->beanrow >= 0) {
-			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !optEnabled);
+			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
 
 			for (s32 k = 0; m && !m->beanhead && k < 64; k++) {
 				if (m->beanbare[k] >= 0 && m->beanbare[k] < m->numgroups
@@ -8541,15 +8999,70 @@ static s32 xblaMeshBodyDrawsBare(struct model *model)
 	return 0;
 }
 
+// How far a body's collar must dip under a head's neck before the made neck
+// fills the gap (xblaMeshHeadTubeOn())
+#define XBLAMESH_COLLAR_GAP 2.0f
+
+/**
+ * Whether this body's collar dips under the foot of the head's own neck
+ * anywhere round it: a head cut off one character's collar, grafted on a
+ * body whose collar is cut lower - Bond's tuxedo head (char/djbond, its neck
+ * ending 62 under the joint in front) on the Russian guard (char/rusguard,
+ * the tunic's open front at 67) - left the throat open onto whatever was
+ * behind, the body's own neck skin being left out under a head file's neck
+ * (F3 20261002-061330, "bond has missing throat textures"). Both rings are
+ * gebeanmats.seat, measured from the neck joint round the same sixteen
+ * directions.
+ */
+static s32 xblaMeshCollarUnderHead(struct model *model, const struct xblameshbuilt *head)
+{
+	struct modelnode *node = model && model->definition ? model->definition->rootnode : NULL;
+
+	if (!head->beanseathit) {
+		return 0;
+	}
+
+	for (s32 walked = 0; node && walked < 512; walked++) {
+		const struct xblameshentry *e = xblaMeshSlotFor(node);
+
+		if (e && e->node == node && e->modeldef == model->definition && !e->suppress && e->beanrow >= 0) {
+			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
+
+			for (s32 i = 0; m && !m->beanhead && i < GEBEAN_SEAT_SAMPLES; i++) {
+				if ((m->beanseathit & head->beanseathit & (1u << i))
+						&& m->beanseat[i] < head->beanseat[i] - XBLAMESH_COLLAR_GAP) {
+					return 1;
+				}
+			}
+
+			return 0;
+		}
+
+		if (node->child && (node->type & 0xff) != MODELNODETYPE_HEADSPOT) {
+			node = node->child;
+		} else {
+			while (node && !node->next) {
+				node = node->parent;
+			}
+
+			node = node ? node->next : NULL;
+		}
+	}
+
+	return 0;
+}
+
 /**
  * Whether a head's made neck (gebeanmats.neck) is drawn on this body: always
  * under a head ending at its jaw; under a head with a neck of its own only
  * inside the parka's open collar, which that neck does not reach (on a suit's
- * collar the tube stood out round it).
+ * collar the tube stood out round it) - and wherever the body's collar is cut
+ * lower than the head's neck (xblaMeshCollarUnderHead()).
  */
 static s32 xblaMeshHeadTubeOn(struct model *model, const struct xblameshbuilt *head)
 {
-	return head->beanopenrim > GEBEAN_OPENRIM_JAW || xblaMeshBodyDrawsBare(model);
+	return head->beanopenrim > GEBEAN_OPENRIM_JAW || xblaMeshBodyDrawsBare(model)
+		|| xblaMeshCollarUnderHead(model, head);
 }
 
 /**
@@ -8569,7 +9082,7 @@ static s32 xblaMeshHeadIsNeckBack(struct model *model)
 		const struct xblameshentry *e = xblaMeshSlotFor(node);
 
 		if (e && e->node == node && e->modeldef == head && !e->suppress && e->beanrow >= 0) {
-			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !optEnabled);
+			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
 
 			return m && m->beanhead && m->beanneckback;
 		}
@@ -8603,7 +9116,7 @@ static s32 xblaMeshHeadBringsNeck(struct model *model)
 		const struct xblameshentry *e = xblaMeshSlotFor(node);
 
 		if (e && e->node == node && e->modeldef == head && !e->suppress && e->beanrow >= 0) {
-			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !optEnabled);
+			const struct xblameshbuilt *m = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
 
 			if (m && m->beanhead && e->packpart < 64 && m->beanneckof[e->packpart] >= 0
 					&& xblaMeshHeadTubeOn(model, m)) {
@@ -8635,7 +9148,7 @@ static const struct xblameshbuilt *xblaMeshBodyBuilt(struct model *model)
 		const struct xblameshentry *e = xblaMeshSlotFor(node);
 
 		if (e && e->node == node && e->modeldef == model->definition && !e->suppress && e->beanrow >= 0) {
-			return gebeanRowIsPool(e->beanrow) ? xblaMeshBuildBean(e, !optEnabled) : NULL;
+			return gebeanRowIsPool(e->beanrow) ? xblaMeshBuildBean(e, !xblaMeshGetEnabled()) : NULL;
 		}
 
 		if (node->child && (node->type & 0xff) != MODELNODETYPE_HEADSPOT) {
@@ -8674,7 +9187,7 @@ static s32 xblaMeshPoolHeadIsSeated(struct model *model)
 		const struct xblameshentry *e = xblaMeshSlotFor(node);
 
 		if (e && e->node == node && e->modeldef == head && !e->suppress && e->beanrow >= 0) {
-			const struct xblameshbuilt *m = gebeanRowIsPool(e->beanrow) ? xblaMeshBuildBean(e, !optEnabled) : NULL;
+			const struct xblameshbuilt *m = gebeanRowIsPool(e->beanrow) ? xblaMeshBuildBean(e, !xblaMeshGetEnabled()) : NULL;
 
 			const struct xblameshbuilt *body = xblaMeshBodyBuilt(model);
 			f32 shift[3];
@@ -8731,6 +9244,47 @@ static s32 xblaMeshNodeIsGrafted(const struct model *model, const struct modelno
 	}
 
 	return 0;
+}
+
+/**
+ * Whether node is a head grafted into model's tree, and the one this entry was
+ * made for: the headspot crossed on the way up names the head attached there
+ * (modelAttachHead()). An entry outlives its model file - it is dropped when a
+ * file next loads at that definition's address (xblaMeshForgetModel()), not
+ * when the file is freed - so once Customize Character has swapped heads a few
+ * times, a new head's node can land on a freed one's address and find that
+ * head's entry. Grafted was enough to draw it, and the bruise map of the
+ * freed head walked parent pointers through what the new file had written
+ * over its nodes (crash report 20260930-024826, modelGetNodeRwData() from
+ * xblaMeshBruiseColours() under menuRenderModel()).
+ */
+static s32 xblaMeshNodeIsGraftedFrom(struct model *model, const struct modelnode *node,
+		const struct modeldef *modeldef)
+{
+	const struct modelnode *root = model->definition->rootnode;
+	struct modelnode *headspot = NULL;
+
+	for (s32 i = 0; node && i < XBLAMESH_PARENTSCAN; i++) {
+		if (node == root) {
+			break;
+		}
+
+		if ((node->type & 0xff) == MODELNODETYPE_HEADSPOT && !headspot) {
+			headspot = (struct modelnode *)node;
+		}
+
+		node = node->parent;
+	}
+
+	if (node != root || !headspot || !model->rwdatas) {
+		return 0;
+	}
+
+	{
+		const struct modelrwdata_headspot *rw = modelGetNodeRwData(model, headspot);
+
+		return rw && rw->headmodeldef == modeldef;
+	}
 }
 
 /* -------------------------------------------------------------------------
@@ -8838,10 +9392,10 @@ static void xblaMeshBruiseNodes(struct xblameshbruise *br, const struct xblamesh
 			// A GoldenEye character (xblaMeshBuildBean()): list node p draws
 			// group p, filed on the pack's side (packpart, packuse) rather than
 			// against a release slot. A node with no group keeps its own
-			// geometry, and so its own bruises. A GoldenEye prop takes none
-			// (nor, through this map, objDeform()'s crumpling): see scorched
-			// in xblaMeshRenderNode().
-			if (!gebeanRowIsChr(m->beanrow) || e->beanrow < 0 || e->packuse != useidx || e->packpart == XBLAMESH_NOPART ||
+			// geometry, and so its own bruises. A GoldenEye prop's lists give
+			// it objDeform()'s crumpling and blackening the same way: see
+			// scorched in xblaMeshRenderNode().
+			if (e->beanrow < 0 || e->packuse != useidx || e->packpart == XBLAMESH_NOPART ||
 					e->packpart >= m->numgroups || e->packpart >= 64 ||
 					(m->groupabsent & (1ull << e->packpart))) {
 				continue;
@@ -9219,8 +9773,9 @@ static s32 xblaMeshBruiseMap(struct xblameshbruise *br, const struct xblameshbui
 
 		// A skinned mesh maps only what takes a bruise. A rigid one maps every
 		// vertex, since objDeform() moves the whole object, and remembers which
-		// are solid for the colours.
-		if (!solid[i] && m->bindpos) {
+		// are solid for the colours - and so does a GoldenEye prop, which is
+		// made the way a character is, on one bone.
+		if (!solid[i] && m->bindpos && !(m->frombean && !gebeanRowIsChr(m->beanrow))) {
 			continue;
 		}
 
@@ -9433,21 +9988,21 @@ static const f32 *xblaMeshMapShift(const struct xblameshbuilt *m, struct xblames
  * rest pose, weighted as its colours are (xblaMeshBruiseMap()), and the colours
  * follow through xblaMeshBruiseColours() from the same map.
  */
-static Vtx *xblaMeshDeformVertices(struct xblameshbuilt *m, struct model *model,
+static f32 *xblaMeshDeformOffsets(struct xblameshbuilt *m, struct model *model,
 		struct xblameshuse *use, s32 slot)
 {
 	const Vtx *nowv[XBLAMESH_BRUISENODES];
 	const Vtx *wasv[XBLAMESH_BRUISENODES];
 	struct xblameshbruise *map;
 	s32 moved = 0;
-	Vtx *out;
+	f32 *out;
 
-	if (!model || !model->rwdatas || m->bindpos || !m->vertices) {
+	if (!model || !model->rwdatas || !m->vertices) {
 		return NULL;
 	}
 
-	if (m->deformmodel == model && m->deformframe == frameCount) {
-		return m->deformvtx;
+	if (m->deformoffmodel == model && m->deformoffframe == frameCount) {
+		return m->deformoff;
 	}
 
 	map = xblaMeshBruiseReady(m, use);
@@ -9456,9 +10011,9 @@ static Vtx *xblaMeshDeformVertices(struct xblameshbuilt *m, struct model *model,
 		return NULL;
 	}
 
-	m->deformmodel = model;
-	m->deformframe = frameCount;
-	m->deformvtx = NULL;
+	m->deformoffmodel = model;
+	m->deformoffframe = frameCount;
+	m->deformoff = NULL;
 
 	for (s32 ni = 0; ni < map->numnodes; ni++) {
 		const union modelrwdata *rw = modelGetNodeRwData(model, map->nodes[ni]);
@@ -9475,12 +10030,65 @@ static Vtx *xblaMeshDeformVertices(struct xblameshbuilt *m, struct model *model,
 		return NULL;
 	}
 
+	// A mesh on bones (a GoldenEye prop) is mapped in the rest pose on its
+	// bones, as its colours are (xblaMeshBruiseColours() with samebone)
 	if (map->state == 0) {
-		map->state = xblaMeshBruiseMap(map, m, model, use->modeldef, 0, slot,
+		map->state = xblaMeshBruiseMap(map, m, model, use->modeldef, m->bindpos != NULL, slot,
 				xblaMeshMapShift(m, use, slot)) ? 1 : -1;
 	}
 
 	if (map->state < 0) {
+		return NULL;
+	}
+
+	out = xblaMeshFrameAlloc((u32)m->numvertices * 3 * sizeof(f32));
+
+	if (!out) {
+		return NULL;
+	}
+
+	for (s32 i = 0; i < m->numvertices; i++) {
+		const struct xblameshbruiseref *r = &map->refs[i * XBLAMESH_BRUISEREFS];
+		f32 *d = &out[i * 3];
+
+		d[0] = d[1] = d[2] = 0.0f;
+
+		for (s32 k = 0; k < XBLAMESH_BRUISEREFS && r[k].node != XBLAMESH_NOPART; k++) {
+			const Vtx *now = &nowv[r[k].node][r[k].vtx];
+			const Vtx *was = &wasv[r[k].node][r[k].vtx];
+
+			d[0] += r[k].weight * (now->x - was->x);
+			d[1] += r[k].weight * (now->y - was->y);
+			d[2] += r[k].weight * (now->z - was->z);
+		}
+	}
+
+	m->deformoff = out;
+
+	return out;
+}
+
+static Vtx *xblaMeshDeformVertices(struct xblameshbuilt *m, struct model *model,
+		struct xblameshuse *use, s32 slot)
+{
+	const f32 *off;
+	Vtx *out;
+
+	if (!model || m->bindpos || !m->vertices) {
+		return NULL;
+	}
+
+	if (m->deformmodel == model && m->deformframe == frameCount) {
+		return m->deformvtx;
+	}
+
+	m->deformmodel = model;
+	m->deformframe = frameCount;
+	m->deformvtx = NULL;
+
+	off = xblaMeshDeformOffsets(m, model, use, slot);
+
+	if (!off) {
 		return NULL;
 	}
 
@@ -9493,21 +10101,9 @@ static Vtx *xblaMeshDeformVertices(struct xblameshbuilt *m, struct model *model,
 	memcpy(out, m->vertices, (size_t)m->numvertices * sizeof(Vtx));
 
 	for (s32 i = 0; i < m->numvertices; i++) {
-		const struct xblameshbruiseref *r = &map->refs[i * XBLAMESH_BRUISEREFS];
-		f32 d[3] = { 0.0f, 0.0f, 0.0f };
-
-		for (s32 k = 0; k < XBLAMESH_BRUISEREFS && r[k].node != XBLAMESH_NOPART; k++) {
-			const Vtx *now = &nowv[r[k].node][r[k].vtx];
-			const Vtx *was = &wasv[r[k].node][r[k].vtx];
-
-			d[0] += r[k].weight * (now->x - was->x);
-			d[1] += r[k].weight * (now->y - was->y);
-			d[2] += r[k].weight * (now->z - was->z);
-		}
-
-		out[i].x = xblaMeshRound(out[i].x + d[0]);
-		out[i].y = xblaMeshRound(out[i].y + d[1]);
-		out[i].z = xblaMeshRound(out[i].z + d[2]);
+		out[i].x = xblaMeshRound(out[i].x + off[i * 3]);
+		out[i].y = xblaMeshRound(out[i].y + off[i * 3 + 1]);
+		out[i].z = xblaMeshRound(out[i].z + off[i * 3 + 2]);
 	}
 
 	m->deformvtx = out;
@@ -10011,14 +10607,8 @@ static void xblaMeshApplyNodeMode(struct modelrenderdata *renderdata,
  * a body that is lit. So the first cycle is kept as the game set it and only
  * the second is chosen: `cycle2` is the *2 half of a G_RM pair.
  */
-// A soft-edged cutout: blended by the texel's alpha over what is there,
-// depth tested and written like an opaque surface (see the cutout span in
-// xblaMeshRenderNode()'s opaque pass).
-#define XBLAMESH_RM_SOFT_EDGE(clk) \
-	(AA_EN | Z_CMP | Z_UPD | IM_RD | CVG_DST_CLAMP | ZMODE_OPA | FORCE_BL | \
-	 GBL_c##clk(G_BL_CLR_IN, G_BL_A_IN, G_BL_CLR_MEM, G_BL_1MA))
-
-// 0 draws a skinned mesh's alpha span as a hard cutout again (gdb, to compare)
+// 0 draws a skinned mesh's alpha span as a hard cutout again (gdb, to compare):
+// see the soft span in xblaMeshRenderNode()
 s32 g_XblaMeshSoftCutouts = 1;
 
 static void xblaMeshSetSpanMode(struct modelrenderdata *renderdata,
@@ -10181,11 +10771,11 @@ s32 xblaMeshScreenQuad(struct model *model, struct modelnode *node, Vtx *vertice
 			|| e->beanrow < 0 || e->packpart == XBLAMESH_NOPART
 			|| (e->fileid && modelpackFindN64(e->fileid))
 			|| (e->matched && xblaMeshEntryLive(e) && opened > 0)
-			|| !gebeanGetEnabled() || !(optEnabled || gebeanRowIsPool(e->beanrow))) {
+			|| !gebeanGetEnabled() || !(xblaMeshGetEnabled() || gebeanRowIsPool(e->beanrow))) {
 		return 0;
 	}
 
-	m = xblaMeshBuildBean(e, !optEnabled);
+	m = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
 
 	if (!m) {
 		return 0;
@@ -10342,6 +10932,105 @@ static s32 xblaMeshEnvironmentReach(const struct xblameshbuilt *m, const Mtxf *r
 	}
 
 	return (s32)(255.0f * (far - dist) / (far - near));
+}
+
+/**
+ * The mesh's vertices with each reflecting vertex's atlas cell in its s and t,
+ * as xblaMeshEnvironmentVertices() writes them into its copy - made once, for
+ * the GPU's reflection pass (G_MESH_EXT), which poses the bind pose there. The
+ * cell does not move with the pose; only a GoldenEye prop's own map's lookup
+ * does (envown), and that is never drawn this way.
+ */
+static Vtx *xblaMeshEnvStatic(struct xblameshbuilt *m)
+{
+	Vtx *vtx;
+
+	if (m->envst || m->numenvcells <= 0 || !m->envidx) {
+		return m->envst;
+	}
+
+	vtx = malloc((size_t)m->numvertices * sizeof(Vtx));
+
+	if (!vtx) {
+		return NULL;
+	}
+
+	memcpy(vtx, m->vertices, (size_t)m->numvertices * sizeof(Vtx));
+
+	for (s32 k = 0; k < m->numenvidx; k++) {
+		const u32 i = m->envidx[k];
+
+		vtx[i].s = xblaMeshRound((m->venv[i * 2] + 0.5f) / m->numenvcells * XBLATEX_TILE_SCALE);
+		vtx[i].t = xblaMeshRound(1.0f / m->numenvcells * XBLATEX_TILE_SCALE);
+	}
+
+	m->envst = vtx;
+
+	return vtx;
+}
+
+/**
+ * xblaMeshEnvironmentVertices() for a draw posed on the GPU: the vertices are
+ * xblaMeshEnvStatic()'s, and the colours carry the amount in their alpha as
+ * that function makes it. A rigid mesh's normal goes in the colour's three
+ * bytes as it always did; a skinned mesh's is the renderer's to pose from the
+ * mesh's own (gfxmesh's normals), so its bytes are left at nothing.
+ */
+static s32 xblaMeshEnvironmentGpu(struct xblameshbuilt *m, const struct model *model, s32 light, s32 sheen,
+		const u8 *wound, Vtx **outVtx, Col **outCol)
+{
+	Vtx *vtx = xblaMeshEnvStatic(m);
+	Col *col;
+
+	if (!vtx) {
+		return 0;
+	}
+
+	if (m->envvtx == vtx && m->envposed == NULL && m->envnormals == NULL && m->envmodel == model &&
+			m->envframe == frameCount && m->envlight == light && m->envsheen == sheen && m->envwound == wound) {
+		*outVtx = m->envvtx;
+		*outCol = m->envcol;
+		return 1;
+	}
+
+	col = xblaMeshFrameAlloc((u32)m->numvertices * sizeof(Col));
+
+	if (!col) {
+		return 0;
+	}
+
+	for (s32 k = 0; k < m->numenvidx; k++) {
+		const u32 i = m->envidx[k];
+		const u32 share = XBLAMESH_SHEEN_SHARE(m->venv[i * 2 + 1]);
+		const u32 amount = !sheen ? m->venv[i * 2 + 1] : m->vink ? share * m->vink[i] / 255 : share;
+
+		if (m->bindpos) {
+			col[i].r = col[i].g = col[i].b = 0;
+		} else {
+			const f32 *n = &m->normals[i * 3];
+
+			col[i].r = (u8)(s8)xblaMeshRound(n[0] * 127.0f);
+			col[i].g = (u8)(s8)xblaMeshRound(n[1] * 127.0f);
+			col[i].b = (u8)(s8)xblaMeshRound(n[2] * 127.0f);
+		}
+
+		col[i].a = (u8)((amount * light * (wound ? 255u - wound[i] : 255u) / 255 + 127) / 255);
+	}
+
+	m->envmodel = model;
+	m->envframe = frameCount;
+	m->envposed = NULL;
+	m->envnormals = NULL;
+	m->envlight = light;
+	m->envsheen = sheen;
+	m->envwound = wound;
+	m->envvtx = vtx;
+	m->envcol = col;
+
+	*outVtx = vtx;
+	*outCol = col;
+
+	return 1;
 }
 
 /**
@@ -10618,8 +11307,13 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 	s32 envlight = 0;
 	s32 envreach = 0;
 	s32 envfading = 0;
+	f32 *gpupal = NULL;
+	struct gfxmeshdraw *meshdraw = NULL;
+	struct gfxmeshdraw *envdraw = NULL;
 	const s32 opa = (renderdata->flags & MODELRENDERFLAG_OPA) != 0;
 	const s32 xlu = (renderdata->flags & MODELRENDERFLAG_XLU) != 0;
+
+	tintStockNode = NULL;
 
 	if (!node || !g_XblaMeshNumNodes || bypass) {
 		return 0;
@@ -10651,7 +11345,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 	// mesh for hands the whole of itself back, including the lists the matcher
 	// left alone, since those would otherwise draw the pack's geometry inside
 	// the mesh.
-	if (frompack && e->packhasmesh && optEnabled && opened > 0
+	if (frompack && e->packhasmesh && xblaMeshGetEnabled() && opened > 0
 			&& modelpackGetPrefer() == MODELPACK_PREFER_XBLA) {
 		frompack = 0;
 	}
@@ -10669,7 +11363,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 	// so with the meshes off there is no GoldenEye model underneath to fall
 	// back to - only the PP9i the PP7 is held beside.
 	frombean = !frompack && !havemesh && e->beanrow >= 0 && e->packpart != XBLAMESH_NOPART
-			&& gebeanGetEnabled() && (optEnabled || gebeanRowIsPool(e->beanrow)
+			&& gebeanGetEnabled() && (xblaMeshGetEnabled() || gebeanRowIsPool(e->beanrow)
 				|| gebeanRowIsFirstPerson(e->beanrow));
 
 	if (!frompack && !havemesh && !frombean) {
@@ -10693,7 +11387,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 	// drawn from is what says this entry is about this model - except for a
 	// head, which is a model of its own grafted into the body's tree.
 	if (model && model->definition && model->definition != e->modeldef) {
-		if (!xblaMeshNodeIsGrafted(model, node)) {
+		if (!xblaMeshNodeIsGraftedFrom(model, node, e->modeldef)) {
 			if (xblaMeshVerbose && !e->suppress) {
 				xblaMeshNoteDraw(model, e->slot, 0, 1);
 			}
@@ -10764,7 +11458,7 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 	// The mesh is built before the part is looked at, so that a mesh that will
 	// not build leaves every part of the model drawing its own geometry rather
 	// than only the first one.
-	m = frompack ? xblaMeshBuildPack(e) : frombean ? xblaMeshBuildBean(e, !optEnabled) : xblaMeshBuild(e->slot);
+	m = frompack ? xblaMeshBuildPack(e) : frombean ? xblaMeshBuildBean(e, !xblaMeshGetEnabled()) : xblaMeshBuild(e->slot);
 
 	if (!m) {
 		if (xblaMeshVerbose) {
@@ -10772,6 +11466,15 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		}
 
 		return 0;
+	}
+
+	// A GoldenEye tinted pane on its way to opaque: GoldenEye's own pane is
+	// drawn as well, at the same opacity (xblaMeshKeptLists()). Only for a
+	// mesh that is nothing but panes (the window prop): a door's or a
+	// vehicle's node would bring its whole N64 body with the pane.
+	if (m->tintgdl && m->tintonly && renderdata->unk30 == 9 && ((renderdata->envcolour >> 8) & 0xff) != 0
+			&& (node->type & 0xff) == MODELNODETYPE_DL) {
+		tintStockNode = node;
 	}
 
 	// Which of the mesh's lists this node draws. A group is one part of the
@@ -10847,12 +11550,18 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				&& !(m->groupabsent & (1ull << m->beanbare[part]))) {
 			// And round any other, the collar the hood would have covered
 			part = (u16)m->beanbare[part];
-		} else if (!m->beanhead && part < 64 && m->beannoskin[part] >= 0 && m->beannoskin[part] < m->numgroups
-				&& !(m->groupabsent & (1ull << m->beannoskin[part]))
+		} else if (!m->beanhead && part < 64 && m->beannoskin[part] >= 0
 				&& part < m->numgroups && !(m->groupabsent & (1ull << part))
 				&& xblaMeshHeadIsNeckBack(model)) {
 			// A guard's body without the skin of its own neck below the cut,
-			// under a head file whose neck goes down into the collar there
+			// under a head file whose neck goes down into the collar there -
+			// and without the rest of the body file's head section, which the
+			// release switches off under a head file (gebean.c's
+			// headsecskel). A list holding nothing else draws nothing
+			if (m->beannoskin[part] >= m->numgroups || (m->groupabsent & (1ull << m->beannoskin[part]))) {
+				return 1;
+			}
+
 			part = (u16)m->beannoskin[part];
 		} else if (part >= m->numgroups || (m->groupabsent & (1ull << part))) {
 			// A neck node (one with a filler slot) under a head that brings
@@ -10913,6 +11622,20 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		fadelist = &m->gdl[fadepart];
 	}
 
+	// A windowed door's pane once three shots have shattered it
+	// (doorDestroyGlass() hides the toggle over the game's own pane). A
+	// GoldenEye XBLA door carries its window in the one mesh with the door,
+	// as its fading span, and it stood whole behind the shards (F3
+	// 20260929-213924, Bunker's cell doors)
+	if (fadelist && model && model->definition && model->definition->skel == &g_SkelWindowedDoor) {
+		struct modelnode *toggle = modelGetPart(model->definition, MODELPART_WINDOWEDDOOR_0001);
+		union modelrwdata *rw = toggle ? modelGetNodeRwData(model, toggle) : NULL;
+
+		if (rw && !rw->toggle.visible) {
+			fadelist = NULL;
+		}
+	}
+
 	// The release's own translucent geometry, and where it goes.
 	//
 	// A mesh's materials say which of its draws carry alpha, and those are
@@ -10941,7 +11664,14 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		xlulist = &m->gdl[xlupart];
 	}
 
-	if (!opa && !xlulist && !fadelist) {
+	// A character's or a gun's (a skinned mesh's) cutout span is a soft
+	// picture - hair, a lens - drawn in two: its solid core cut in the opaque
+	// pass, writing depth, and the whole span blended over it in the
+	// translucent pass, depth tested and not written. See the two draws below.
+	const s32 softspan = xlupart >= 0 && !xlulist && g_XblaMeshSoftCutouts
+			&& m->nummatrices > 0 && renderdata->zbufferenabled;
+
+	if (!opa && !xlulist && !fadelist && !softspan) {
 		// Only a node the game actually draws a translucent list for is a
 		// stock draw; every other replaced node reaches here in the
 		// translucent pass and the game draws nothing for it either.
@@ -10992,15 +11722,21 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		root = xblaMeshSkinRoot(m, model, node, xblaMeshPartMtx(model, use, 0));
 
 		if (optPose && m->nummatrices && root) {
-			Vtx *pose;
+			Vtx *pose = NULL;
+
+			// Normals only for a draw that will reflect: the opaque pass,
+			// within the cutoff.
+			const s32 normals = opa && m->envgdl && xblaTexGetEnabled() && XBLAMESH_ENV_WANTED() &&
+					xblaMeshEnvironmentReach(m, root) > 0;
 
 			if (m->posedmodel == model && m->posedframe == frameCount &&
 					m->posedvtx) {
 				pose = m->posedvtx;
 				finemtx = m->posedmtx;
+			} else if (m->gpumodel == model && m->gpuframe == frameCount && m->gpupal) {
+				gpupal = m->gpupal;
+				finemtx = m->gpumtx;
 			} else {
-				// Normals only for a draw that will reflect: the opaque pass,
-				// within the cutoff.
 				f32 headshift[3] = { 0.0f, 0.0f, 0.0f };
 
 				if (e->modeldef != model->definition) {
@@ -11008,29 +11744,59 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 					headshift[1] += (f32)headfitAppliedOffset(e->modeldef);
 				}
 
-				pose = xblaMeshPose(m, model, root, &finemtx, &fine,
-						opa && m->envgdl && xblaTexGetEnabled() && XBLAMESH_ENV_WANTED() &&
-						xblaMeshEnvironmentReach(m, root) > 0,
-						headshift);
+				// A destroyed GoldenEye prop's crumpling goes in with the pose:
+				// objRender()'s destroyed mode, as scorched below, and never a
+				// door's trim, which also moves the game's vertices
+				const f32 *disp = use && m->frombean && !gebeanRowIsChr(m->beanrow)
+						&& renderdata->unk30 == 9 && (renderdata->envcolour & 0xff) != 0
+						? xblaMeshDeformOffsets(m, model, use, e->slot) : NULL;
 
-				if (pose) {
-					framePoses++;
-				} else {
-					framePoseFails++;
+				// Posed on the GPU (G_MESH_EXT) unless something drawn here reads
+				// the posed vertices themselves: the logo passes are lit from
+				// them, and a destroyed prop's crumpling goes in with them. The
+				// reflections are posed there too, from a copy of the vertices
+				// made once (xblaMeshEnvStatic()), which a mesh that reflects
+				// has to have.
+				if (!disp && envforce != XBLAMESH_ENV_LOGO && m->bindpos && m->weights && m->bones
+						&& (!normals || (!m->envown && m->normals && xblaMeshEnvStatic(m)))
+						&& gfxMeshGpuAvailable()) {
+					gpupal = xblaMeshGpuPalette(m, model, root, headshift, &finemtx);
+
+					if (gpupal) {
+						frameGpuPoses++;
+						m->gpumodel = model;
+						m->gpuframe = frameCount;
+						m->gpupal = gpupal;
+						m->gpumtx = finemtx;
+					}
 				}
 
-				// Not remembered when there was no room this frame, so that
-				// the next part tries again rather than inheriting a miss.
-				if (pose) {
-					m->posedmodel = model;
-					m->posedframe = frameCount;
-					m->posedvtx = pose;
-					m->posedmtx = finemtx;
-					m->posedfine = fine;
+				if (!gpupal) {
+					pose = xblaMeshPose(m, model, root, &finemtx, &fine, normals, headshift, disp);
+
+					if (pose) {
+						framePoses++;
+					} else {
+						framePoseFails++;
+					}
+
+					// Not remembered when there was no room this frame, so that
+					// the next part tries again rather than inheriting a miss.
+					if (pose) {
+						m->posedmodel = model;
+						m->posedframe = frameCount;
+						m->posedvtx = pose;
+						m->posedmtx = finemtx;
+						m->posedfine = fine;
+					}
 				}
 			}
 
-			if (pose) {
+			if (gpupal) {
+				// The bind pose goes under the bone's own matrix as floats,
+				// and the GPU poses it into that matrix's space (below)
+				drawmtx = finemtx;
+			} else if (pose) {
 				posed = pose;
 
 				// The pose was written finer than the game's units, so it goes
@@ -11163,6 +11929,30 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 
 	gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_VTX, osVirtualToPhysical(posed));
 
+	// The lists below drawn from the renderer's copy of the mesh on the GPU,
+	// posed by gpupal there (G_MESH_EXT, gfxmesh.h): what they load from the
+	// mesh's own vertices costs nothing per vertex here or in the renderer. A
+	// trimmed or crumpled copy is drawn as it always was, and so is whatever
+	// the renderer cannot do on the GPU (it loads those lists on the CPU,
+	// posing them by the same palette).
+	if (posed == m->vertices && (gpupal || !m->bindpos || !m->nummatrices || !optPose || !root)
+			&& gfxMeshGpuAvailable()) {
+		meshdraw = xblaMeshFrameAlloc(sizeof(*meshdraw));
+
+		if (meshdraw) {
+			m->gpu.vertices = m->vertices;
+			m->gpu.numvertices = m->numvertices;
+			m->gpu.bindpos = m->bindpos;
+			m->gpu.weights = m->weights;
+			m->gpu.bones = m->bones;
+			m->gpu.nummatrices = m->nummatrices;
+			m->gpu.normals = m->normals;
+			meshdraw->mesh = &m->gpu;
+			meshdraw->palette = gpupal;
+			gSPMeshEXT(renderdata->gdl++, meshdraw);
+		}
+	}
+
 	// The N64 sheen (Mod.XblaReflectStyle) in place of the release's cube: the
 	// same pass from the copy that lights and sphere-maps 0x3eb the way the stock
 	// guns do (xblaMeshBuildSheen()), at the sheen's larger share. Never on a
@@ -11190,9 +11980,18 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 	// dark. Drawn under that mode a GoldenEye XBLA mesh vanished whole - every
 	// tank shot in Facility's bottling room left only its smoke in the HD look
 	// (2026-09-26) - so it is drawn under the whole object's mode, the
-	// environment alpha taken off round it, and scorched instead: its colours
-	// at a quarter. No reflection (xblaMeshEnvironmentLight(), which still sees
-	// the alpha).
+	// environment alpha taken off round it. No reflection
+	// (xblaMeshEnvironmentLight(), which still sees the alpha).
+	//
+	// The crumpling and the blackening are GoldenEye's own (objDeformGe()),
+	// mirrored from the prop's lists through the bruise map as a Perfect Dark
+	// prop's are: the vertices pressed down and pushed about, black where
+	// GoldenEye wrote black (nine in ten of the upper half's, one in five of
+	// the lower's) and the rest their own colour - with the mesh's own alpha,
+	// not the cleared one. Only where the map cannot be made is the whole mesh
+	// scorched to a quarter, which is what every destroyed prop was until
+	// 2026-09-30: a shot crate stood whole as a black box and Train's brake
+	// unit as two black stems (F3 20260930-191713, 191733).
 	const s32 scorched = m->frombean && !m->local && renderdata->unk30 == 9
 			&& (renderdata->envcolour & 0xff) != 0;
 	const u32 scorchedenv = renderdata->envcolour;
@@ -11204,11 +12003,22 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 	const u8 *wound = NULL;
 
 	// A GoldenEye character's too: its map is made from the list nodes it
-	// covers on the pack's side (xblaMeshBruiseNodes()). Not a GoldenEye
-	// prop's: a destroyed one is scorched below, and the mirror would carry
-	// objDeform()'s cleared alpha onto it.
-	if (use && !m->local && (!m->frombean || gebeanRowIsChr(m->beanrow))) {
+	// covers on the pack's side (xblaMeshBruiseNodes()). A GoldenEye prop's
+	// only once destroyed (scorched), and with the mesh's own alpha: the
+	// mirror would carry objDeform()'s cleared alpha onto it.
+	const s32 beanprop = m->frombean && !gebeanRowIsChr(m->beanrow);
+	s32 scorchmirrored = 0;
+
+	if (use && !m->local && (!beanprop || scorched)) {
 		Col *bruised = xblaMeshBruiseColours(m, model, use, !grafted, e->slot);
+
+		if (bruised && beanprop) {
+			for (s32 i = 0; i < m->numvertices; i++) {
+				bruised[i].a = m->colours[i].a;
+			}
+
+			scorchmirrored = 1;
+		}
 
 		if (bruised) {
 			boundcol = bruised;
@@ -11227,7 +12037,11 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		const s32 isposed = posed == m->posedvtx && m->posedmodel == model &&
 				m->posedframe == frameCount;
 
+		// Posed on the GPU, a skinned mesh's normals are the renderer's to
+		// pose (G_MESH_EXT): its bind normals stand in here, where nothing
+		// reads their direction
 		const f32 *normals = isposed ? m->posednrm : m->normals;
+		const s32 envgpu = meshdraw && !m->envown && m->normals && xblaMeshEnvStatic(m);
 
 		// The distance fade is kept apart from the room's light: it takes the
 		// reflection away from the material altogether, so the colours below
@@ -11239,7 +12053,23 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 
 		// Made here rather than at the pass, so that a frame arena with no room
 		// for them leaves the colours unscaled as well.
-		if (envlight > 0 && !xblaMeshEnvironmentVertices(m, model, posed, normals, root,
+		if (envlight > 0 && envgpu) {
+			envdraw = xblaMeshFrameAlloc(sizeof(*envdraw));
+
+			if (!envdraw || !xblaMeshEnvironmentGpu(m, model, envlight, sheen, wound, &envvtx, &envcol)) {
+				envdraw = NULL;
+				envlight = 0;
+			} else {
+				// the same mesh over the copy, under a name of the renderer's own
+				const u32 envid = m->envgpu.id;
+
+				m->envgpu = m->gpu;
+				m->envgpu.id = envid;
+				m->envgpu.vertices = envvtx;
+				envdraw->mesh = &m->envgpu;
+				envdraw->palette = gpupal;
+			}
+		} else if (envlight > 0 && !xblaMeshEnvironmentVertices(m, model, posed, normals, root,
 					envlight, sheen, wound, &envvtx, &envcol)) {
 			envlight = 0;
 		}
@@ -11300,8 +12130,9 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 			}
 		}
 
-		// A destroyed GoldenEye prop, scorched: see scorched below
-		if (scorched) {
+		// A destroyed GoldenEye prop with no map to mirror GoldenEye's
+		// blackening through, scorched whole: see scorched above
+		if (scorched && !scorchmirrored) {
 			Col *burnt = xblaMeshFrameAlloc((u32)m->numvertices * sizeof(Col));
 
 			if (burnt) {
@@ -11372,24 +12203,25 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		// letters from about 300 to 600 units out. The cutout is cut on its
 		// texels alone.
 		//
-		// A character's or a gun's (a skinned mesh's) alpha span is blended
-		// by its texels' alpha instead, still writing depth, with only the
-		// clear texels discarded - the release's own state for its models
-		// (blend on, depth written, no alpha test). Hair is a soft picture:
-		// cut at the edge test's fifth, every strand thinner than that came
-		// out solid, and Joanna's fringe drew as a thick slab over her face
-		// (F3 20260929-172810, "opacity of textures is lost, only
-		// transparency"). A hard-edged cutout comes out the same either way.
+		// A character's or a gun's (a skinned mesh's) span is a soft picture,
+		// and only its core is cut here: the texels of three quarters alpha
+		// and more (G_ALPHA_CORE_EXT), solid and writing depth. The rest is
+		// blended over it in the translucent pass (softspan, below). Cut at
+		// the edge test's fifth, every half-clear strand of hair came out
+		// solid and Joanna's fringe drew as a thick slab over her face (F3
+		// 20260929-172810). Blended here instead, writing depth (e06d1298b,
+		// the release's own state, which leans on its own draw order), a
+		// strand was laid over whatever had been drawn by then - the sky, or
+		// the room behind her not yet drawn - and hid what came after it:
+		// the hair went see-through wherever it was half clear (F3
+		// 20260930-044656) and a lens showed the sky (F3 20260930-023254).
 		if (xlupart >= 0 && !xlulist) {
-			const s32 soft = g_XblaMeshSoftCutouts && m->nummatrices > 0 && renderdata->zbufferenabled;
+			xblaMeshSetSpanMode(renderdata, node,
+					renderdata->zbufferenabled ? G_RM_AA_ZB_TEX_EDGE2 : G_RM_AA_TEX_EDGE2,
+					renderdata->zbufferenabled ? G_RM_AA_ZB_TEX_EDGE : G_RM_AA_TEX_EDGE);
 
-			if (soft) {
-				xblaMeshSetSpanMode(renderdata, node, XBLAMESH_RM_SOFT_EDGE(2), XBLAMESH_RM_SOFT_EDGE(1));
-				gDPSetAlphaCompare(renderdata->gdl++, G_AC_THRESHOLD);
-			} else {
-				xblaMeshSetSpanMode(renderdata, node,
-						renderdata->zbufferenabled ? G_RM_AA_ZB_TEX_EDGE2 : G_RM_AA_TEX_EDGE2,
-						renderdata->zbufferenabled ? G_RM_AA_ZB_TEX_EDGE : G_RM_AA_TEX_EDGE);
+			if (softspan) {
+				gSPSetExtraGeometryModeEXT(renderdata->gdl++, G_ALPHA_CORE_EXT);
 			}
 
 			if (renderdata->unk30 == 9) {
@@ -11402,8 +12234,8 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
 			}
 
-			if (soft) {
-				gDPSetAlphaCompare(renderdata->gdl++, G_AC_NONE);
+			if (softspan) {
+				gSPClearExtraGeometryModeEXT(renderdata->gdl++, G_ALPHA_CORE_EXT);
 			}
 		}
 
@@ -11426,6 +12258,11 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_VTX, osVirtualToPhysical(envvtx));
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_COL1, osVirtualToPhysical(envcol));
+
+				if (envdraw) {
+					gSPMeshEXT(renderdata->gdl++, envdraw);
+				}
+
 				gDPPipeSync(renderdata->gdl++);
 				gDPSetCycleType(renderdata->gdl++, G_CYC_2CYCLE);
 				gDPSetRenderMode(renderdata->gdl++, G_RM_AA_ZB_XLU_INTER, G_RM_AA_ZB_XLU_INTER2);
@@ -11467,12 +12304,22 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				renderdata->gdl = roomSheenStockResume(renderdata->gdl);
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_VTX, osVirtualToPhysical(posed));
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_COL1, osVirtualToPhysical(boundcol));
+
+				if (envdraw) {
+					gSPMeshEXT(renderdata->gdl++, meshdraw);
+				}
+
 				frameDraws++;
 			} else {
 				const s32 fading = envfading;
 
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_VTX, osVirtualToPhysical(envvtx));
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_COL1, osVirtualToPhysical(envcol));
+
+				if (envdraw) {
+					gSPMeshEXT(renderdata->gdl++, envdraw);
+				}
+
 				gDPPipeSync(renderdata->gdl++);
 				gDPSetCycleType(renderdata->gdl++, G_CYC_2CYCLE);
 				gDPSetRenderMode(renderdata->gdl++, G_RM_AA_ZB_XLU_INTER, G_RM_AA_ZB_XLU_INTER2);
@@ -11492,6 +12339,11 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				gSPClearExtraGeometryModeEXT(renderdata->gdl++, G_ADDITIVE_EXT | G_ENVMAP_EXT);
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_VTX, osVirtualToPhysical(posed));
 				gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_COL1, osVirtualToPhysical(boundcol));
+
+				if (envdraw) {
+					gSPMeshEXT(renderdata->gdl++, meshdraw);
+				}
+
 				frameDraws++;
 			}
 		}
@@ -11637,6 +12489,30 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		gSPDisplayList(renderdata->gdl++, xlulist);
 	}
 
+	// The soft span's second draw: all of it, blended by its texels' alpha
+	// over the core the opaque pass cut and whatever is behind, which by the
+	// translucent pass is all there. Depth tested (less than, so the core is
+	// not laid over itself) and not written, and lit like the body it is on.
+	// Only the clear texels are thrown away.
+	if (xlu && softspan) {
+		xblaMeshApplyNodeMode(renderdata, node, 1);
+		xblaMeshSetSpanMode(renderdata, node, G_RM_AA_ZB_XLU_SURF2, G_RM_AA_ZB_XLU_SURF);
+		gDPSetAlphaCompare(renderdata->gdl++, G_AC_THRESHOLD);
+
+		if (renderdata->unk30 == 9) {
+			gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, 0);
+		}
+
+		gSPDisplayList(renderdata->gdl++, &m->gdl[xlupart]);
+
+		if (renderdata->unk30 == 9) {
+			gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
+		}
+
+		gDPSetAlphaCompare(renderdata->gdl++, G_AC_NONE);
+		frameDraws++;
+	}
+
 	if (xlu && fadelist) {
 		if (xblaMeshVerbose && !m->fadelogged) {
 			m->fadelogged = 1;
@@ -11670,14 +12546,26 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 				renderdata->unk30 == 9 ? (renderdata->envcolour >> 8) & 0xff : 0);
 		gSPDisplayList(renderdata->gdl++, fadelist);
 
-		// A tinted pane's far grey over it by the same opacity, so the pane
-		// goes to the N64 look's colour as it goes opaque: see xblaMeshTintCopy()
-		if (m->tintgdl && renderdata->unk30 == 9 && ((renderdata->envcolour >> 8) & 0xff) != 0) {
+		// A tinted pane's far look: GoldenEye's own pane, drawn by the game
+		// after the mesh at the same opacity (xblaMeshKeptLists()), so the
+		// pane goes to the N64 look's glass as it goes opaque. That glass is
+		// environment-mapped (GoldenEye's flag 0x200, our ORTHOGONAL): a flat
+		// grey in its place (XBLAMESH_TINT_*, measured where Facility's lab
+		// windows reflect little) left Control's panes, opaque from 10 units
+		// (opadist), a black wall where GoldenEye's show the room's lights
+		// (F3 20261003-102904). The flat grey stays for a pane in a mesh with
+		// more than panes in it (the gas plant's clear door).
+		if (m->tintgdl && renderdata->unk30 == 9 && ((renderdata->envcolour >> 8) & 0xff) != 0
+				&& tintStockNode != node) {
 			gDPSetPrimColor(renderdata->gdl++, 0, 0, XBLAMESH_TINT_R, XBLAMESH_TINT_G, XBLAMESH_TINT_B,
 					(renderdata->envcolour >> 8) & 0xff);
 			gSPDisplayList(renderdata->gdl++, m->tintgdl + (fadelist - m->gdl));
 			gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
 		}
+	}
+
+	if (meshdraw) {
+		gSPMeshEXT(renderdata->gdl++, NULL);
 	}
 
 	// Put segment 5 back to what the game's own draw of this node leaves in it:
@@ -11745,6 +12633,8 @@ s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
  * Not reached when the game tests boxes only - two or more human players
  * (shotCalculateHits()'s `cheap`), or a chr's shield.
  */
+// (with the notes full, xblaMeshObjShotTest() counts the model as wholly
+// drawn from the release rather than shooting lists past the cap on the ROM)
 #define XBLAMESH_HITLISTS 32
 
 struct xblameshhitlist {
@@ -11763,13 +12653,50 @@ void xblaMeshHitBegin(void)
 	numHitLists = 0;
 }
 
+// xblaMeshObjShotTest()'s noted lists, kept for the ROM walk it sends its
+// caller to (the walk starts its own notes with xblaMeshHitBegin())
+static struct modelnode *hitSkipNodes[XBLAMESH_HITLISTS];
+static s32 hitSkipNoted;
+
+static s32 xblaMeshHitIsNoted(struct modelnode *node)
+{
+	s32 i;
+
+	for (i = 0; i < numHitLists; i++) {
+		if (hitLists[i].node == node) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+static s32 xblaMeshHitIsSkipped(struct modelnode *node)
+{
+	s32 i;
+
+	for (i = 0; i < hitSkipNoted; i++) {
+		if (hitSkipNodes[i] == node) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 s32 xblaMeshHitSkipsNode(struct model *model, struct modelnode *node)
 {
 	struct xblameshentry *e;
 	s32 frompack;
 	const u32 type = node ? node->type & 0xff : 0;
 
-	if (!model || !g_XblaMeshNumNodes || (!optEnabled && !releaseOnlyLoaded) || opened <= 0 || !built ||
+	// xblaMeshObjShotTest()'s ROM walk: a list noted as drawn from a mesh is
+	// tested on the mesh, not here
+	if (hitSkipNoted && (type == MODELNODETYPE_DL || type == MODELNODETYPE_GUNDL) && xblaMeshHitIsSkipped(node)) {
+		return 1;
+	}
+
+	if (!model || !g_XblaMeshNumNodes || (!xblaMeshGetEnabled() && !releaseOnlyLoaded) || opened <= 0 || !built ||
 			(type != MODELNODETYPE_DL && type != MODELNODETYPE_GUNDL)) {
 		return 0;
 	}
@@ -11792,7 +12719,7 @@ s32 xblaMeshHitSkipsNode(struct model *model, struct modelnode *node)
 		return 0;
 	}
 
-	if (model->definition && model->definition != e->modeldef && !xblaMeshNodeIsGrafted(model, node)) {
+	if (model->definition && model->definition != e->modeldef && !xblaMeshNodeIsGraftedFrom(model, node, e->modeldef)) {
 		return 0;
 	}
 
@@ -11822,6 +12749,15 @@ s32 xblaMeshHitSkipsNode(struct model *model, struct modelnode *node)
 	return optBoth ? 0 : 1;
 }
 
+/**
+ * Ends the ROM walk xblaMeshObjShotTest() sent its caller to with -1 for a
+ * model partly drawn from the release.
+ */
+void xblaMeshObjShotTestEnd(void)
+{
+	hitSkipNoted = 0;
+}
+
 s32 xblaMeshModelHasMesh(struct model *model)
 {
 	static const struct model *cachemodel;
@@ -11830,7 +12766,7 @@ s32 xblaMeshModelHasMesh(struct model *model)
 	struct modelnode *nodes[128];
 	s32 n;
 
-	if (!model || !model->definition || !g_XblaMeshNumNodes || (!optEnabled && !releaseOnlyLoaded) || opened <= 0 || !built) {
+	if (!model || !model->definition || !g_XblaMeshNumNodes || (!xblaMeshGetEnabled() && !releaseOnlyLoaded) || opened <= 0 || !built) {
 		return 0;
 	}
 
@@ -11900,7 +12836,7 @@ s32 xblaMeshHeldOffset(struct model *model, struct modelnode *handnode, f32 out[
 
 	out[0] = out[1] = out[2] = 0.0f;
 
-	if (!model || !model->definition || !handnode || !optEnabled || opened <= 0 || !beanBuilt[0]
+	if (!model || !model->definition || !handnode || !xblaMeshGetEnabled() || opened <= 0 || !beanBuilt[0]
 			|| !gebeanGetEnabled()) {
 		return 0;
 	}
@@ -12029,7 +12965,7 @@ s32 xblaMeshHeldOffset(struct model *model, struct modelnode *handnode, f32 out[
 s32 xblaMeshModelDrawsBean(struct model *model)
 {
 	struct modelnode *nodes[128];
-	const s32 look = !optEnabled;
+	const s32 look = !xblaMeshGetEnabled();
 	s32 n;
 
 	if (!model || !model->definition || !g_XblaMeshNumNodes || !gebeanGetEnabled() || !beanBuilt[look]) {
@@ -12045,7 +12981,7 @@ s32 xblaMeshModelDrawsBean(struct model *model)
 				&& e->packpart != XBLAMESH_NOPART && e->fileid
 				&& !(e->matched && xblaMeshEntryLive(e) && opened > 0)
 				&& !modelpackFindN64(e->fileid)
-				&& (optEnabled || gebeanRowIsPool(e->beanrow) || gebeanRowIsFirstPerson(e->beanrow))
+				&& (xblaMeshGetEnabled() || gebeanRowIsPool(e->beanrow) || gebeanRowIsFirstPerson(e->beanrow))
 				&& beanBuilt[look][e->fileid] && beanBuilt[look][e->fileid]->state > 0) {
 			return 1;
 		}
@@ -12056,7 +12992,7 @@ s32 xblaMeshModelDrawsBean(struct model *model)
 
 s32 xblaMeshModeldefDrawsMesh(const struct modeldef *modeldef)
 {
-	if (!modeldef || !g_XblaMeshNumNodes || (!optEnabled && !releaseOnlyLoaded) || opened <= 0 || !built) {
+	if (!modeldef || !g_XblaMeshNumNodes || (!xblaMeshGetEnabled() && !releaseOnlyLoaded) || opened <= 0 || !built) {
 		return 0;
 	}
 
@@ -12242,6 +13178,10 @@ s32 xblaMeshHitTest(struct model *model, struct coord *pos, struct coord *far, s
 					mtx4MultMtx4(&model->matrices[back], &backbind, &pal[i]);
 				} else if (i < posable) {
 					mtx4MultMtx4(&model->matrices[i], &m->invbind[i], &pal[i]);
+
+					if (m->beannumhubs) {
+						xblaMeshHubShift(m, model, i, posable, &pal[i]);
+					}
 				} else if (posable > 0) {
 					mtx4Copy(&pal[0], &pal[i]);
 				} else {
@@ -12524,33 +13464,15 @@ s32 xblaMeshHitTest(struct model *model, struct coord *pos, struct coord *far, s
 }
 
 /**
- * The first surface of the release's mesh drawn for `model` on the segment
- * `from` to `to` (world space), for something that sticks where the ROM's
- * collision surface is: the release's props are not the N64 ones' shape, and
- * a mine stuck to a Facility tank sat inside the HD tank's fatter walls. The
- * model's matrices are the last frame's, in the camera's space, as the shot
- * tests them (and objEmbed() reads them); 0 where nothing of the release's is
- * drawn on the model - the N64 look - or the segment meets none of it.
+ * Notes every list of `model` whose release mesh is drawn in the current look
+ * for xblaMeshHitTest(): the release's own (xblaMeshHitSkipsNode()) and
+ * GoldenEye's release's (beanBuilt), by xblaMeshRenderNode()'s `frombean`
+ * rule. Returns how many were noted.
  */
-s32 xblaMeshSurfaceAlong(struct model *model, const struct coord *from, const struct coord *to, struct coord *hit)
+static s32 xblaMeshHitNoteModel(struct model *model)
 {
 	struct modelnode *node;
-	struct coord pos;
-	struct coord far;
-	struct coord dir;
-	struct hitthing hitthing;
-	struct modelnode *bbox = NULL;
-	struct modelnode *dlnode = NULL;
-	s32 hitpart = 0;
-	Mtxf *camtoworld = camGetProjectionMtxF();
-	Mtxf worldtocam;
-	const s32 look = !optEnabled;
-	f32 len;
-	f32 sqdist;
-
-	if (!model || !model->matrices || !model->definition || !camtoworld || !g_XblaMeshNumNodes) {
-		return 0;
-	}
+	const s32 look = !xblaMeshGetEnabled();
 
 	numHitLists = 0;
 
@@ -12561,9 +13483,8 @@ s32 xblaMeshSurfaceAlong(struct model *model, const struct coord *from, const st
 			// the release's own mesh for the list, as a shot finds it
 			xblaMeshHitSkipsNode(model, node);
 
-			// or GoldenEye's release's, which a shot does not test yet, by
-			// xblaMeshRenderNode()'s `frombean` rule: its HD props are drawn
-			// only with the meshes on (F6), as they are asked here
+			// or GoldenEye's release's, by xblaMeshRenderNode()'s `frombean`
+			// rule: its HD props are drawn only with the meshes on (F6)
 			if (numHitLists < XBLAMESH_HITLISTS && gebeanGetEnabled() && beanBuilt[look]) {
 				struct xblameshentry *e = xblaMeshSlotFor(node);
 
@@ -12571,7 +13492,7 @@ s32 xblaMeshSurfaceAlong(struct model *model, const struct coord *from, const st
 						&& e->packpart != XBLAMESH_NOPART && e->fileid && !e->suppress
 						&& !(e->matched && xblaMeshEntryLive(e) && opened > 0)
 						&& !modelpackFindN64(e->fileid)
-						&& (optEnabled || gebeanRowIsPool(e->beanrow) || gebeanRowIsFirstPerson(e->beanrow))
+						&& (xblaMeshGetEnabled() || gebeanRowIsPool(e->beanrow) || gebeanRowIsFirstPerson(e->beanrow))
 						&& beanBuilt[look][e->fileid] && beanBuilt[look][e->fileid]->state > 0) {
 					hitLists[numHitLists].node = node;
 					hitLists[numHitLists].e = e;
@@ -12592,7 +13513,37 @@ s32 xblaMeshSurfaceAlong(struct model *model, const struct coord *from, const st
 		}
 	}
 
-	if (!numHitLists) {
+	return numHitLists;
+}
+
+/**
+ * The first surface of the release's mesh drawn for `model` on the segment
+ * `from` to `to` (world space), for something that sticks where the ROM's
+ * collision surface is: the release's props are not the N64 ones' shape, and
+ * a mine stuck to a Facility tank sat inside the HD tank's fatter walls. The
+ * model's matrices are the last frame's, in the camera's space, as the shot
+ * tests them (and objEmbed() reads them); 0 where nothing of the release's is
+ * drawn on the model - the N64 look - or the segment meets none of it.
+ */
+s32 xblaMeshSurfaceAlong(struct model *model, const struct coord *from, const struct coord *to, struct coord *hit)
+{
+	struct coord pos;
+	struct coord far;
+	struct coord dir;
+	struct hitthing hitthing;
+	struct modelnode *bbox = NULL;
+	struct modelnode *dlnode = NULL;
+	s32 hitpart = 0;
+	Mtxf *camtoworld = camGetProjectionMtxF();
+	Mtxf worldtocam;
+	f32 len;
+	f32 sqdist;
+
+	if (!model || !model->matrices || !model->definition || !camtoworld || !g_XblaMeshNumNodes) {
+		return 0;
+	}
+
+	if (!xblaMeshHitNoteModel(model)) {
 		return 0;
 	}
 
@@ -12620,6 +13571,106 @@ s32 xblaMeshSurfaceAlong(struct model *model, const struct coord *from, const st
 	}
 
 	mtx4TransformVec(camtoworld, &hitthing.pos, hit);
+
+	return 1;
+}
+
+/**
+ * A shot at an object that draws GoldenEye's release mesh (the HD look's
+ * props: Jungle's trees, crates, doors), against the triangles drawn rather
+ * than the ROM model's: the release's thin jungle trees stand inside the N64
+ * trunks' width, and a shot past the drawn trunk stopped on the invisible N64
+ * one (F3 20261002-234900). `pos`/`dir` are the shot's, in the camera's space
+ * as the model's matrices are, and `range` how far it reaches.
+ *
+ * -1: the model draws no GoldenEye release mesh, or the ray misses the mesh
+ * and some lists are still the ROM's - test the ROM's triangles (the mesh's
+ * lists left out until xblaMeshObjShotTestEnd()).
+ * 0: the ray misses what is drawn. 1: a hit, its position and normal in the
+ * space of the model matrix `*mtxindex` (as func0f0849dc() gives them), with
+ * the bbox it counts against and the list it was drawn for.
+ */
+s32 xblaMeshObjShotTest(struct model *model, struct coord *pos, struct coord *dir, f32 range,
+		struct hitthing *hitthing, s32 *mtxindex, struct modelnode **bboxnode, s32 *hitpart,
+		struct modelnode **dlnode)
+{
+	struct coord far;
+	struct coord local;
+	struct coord normal;
+	f32 sqdist;
+	s32 mtx;
+	Mtxf inv;
+
+	if (!model || !model->matrices || !model->definition || !g_XblaMeshNumNodes
+			|| !xblaMeshModelDrawsBean(model)) {
+		return -1;
+	}
+
+	if (!xblaMeshHitNoteModel(model)) {
+		return -1;
+	}
+
+	if (range <= 0.0f || range > 65536.0f) {
+		range = 65536.0f;
+	}
+
+	far.x = pos->x + dir->x * range;
+	far.y = pos->y + dir->y * range;
+	far.z = pos->z + dir->z * range;
+	sqdist = range * range;
+
+	if (!xblaMeshHitTest(model, pos, &far, dir, &sqdist, hitthing, bboxnode, hitpart, dlnode)) {
+		struct modelnode *node;
+
+		// A model only partly drawn from the release (some lists still the
+		// ROM's) is shot on those lists as the stock walk shoots them, with
+		// the mesh's lists left out of it; -1 sends the caller to that walk.
+		// With the notes full, lists past the cap may be the release's too
+		// and their ROM triangles invisible: the model counts as wholly the
+		// release's rather than shooting what is not drawn
+		for (node = numHitLists >= XBLAMESH_HITLISTS ? NULL : model->definition->rootnode; node; ) {
+			const u32 type = node->type & 0xff;
+
+			if ((type == MODELNODETYPE_DL || type == MODELNODETYPE_GUNDL) && !xblaMeshHitIsNoted(node)) {
+				s32 i;
+
+				for (i = 0; i < numHitLists; i++) {
+					hitSkipNodes[i] = hitLists[i].node;
+				}
+
+				hitSkipNoted = numHitLists;
+				return -1;
+			}
+
+			if (node->child) {
+				node = node->child;
+			} else {
+				while (node && !node->next) {
+					node = node->parent;
+				}
+
+				node = node ? node->next : NULL;
+			}
+		}
+
+		return 0;
+	}
+
+	mtx = modelFindNodeMtxIndex(*bboxnode, 0);
+
+	if (mtx < 0 || mtx >= model->definition->nummatrices) {
+		mtx = 0;
+	}
+
+	// into the matrix's own space, where the stock hit puts it (hitCreate()
+	// and the bullet hole read it through model->matrices[mtxindex])
+	mtx000172f0(model->matrices[mtx].m, inv.m);
+	mtx4TransformVec(&inv, &hitthing->pos, &local);
+	mtx4RotateVec(&inv, &hitthing->unk0c, &normal);
+	guNormalize(&normal.x, &normal.y, &normal.z);
+	hitthing->pos = local;
+	hitthing->unk0c = normal;
+	*mtxindex = mtx;
 
 	return 1;
 }
@@ -12673,8 +13724,8 @@ struct xblameshbuilt *xblaMeshAnalysedForModel(const struct modeldef *def)
 			} else if (!e->matched && e->beanrow >= 0 && e->packpart != XBLAMESH_NOPART) {
 				mine = 1;
 
-				if (gebeanGetEnabled() && (optEnabled || gebeanRowIsPool(e->beanrow))) {
-					m = xblaMeshBuildBean(e, !optEnabled);
+				if (gebeanGetEnabled() && (xblaMeshGetEnabled() || gebeanRowIsPool(e->beanrow))) {
+					m = xblaMeshBuildBean(e, !xblaMeshGetEnabled());
 				}
 			}
 
@@ -12703,7 +13754,8 @@ struct xblameshbuilt *xblaMeshAnalysedForModel(const struct modeldef *def)
 
 s32 xblaMeshGetEnabled(void)
 {
-	return optEnabled;
+	// (off on a ROM hack's arena: xblaSwitchStageHeld())
+	return optEnabled && !xblaSwitchStageHeld();
 }
 
 /**
@@ -12731,6 +13783,7 @@ void xblaMeshSetEnabled(s32 enabled)
 	}
 
 	optEnabled = enabled;
+	traceNoteEvent("release meshes %s", enabled ? "on" : "off");
 
 	if (enabled) {
 		const s32 wasopen = opened > 0;
@@ -12818,12 +13871,12 @@ void xblaMeshTrace(FILE *f)
 	}
 
 	fprintf(f, "xblamesh: enabled %d opened %d pose %d; %u meshes built, %u KB; pose arena %u KB in %d chunks, cap %d MB; %u nodes in %u of %d table slots; frame %u\n",
-			optEnabled, opened, optPose, g_XblaMeshNumMeshes,
+			xblaMeshGetEnabled(), opened, optPose, g_XblaMeshNumMeshes,
 			(g_XblaMeshBytes + 1023) / 1024, arenakb, chunks,
 			XBLAMESH_ARENA_MAX / (1024 * 1024), nodes, slots, XBLAMESH_HASHSIZE,
 			frameCount);
-	fprintf(f, "xblamesh last frame: %u opaque lists drawn, %u poses written, %u poses refused by the arena (%u bytes wanted)\n",
-			frameDrawsLast, framePosesLast, framePoseFailsLast, frameWanted);
+	fprintf(f, "xblamesh last frame: %u opaque lists drawn, %u poses written, %u posed on the GPU, %u poses refused by the arena (%u bytes wanted)\n",
+			frameDrawsLast, framePosesLast, frameGpuPosesLast, framePoseFailsLast, frameWanted);
 }
 
 s32 xblaMeshTraceModel(FILE *f, const struct model *model, const char *indent)
@@ -12864,7 +13917,7 @@ s32 xblaMeshTraceModel(FILE *f, const struct model *model, const char *indent)
 				: (built && e->matched && e->slot < numRecords ? &built[e->slot] : NULL);
 
 		if (!frompack && !e->matched && e->beanrow >= 0) {
-			const s32 look = !optEnabled;
+			const s32 look = !xblaMeshGetEnabled();
 
 			m = beanBuilt[look] ? beanBuilt[look][e->fileid] : NULL;
 			fprintf(f, "%sGoldenEye XBLA character for %s (release %s, %s look, list %d): ",
@@ -12901,12 +13954,770 @@ s32 xblaMeshTraceModel(FILE *f, const struct model *model, const char *indent)
 	return count;
 }
 
+/*
+ * A GoldenEye hat on a head drawn as the release's HD mesh (F3
+ * 20260930-020448, 022258: "hat needs fixing on this head").
+ *
+ * GoldenEye fits a hat to each of its 28 random heads by a table
+ * (headHat_array_8003E464, gexPlusHeadHat()): an offset and a scale made for
+ * the N64 heads. The release carries the same table byte for byte (its image
+ * at 0x82729b88), but its HD heads are 4J's, other shapes that mostly wear a
+ * hat where the hat's own model puts it: the table's lift of 25 to 40 units
+ * for Karl, Duncan, Dwayne and B (their N64 crowns stand high) floated the
+ * side cap over their HD hair, tipped back. So on an HD head the table is not
+ * applied, and a side cap or a helmet is only lifted where 4J's hair stands
+ * through it - Karl's quiff, Pete's and Dave's crowns, 6 to 21 units:
+ *
+ * the head's surfaces over each 2-unit column, in the frame of the joint the
+ * hat hangs on, against the hat's outside (its HD triangles facing up there);
+ * the third deepest vertex of it under the head's top surface, and above its
+ * underside, is lifted 2 units clear. Deeper than 40 is a brim passing under
+ * an overhang (a quiff over a helmet's peak, the skull over its neck guard),
+ * not hair through a crown. A beret's and a fur hat's up-turned flaps read the
+ * same way and lifted them off their heads, so those are left as modelled
+ * (`measure` 0), as they sit.
+ *
+ * Handed back as an offset in the hat's own space, for chrRender() to apply
+ * the way it applied the table's. Measured once per chr, head and hat (the hat
+ * hangs rigidly on the head joint), from this frame's matrices. 0 when either
+ * is not drawn from the release in this look, and GoldenEye's table applies.
+ */
+#define XBLAMESH_HAT_CELL   2.0f
+#define XBLAMESH_HAT_GRID   160
+// A hat triangle faces up (its outside) past this much of its normal
+#define XBLAMESH_HAT_UP     0.3f
+// How far clear of the hair a hat's outside is lifted
+#define XBLAMESH_HAT_CLEAR  2.0f
+// The most hair is taken to stand through a hat
+#define XBLAMESH_HAT_DEEPEST 40.0f
+#define XBLAMESH_HAT_CACHE  128
+
+static struct {
+	const struct model *chrmodel;
+	const struct modeldef *headdef;
+	const struct modeldef *hatdef;
+	s32 ok;
+	s32 headrow; // the release's rows, plus one, for the log
+	s32 hatrow;
+	f32 offset[3];
+} hatSeats[XBLAMESH_HAT_CACHE];
+static s32 hatSeatNext;
+static f32 *hatSeatHeight;
+
+static void xblaMeshHatSeatsReset(void)
+{
+	memset(hatSeats, 0, sizeof(hatSeats));
+	hatSeatNext = 0;
+}
+
+static const struct xblameshentry *xblaMeshBeanEntry(struct modeldef *def)
+{
+	struct modelnode *node = def ? def->rootnode : NULL;
+
+	for (s32 walked = 0; node && walked < 512; walked++) {
+		const struct xblameshentry *e = xblaMeshSlotFor(node);
+
+		if (e && e->node == node && e->modeldef == def && !e->suppress
+				&& e->beanrow >= 0 && e->packpart != XBLAMESH_NOPART) {
+			return e;
+		}
+
+		if (node->child && (node->type & 0xff) != MODELNODETYPE_HEADSPOT) {
+			node = node->child;
+		} else {
+			while (node && !node->next) {
+				node = node->parent;
+			}
+
+			node = node ? node->next : NULL;
+		}
+	}
+
+	return NULL;
+}
+
+static s32 xblaMeshHatSeatMeasure(struct model *chrmodel, struct modeldef *headdef, struct model *hatmodel, s32 measure,
+		f32 out[3], s32 *outheadrow, s32 *outhatrow)
+{
+	const struct xblameshentry *he = xblaMeshBeanEntry(headdef);
+	const struct xblameshentry *te = xblaMeshBeanEntry(hatmodel->definition);
+	struct xblameshbuilt *head;
+	struct xblameshbuilt *hat;
+	const s32 nummtx = chrmodel->definition->nummatrices;
+	f32 headshift[3] = { 0.0f, 0.0f, 0.0f };
+	s32 votes[XBLAMESH_MAXMTX];
+	s32 bh = -1;
+	Mtxf lifted[XBLAMESH_MAXMTX];
+	Mtxf hj;
+	Mtxf invhj;
+	f32 *local;
+	f32 lo[2] = { 1e9f, 1e9f };
+	f32 hi[2] = { -1e9f, -1e9f };
+	s32 gw;
+	s32 gh;
+	f32 lift;
+	f32 worst[3] = { -1e9f, -1e9f, -1e9f };
+	s32 touches = 0;
+
+	if (!he || !te) {
+		return 0;
+	}
+
+	head = xblaMeshBuildBean(he, 0);
+	hat = xblaMeshBuildBean(te, 0);
+
+	if (!head || !hat || !head->beanhead || hat->beanhead || !head->bindpos || !head->bones
+			|| !head->weights || !head->invbind || !hat->vertices || hat->numvertices <= 0
+			|| head->nummatrices > XBLAMESH_MAXMTX || !chrmodel->matrices || !hatmodel->matrices) {
+		return 0;
+	}
+
+	out[0] = out[1] = out[2] = 0.0f;
+
+	if (!measure) {
+		return 1;
+	}
+
+	// The head's joint: the matrix most of its vertices hang from
+	memset(votes, 0, sizeof(votes));
+
+	for (s32 i = 0; i < head->numvertices; i++) {
+		const u8 *bone = &head->bones[i * 4];
+
+		if (bone[3] > 0 && bone[0] < XBLAMESH_MAXMTX) {
+			votes[bone[0]]++;
+		}
+	}
+
+	for (s32 i = 0; i < XBLAMESH_MAXMTX; i++) {
+		if (votes[i] > 0 && (bh < 0 || votes[i] > votes[bh])) {
+			bh = i;
+		}
+	}
+
+	if (bh < 0 || bh >= nummtx || bh >= head->nummatrices) {
+		return 0;
+	}
+
+	// Posed as the draw poses it (xblaMeshPose()), the seat it is given on
+	// this body included
+	xblaMeshPoolHeadSeat(head, he, chrmodel, headshift);
+	headshift[1] += (f32)headfitAppliedOffset(he->modeldef);
+
+	for (s32 b = 0; b < head->nummatrices; b++) {
+		const Mtxf *src = &chrmodel->matrices[b < nummtx ? b : bh];
+		Mtxf moved = *src;
+
+		for (s32 j = 0; j < 3; j++) {
+			moved.m[3][j] += src->m[0][j] * headshift[0] + src->m[1][j] * headshift[1] + src->m[2][j] * headshift[2];
+		}
+
+		mtx4MultMtx4(&moved, &head->invbind[b], &lifted[b]);
+
+		if (b == bh) {
+			hj = moved;
+		}
+	}
+
+	// The frame the hat hangs in - the head joint GoldenEye attaches it to -
+	// which is where up is the head's up whatever the pose (the mesh's own
+	// palette entries are the body's matrices)
+	if (hatmodel->attachedtonode) {
+		Mtxf *joint = modelFindNodeMtx(chrmodel, hatmodel->attachedtonode, 0);
+
+		if (joint) {
+			hj = *joint;
+		}
+	}
+
+	xblaMeshInvert(&hj, &invhj);
+
+	// The head in its joint's frame, where up is up
+	local = malloc((size_t)head->numvertices * 3 * sizeof(f32));
+
+	if (!local) {
+		return 0;
+	}
+
+	for (s32 i = 0; i < head->numvertices; i++) {
+		const u8 *bone = &head->bones[i * 4];
+		const f32 *weight = &head->weights[i * 3];
+		const s32 num = bone[3] < 3 ? bone[3] : 3;
+		struct coord in = { head->bindpos[i * 3], head->bindpos[i * 3 + 1], head->bindpos[i * 3 + 2] };
+		struct coord w = { 0.0f, 0.0f, 0.0f };
+		struct coord q;
+
+		for (s32 j = 0; j < num; j++) {
+			struct coord moved;
+
+			mtx4TransformVec(&lifted[bone[j] < head->nummatrices ? bone[j] : bh], &in, &moved);
+			w.x += moved.x * weight[j];
+			w.y += moved.y * weight[j];
+			w.z += moved.z * weight[j];
+		}
+
+		mtx4TransformVec(&invhj, &w, &q);
+		local[i * 3] = q.x;
+		local[i * 3 + 1] = q.y;
+		local[i * 3 + 2] = q.z;
+
+		lo[0] = q.x < lo[0] ? q.x : lo[0];
+		hi[0] = q.x > hi[0] ? q.x : hi[0];
+		lo[1] = q.z < lo[1] ? q.z : lo[1];
+		hi[1] = q.z > hi[1] ? q.z : hi[1];
+	}
+
+	gw = (s32)((hi[0] - lo[0]) / XBLAMESH_HAT_CELL) + 1;
+	gh = (s32)((hi[1] - lo[1]) / XBLAMESH_HAT_CELL) + 1;
+
+	if (gw <= 0 || gh <= 0 || gw > XBLAMESH_HAT_GRID || gh > XBLAMESH_HAT_GRID) {
+		free(local);
+		return 0;
+	}
+
+	if (!hatSeatHeight) {
+		hatSeatHeight = malloc(2 * XBLAMESH_HAT_GRID * XBLAMESH_HAT_GRID * sizeof(f32));
+
+		if (!hatSeatHeight) {
+			free(local);
+			return 0;
+		}
+	}
+
+	for (s32 i = 0; i < gw * gh; i++) {
+		hatSeatHeight[i] = -1e9f;
+		hatSeatHeight[XBLAMESH_HAT_GRID * XBLAMESH_HAT_GRID + i] = 1e9f;
+	}
+
+	// The head's surfaces over each column: its triangles, the hair's cutout
+	// cards with them (not its fading span), read out of the lists as the hit
+	// test reads them
+	for (s32 k = 0; k < head->numgroups * 2 && k < 128; k++) {
+		const s32 group = k >> 1;
+		const s32 start = (k & 1) ? head->groupxlu[group] : head->groupgfx[group];
+		Gfx *gdl;
+		s32 base = 0;
+
+		if (start < 0 || (head->groupabsent & (1ull << group))) {
+			continue;
+		}
+
+		gdl = &head->gdl[start];
+
+		for (s32 c = 0; c < 0x100000; c++, gdl++) {
+			const u8 op = (u8)(gdl->words.w0 >> 24);
+			const uintptr_t w1 = gdl->words.w1;
+			s32 idx[3];
+			const f32 *p[3];
+			f32 tlo[2];
+			f32 thi[2];
+			f32 den;
+
+			if (op == (u8)G_ENDDL) {
+				break;
+			}
+
+			if (op == (u8)G_VTX) {
+				base = (s32)((UNSEGADDR(w1) & 0xffffff) / sizeof(Vtx)) - (s32)((gdl->words.w0 >> 16) & 0xf);
+				continue;
+			}
+
+			if (op != (u8)G_TRI1) {
+				continue;
+			}
+
+			idx[0] = base + (s32)((w1 >> 16) & 0xff) / 10;
+			idx[1] = base + (s32)((w1 >> 8) & 0xff) / 10;
+			idx[2] = base + (s32)(w1 & 0xff) / 10;
+
+			if (idx[0] < 0 || idx[1] < 0 || idx[2] < 0 || idx[0] >= head->numvertices
+					|| idx[1] >= head->numvertices || idx[2] >= head->numvertices) {
+				continue;
+			}
+
+			for (s32 v = 0; v < 3; v++) {
+				p[v] = &local[idx[v] * 3];
+			}
+
+			den = (p[1][2] - p[2][2]) * (p[0][0] - p[2][0]) + (p[2][0] - p[1][0]) * (p[0][2] - p[2][2]);
+
+			if (den > -1e-6f && den < 1e-6f) {
+				continue;
+			}
+
+			tlo[0] = thi[0] = p[0][0];
+			tlo[1] = thi[1] = p[0][2];
+
+			for (s32 v = 1; v < 3; v++) {
+				tlo[0] = p[v][0] < tlo[0] ? p[v][0] : tlo[0];
+				thi[0] = p[v][0] > thi[0] ? p[v][0] : thi[0];
+				tlo[1] = p[v][2] < tlo[1] ? p[v][2] : tlo[1];
+				thi[1] = p[v][2] > thi[1] ? p[v][2] : thi[1];
+			}
+
+			for (s32 gx = (s32)((tlo[0] - lo[0]) / XBLAMESH_HAT_CELL); gx <= (s32)((thi[0] - lo[0]) / XBLAMESH_HAT_CELL) && gx < gw; gx++) {
+				for (s32 gz = (s32)((tlo[1] - lo[1]) / XBLAMESH_HAT_CELL); gz <= (s32)((thi[1] - lo[1]) / XBLAMESH_HAT_CELL) && gz < gh; gz++) {
+					const f32 x = lo[0] + ((f32)gx + 0.5f) * XBLAMESH_HAT_CELL;
+					const f32 z = lo[1] + ((f32)gz + 0.5f) * XBLAMESH_HAT_CELL;
+					const f32 a = ((p[1][2] - p[2][2]) * (x - p[2][0]) + (p[2][0] - p[1][0]) * (z - p[2][2])) / den;
+					const f32 b = ((p[2][2] - p[0][2]) * (x - p[2][0]) + (p[0][0] - p[2][0]) * (z - p[2][2])) / den;
+					const f32 g = 1.0f - a - b;
+
+					if (gx < 0 || gz < 0 || a < -0.001f || b < -0.001f || g < -0.001f) {
+						continue;
+					}
+
+					{
+						const f32 y = a * p[0][1] + b * p[1][1] + g * p[2][1];
+						f32 *cell = &hatSeatHeight[gz * gw + gx];
+						f32 *under = &hatSeatHeight[XBLAMESH_HAT_GRID * XBLAMESH_HAT_GRID + gz * gw + gx];
+
+						if (y > *cell) {
+							*cell = y;
+						}
+
+						if (y < *under) {
+							*under = y;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	free(local);
+
+	// The hat's outside - its triangles facing up in the head's frame, which
+	// a cap's lining under them does not - against the head's surface over
+	// each column: how far the hair stands through it
+	for (s32 k = 0; k < hat->numgroups && k < 64; k++) {
+		for (s32 l = 0; l < 2; l++) {
+			const s32 start = l == 0 ? hat->groupgfx[k] : hat->groupxlu[k];
+			Gfx *gdl;
+			s32 base = 0;
+
+			if (start < 0 || (hat->groupabsent & (1ull << k))) {
+				continue;
+			}
+
+			gdl = &hat->gdl[start];
+
+			for (s32 c = 0; c < 0x100000; c++, gdl++) {
+				const u8 op = (u8)(gdl->words.w0 >> 24);
+				const uintptr_t w1 = gdl->words.w1;
+				s32 idx[3];
+				struct coord q[3];
+				f32 e0[3];
+				f32 e1[3];
+				f32 ny;
+				f32 len;
+
+				if (op == (u8)G_ENDDL) {
+					break;
+				}
+
+				if (op == (u8)G_VTX) {
+					base = (s32)((UNSEGADDR(w1) & 0xffffff) / sizeof(Vtx)) - (s32)((gdl->words.w0 >> 16) & 0xf);
+					continue;
+				}
+
+				if (op != (u8)G_TRI1) {
+					continue;
+				}
+
+				idx[0] = base + (s32)((w1 >> 16) & 0xff) / 10;
+				idx[1] = base + (s32)((w1 >> 8) & 0xff) / 10;
+				idx[2] = base + (s32)(w1 & 0xff) / 10;
+
+				if (idx[0] < 0 || idx[1] < 0 || idx[2] < 0 || idx[0] >= hat->numvertices
+						|| idx[1] >= hat->numvertices || idx[2] >= hat->numvertices) {
+					continue;
+				}
+
+				for (s32 v = 0; v < 3; v++) {
+					struct coord in = { hat->vertices[idx[v]].x, hat->vertices[idx[v]].y, hat->vertices[idx[v]].z };
+					struct coord w;
+
+					mtx4TransformVec(&hatmodel->matrices[0], &in, &w);
+					mtx4TransformVec(&invhj, &w, &q[v]);
+				}
+
+				e0[0] = q[1].x - q[0].x; e0[1] = q[1].y - q[0].y; e0[2] = q[1].z - q[0].z;
+				e1[0] = q[2].x - q[0].x; e1[1] = q[2].y - q[0].y; e1[2] = q[2].z - q[0].z;
+				ny = e0[2] * e1[0] - e0[0] * e1[2];
+				len = sqrtf(ny * ny
+						+ (e0[1] * e1[2] - e0[2] * e1[1]) * (e0[1] * e1[2] - e0[2] * e1[1])
+						+ (e0[0] * e1[1] - e0[1] * e1[0]) * (e0[0] * e1[1] - e0[1] * e1[0]));
+
+				if (len < 1e-6f || ny / len < XBLAMESH_HAT_UP) {
+					continue;
+				}
+
+				for (s32 v = 0; v < 3; v++) {
+					const s32 gx = (s32)floorf((q[v].x - lo[0]) / XBLAMESH_HAT_CELL);
+					const s32 gz = (s32)floorf((q[v].z - lo[1]) / XBLAMESH_HAT_CELL);
+					f32 d;
+
+					// inside the head only between its surfaces over the
+					// column: a helmet's strap under the chin is not
+					if (gx < 0 || gz < 0 || gx >= gw || gz >= gh || hatSeatHeight[gz * gw + gx] < -1e8f
+							|| q[v].y < hatSeatHeight[XBLAMESH_HAT_GRID * XBLAMESH_HAT_GRID + gz * gw + gx]) {
+						continue;
+					}
+
+					d = hatSeatHeight[gz * gw + gx] - q[v].y;
+					touches++;
+
+					// the three worst, so one stray strand of hair is not the answer
+					// deeper than hair stands through a hat is its rim passing
+					// under an overhang - a quiff over a helmet's brim, the
+					// back of the skull over its neck guard - which no lift
+					// that still keeps it on the head clears
+					if (d > XBLAMESH_HAT_DEEPEST) {
+						continue;
+					}
+					for (s32 r = 0; r < 3; r++) {
+						if (d > worst[r]) {
+							for (s32 m2 = 2; m2 > r; m2--) {
+								worst[m2] = worst[m2 - 1];
+							}
+
+							worst[r] = d;
+							break;
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if (touches < 3) {
+		return 0;
+	}
+
+	// Hair through the outside lifts the hat clear of it; a hat clear of the
+	// hair stays as the model has it, which is where it sits on most of the
+	// HD heads (it is the table's fit that floated them)
+	lift = worst[2] + XBLAMESH_HAT_CLEAR > 0.0f ? worst[2] + XBLAMESH_HAT_CLEAR : 0.0f;
+
+	// Along the joint's up, as an offset in the hat's own space
+	{
+		struct coord up = { hj.m[1][0] * lift, hj.m[1][1] * lift, hj.m[1][2] * lift };
+		struct coord t;
+		Mtxf invmt;
+
+		xblaMeshInvert(&hatmodel->matrices[0], &invmt);
+		invmt.m[3][0] = invmt.m[3][1] = invmt.m[3][2] = 0.0f;
+		mtx4TransformVec(&invmt, &up, &t);
+		out[0] = t.x;
+		out[1] = t.y;
+		out[2] = t.z;
+	}
+
+	// Once a stage for each head and hat
+	{
+		s32 seen = 0;
+
+		for (s32 i = 0; i < XBLAMESH_HAT_CACHE; i++) {
+			if (hatSeats[i].headrow == he->beanrow + 1 && hatSeats[i].hatrow == te->beanrow + 1) {
+				seen = 1;
+				break;
+			}
+		}
+
+		if (!seen) {
+			sysLogPrintf(LOG_NOTE, "xblamesh: hat %s on head %s seated by its HD mesh: hair %.1f through its outside, lifted %.1f",
+					gebeanRowName(te->beanrow), gebeanRowName(he->beanrow), worst[2], lift);
+		}
+
+		*outheadrow = he->beanrow + 1;
+		*outhatrow = te->beanrow + 1;
+	}
+
+	return 1;
+}
+
+s32 xblaMeshHatSeat(struct model *chrmodel, struct modeldef *headdef, struct model *hatmodel, s32 measure, f32 out[3])
+{
+	s32 at = -1;
+
+	if (!xblaMeshGetEnabled() || !chrmodel || !headdef || !hatmodel || !hatmodel->definition || !chrmodel->definition) {
+		return 0;
+	}
+
+	for (s32 i = 0; i < XBLAMESH_HAT_CACHE; i++) {
+		if (hatSeats[i].chrmodel == chrmodel && hatSeats[i].headdef == headdef
+				&& hatSeats[i].hatdef == hatmodel->definition) {
+			at = i;
+			break;
+		}
+	}
+
+	if (at < 0) {
+		at = hatSeatNext;
+		hatSeatNext = (hatSeatNext + 1) % XBLAMESH_HAT_CACHE;
+		hatSeats[at].chrmodel = chrmodel;
+		hatSeats[at].headdef = headdef;
+		hatSeats[at].hatdef = hatmodel->definition;
+		hatSeats[at].headrow = hatSeats[at].hatrow = 0;
+		{
+			s32 headrow = 0;
+			s32 hatrow = 0;
+
+			hatSeats[at].ok = xblaMeshHatSeatMeasure(chrmodel, headdef, hatmodel, measure, hatSeats[at].offset, &headrow, &hatrow);
+			hatSeats[at].headrow = headrow;
+			hatSeats[at].hatrow = hatrow;
+		}
+	}
+
+	if (hatSeats[at].ok) {
+		out[0] = hatSeats[at].offset[0];
+		out[1] = hatSeats[at].offset[1];
+		out[2] = hatSeats[at].offset[2];
+	}
+
+	return hatSeats[at].ok;
+}
+
+/**
+ * A list address as a loaded model node holds it: a segment 5 address into
+ * the file (the segment its colours are drawn under, with the low bit set once
+ * its textures are rewritten) or a pointer already - gebean.c's
+ * beanResolveGdl().
+ */
+static const Gfx *xblaMeshResolveNodeGdl(const struct modelnode *node, const Gfx *gdl)
+{
+	const uintptr_t addr = (uintptr_t)gdl;
+	const u8 *base = (const u8 *)node->rodata->dl.colours;
+
+	if (gdl && addr <= 0xffffffff && ((addr & 1) || ((UNSEGADDR(addr) >> 24) & 0xff) == SPSEGMENT_MODEL_COL1)) {
+		return base ? (const Gfx *)(base + (UNSEGADDR(addr) & 0xffffff)) : NULL;
+	}
+
+	return gdl;
+}
+
+/**
+ * A list node's own list with only the triangles whose three corners are kept
+ * (keep, a byte per vertex of the node): the others' slots in each G_TRI4 are
+ * zeroed, which the renderer skips, and a G_TRI1 becomes an empty G_TRI4.
+ * Everything else is copied as it is, so the copy draws under the same
+ * segments, render mode and pictures as the node's own. NULL for a list that
+ * jumps elsewhere (a G_DL that does not come back), which this does not follow.
+ */
+static Gfx *xblaMeshKeepFilter(const Gfx *src, const Vtx *vertices, const u8 *keep, s32 numkeep, s32 *outtris)
+{
+	s32 len = 0;
+	s32 slot[16];
+	Gfx *out;
+
+	*outtris = 0;
+
+	if (!src) {
+		return NULL;
+	}
+
+	while (len < 0x10000 && (u8)(src[len].words.w0 >> 24) != (u8)G_ENDDL) {
+		if ((u8)(src[len].words.w0 >> 24) == G_DL && ((src[len].words.w0 >> 16) & 1)) {
+			return NULL;
+		}
+
+		len++;
+	}
+
+	if (len >= 0x10000) {
+		return NULL;
+	}
+
+	out = malloc((len + 1) * sizeof(Gfx));
+
+	if (!out) {
+		return NULL;
+	}
+
+	memcpy(out, src, (len + 1) * sizeof(Gfx));
+
+	for (s32 i = 0; i < 16; i++) {
+		slot[i] = -1;
+	}
+
+	for (s32 c = 0; c < len; c++) {
+		Gfx *cmd = &out[c];
+		const u32 op = (u8)(cmd->words.w0 >> 24);
+
+		if (op == G_VTX) {
+			const uintptr_t w1 = cmd->words.w1;
+			const s32 first = (s32)((cmd->words.w0 >> 16) & 0xf);
+			const s32 count = (s32)((cmd->words.w0 & 0xffff) / sizeof(Vtx));
+			intptr_t vi0 = -1;
+
+			if (w1 <= 0xffffffff && ((w1 >> 24) & 0xf) == SPSEGMENT_MODEL_VTX) {
+				vi0 = (intptr_t)((UNSEGADDR(w1) & 0xffffff) / sizeof(Vtx));
+			} else if (vertices && w1 >= (uintptr_t)vertices) {
+				vi0 = (intptr_t)((w1 - (uintptr_t)vertices) / sizeof(Vtx));
+			}
+
+			for (s32 i = 0; i < count && first + i < 16; i++) {
+				slot[first + i] = vi0 >= 0 && vi0 + i < numkeep ? (s32)(vi0 + i) : -1;
+			}
+		} else if (op == (u8)G_TRI1 || op == (u8)G_TRI4) {
+			u32 w0 = (u32)cmd->words.w0;
+			u32 w1 = (u32)cmd->words.w1;
+			s32 v[4][3];
+			s32 n = 0;
+
+			if (op == (u8)G_TRI1) {
+				v[0][0] = ((w1 >> 16) & 0xff) / 10;
+				v[0][1] = ((w1 >> 8) & 0xff) / 10;
+				v[0][2] = (w1 & 0xff) / 10;
+				n = 1;
+			} else {
+				for (s32 t = 0; t < 4; t++) {
+					v[t][0] = (w1 >> (t * 8)) & 0xf;
+					v[t][1] = (w1 >> (t * 8 + 4)) & 0xf;
+					v[t][2] = (w0 >> (t * 4)) & 0xf;
+				}
+
+				n = 4;
+			}
+
+			s32 numkept = 0;
+
+			for (s32 t = 0; t < n; t++) {
+				s32 kept = 1;
+
+				if (op == (u8)G_TRI4 && !v[t][0] && !v[t][1] && !v[t][2]) {
+					continue;
+				}
+
+				for (s32 k = 0; k < 3 && kept; k++) {
+					const s32 vi = v[t][k] < 16 ? slot[v[t][k]] : -1;
+
+					kept = vi >= 0 && keep[vi];
+				}
+
+				if (kept) {
+					numkept++;
+				} else {
+					w1 &= ~(0xffu << (t * 8));
+					w0 &= ~(0xfu << (t * 4));
+				}
+			}
+
+			*outtris += numkept;
+
+			if (op == (u8)G_TRI1) {
+				if (numkept == 0) {
+					cmd->words.w0 = (uintptr_t)((u32)(u8)G_TRI4 << 24);
+					cmd->words.w1 = 0;
+				}
+			} else {
+				cmd->words.w0 = w0;
+				cmd->words.w1 = w1;
+			}
+		}
+	}
+
+	return out;
+}
+
+/**
+ * Whether a node the mesh has just drawn (xblaMeshRenderNode()) also draws
+ * some of its own triangles inside it, and which: the Cradle helicopter's
+ * pilot, which the release's helicopter has not got (gebean.c's
+ * beanUncoveredVertices()), drawn as GoldenEye draws her on the list the HD
+ * aircraft is on. *opa and *xlu stand for the node's own two lists - the same
+ * render mode, segments and matrix (model.c's modelRenderNodeDl()). Made from
+ * the stage's copy of the model the first time it is drawn, and again at the
+ * next stage (xblaMeshResetBeanMeshes()).
+ */
+s32 xblaMeshKeptLists(struct model *model, struct modelnode *node, Gfx **opa, Gfx **xlu)
+{
+	const struct xblameshentry *e;
+	struct xblameshbuilt *m;
+	union modelrwdata *rwdata;
+	const Gfx *src[2];
+
+	*opa = NULL;
+	*xlu = NULL;
+
+	// A tinted pane going opaque draws GoldenEye's own pane whole over the
+	// release's (xblaMeshRenderNode())
+	if (node && node == tintStockNode && model) {
+		tintStockNode = NULL;
+		rwdata = modelGetNodeRwData(model, node);
+		*opa = rwdata->dl.gdl;
+		*xlu = node->rodata->dl.xlugdl;
+
+		return *opa != NULL;
+	}
+
+	if (beanNumKeeping <= 0 || !model || !node || (node->type & 0xff) != MODELNODETYPE_DL || !beanBuilt[0]
+			|| !gebeanGetEnabled() || !xblaMeshGetEnabled()) {
+		return 0;
+	}
+
+	e = xblaMeshSlotFor(node);
+
+	if (!e || e->node != node || e->beanrow < 0 || !e->modeldef || model->definition != e->modeldef
+			|| e->packpart == XBLAMESH_NOPART) {
+		return 0;
+	}
+
+	// a model pack's file for it draws instead of the mesh, and whole
+	if (e->fileid && modelpackFindN64(e->fileid) != NULL) {
+		return 0;
+	}
+
+	m = beanBuilt[0][e->fileid];
+
+	if (!m || m->state <= 0 || !m->beankeepvtx || e->packpart != m->beankeeplist
+			|| node->rodata->dl.numvertices > m->beannumkeepvtx) {
+		return 0;
+	}
+
+	rwdata = modelGetNodeRwData(model, node);
+	src[0] = xblaMeshResolveNodeGdl(node, rwdata->dl.gdl);
+	src[1] = xblaMeshResolveNodeGdl(node, node->rodata->dl.xlugdl);
+
+	if (!src[0]) {
+		return 0;
+	}
+
+	for (s32 k = 0; k < 2; k++) {
+		s32 numtris = 0;
+
+		if (m->beankeptsrc[k] == src[k] && (m->beankeptgdl[k] || !src[k])) {
+			continue;
+		}
+
+		free(m->beankeptgdl[k]);
+		m->beankeptgdl[k] = xblaMeshKeepFilter(src[k], node->rodata->dl.vertices, m->beankeepvtx,
+				m->beannumkeepvtx, &numtris);
+		m->beankeptsrc[k] = src[k];
+
+		sysLogPrintf(LOG_NOTE, "xblamesh: model file %d list %d's %s list: %d of its own triangles drawn inside the mesh%s",
+				e->fileid, m->beankeeplist, k ? "translucent" : "opaque", numtris,
+				src[k] && !m->beankeptgdl[k] ? " - it jumps away, not drawn" : "");
+	}
+
+	*opa = m->beankeptgdl[0];
+	*xlu = m->beankeptgdl[1];
+
+	return *opa != NULL;
+}
+
 #else
 
 void xblaMeshTrace(FILE *f) { }
 s32 xblaMeshTraceModel(FILE *f, const struct model *model, const char *indent) { return 0; }
 void xblaMeshRegisterModel(struct modeldef *modeldef, u16 fileid) { }
 s32 xblaMeshPrebuildBean(struct modeldef *modeldef) { return -1; }
+void xblaMeshPreloadSet(s32 on) { }
+s32 xblaMeshPreloading(void) { return 0; }
+void xblaMeshPreloadStats(s32 *built, u64 *us) { *built = 0; *us = 0; }
+s32 xblaMeshPreloadModelFile(u16 fileid) { return 0; }
+s32 xblaMeshKeptLists(struct model *model, struct modelnode *node, Gfx **opa, Gfx **xlu) { *opa = *xlu = NULL; return 0; }
 void xblaMeshSetBypass(s32 on) { }
 void xblaMeshSetOpaqueMode(u32 cycle2, u32 onecycle) { }
 void xblaMeshSetEnvironment(s32 force) { }
@@ -12924,6 +14735,7 @@ s32 xblaMeshGetEnabled(void) { return 0; }
 void xblaMeshSetEnabled(s32 enabled) { }
 void xblaMeshResetModels(void) { }
 void xblaMeshHitBegin(void) { }
+s32 xblaMeshHatSeat(struct model *chrmodel, struct modeldef *headdef, struct model *hatmodel, s32 measure, f32 out[3]) { return 0; }
 s32 xblaMeshTakeFineModel(struct model *model) { return 0; }
 s32 xblaMeshHitSkipsNode(struct model *model, struct modelnode *node) { return 0; }
 s32 xblaMeshModelHasMesh(struct model *model) { return 0; }
@@ -12934,6 +14746,10 @@ s32 xblaMeshHitTest(struct model *model, struct coord *pos, struct coord *far, s
 		f32 *sqdist, struct hitthing *hitthing, struct modelnode **bboxnode, s32 *hitpart,
 		struct modelnode **dlnode) { return 0; }
 s32 xblaMeshSurfaceAlong(struct model *model, const struct coord *from, const struct coord *to, struct coord *hit) { return 0; }
+s32 xblaMeshObjShotTest(struct model *model, struct coord *pos, struct coord *dir, f32 range,
+		struct hitthing *hitthing, s32 *mtxindex, struct modelnode **bboxnode, s32 *hitpart,
+		struct modelnode **dlnode) { return -1; }
+void xblaMeshObjShotTestEnd(void) { }
 s32 xblaMeshModelsAreLate(void) { return 0; }
 u8 *xblaMeshReadFile(u16 fileid, u32 *outLen) { return NULL; }
 

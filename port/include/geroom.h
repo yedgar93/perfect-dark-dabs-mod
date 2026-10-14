@@ -24,6 +24,28 @@
 /** Whether the stage takes its rooms from the tile underfoot. */
 s32 geRoomActive(void);
 
+/** Whether a converted stage loads the Community Edition's copies of its files (the HD look with the CE on). */
+s32 geRoomCeData(void);
+
+/** Whether the conversion gave a door GoldenEye's own portal and rooms. */
+bool geRoomDoorRoomsGiven(struct doorobj *door);
+
+/** A door's rooms as GoldenEye's setupDoor() sets them (the conversion's). */
+void geRoomDoorGivenRooms(struct prop *prop, struct doorobj *door);
+
+/** A converted object's rooms as GoldenEye counts them at its setup (chrpropUpdateRoomList()). */
+void geRoomObjRooms(struct defaultobj *obj);
+
+/** bg.c's sub_GAME_7F0BA2D4(): rooms through open portals whose box meets [min, max]. */
+s32 geRoomPortalsOverBox(struct coord *min, struct coord *max, s32 *rooms, s32 count, s32 maxcount);
+
+/**
+ * A converted mission's door record carries this in its first spare byte
+ * (doorobj's unusedmaybe[0]) when its portalnum is the one GoldenEye's
+ * setupDoor() gives it (geconvert.c's geSoloDoors(), converter 97).
+ */
+#define GE_DOOR_PORTAL_GIVEN 0x67
+
 /**
  * cdFindGroundInfoAtCyl() asked of the rooms handed in **and** of every room
  * whose box holds the position: the highest floor below it, whichever room's
@@ -44,6 +66,28 @@ f32 geRoomGround(struct coord *pos, f32 radius, RoomNum *rooms, u16 *floorcol, u
  * GoldenEye's to say (gestan.h).
  */
 void geRoomAddNear(struct coord *pos, f32 radius, f32 ymin, f32 ymax, RoomNum *rooms, s32 maxlen);
+
+/**
+ * Ends the props' part of a collision room list (bwalkCdRooms()): the rooms
+ * before it are asked for their walls and their props, the rooms after it, the
+ * ones geRoomAddNear() adds, for their walls alone. roomGetProps() stops at
+ * any room below zero and the collision library's wall walks skip one, so the
+ * list reads as before everywhere else. GoldenEye asks for the props of the
+ * rooms its tile walk crosses and of no others (stanTestVolume()), and a door
+ * filed under a room next door stood in a doorway the cartridge walks through
+ * (Frigate, F3 20261001-145924).
+ */
+#define GEROOM_PROPS_END -2
+
+/**
+ * Whether a background triangle of `roomnum` lets a shot through on a
+ * converted level although it is solid: the one wall the owner has asked to
+ * be shot through (Complex, the end of the dead-end catwalk in room 41 - F3
+ * 20261001-145736). The bullet goes on into room 44 behind it. Only that
+ * wall's triangles, matched by room and place; everything else stops a shot
+ * as it did.
+ */
+bool geRoomTriPassesShots(s32 roomnum, struct coord *p1, struct coord *p2, struct coord *p3);
 
 /**
  * The room the picture is drawn from, for an eye standing on `ground` in the

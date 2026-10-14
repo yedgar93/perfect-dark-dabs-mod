@@ -23,6 +23,7 @@
 #include "system.h"
 #include "utils.h"
 #include "mod.h"
+#include "gexplusrom.h"
 #include "modloader.h"
 #include "modborrow.h"
 
@@ -93,13 +94,18 @@ static u8 g_ModStageDirs[STAGE_MAX_ID + 1];
 // And the map's own name, as its mod's list gives it (the arena row adds the mod)
 static char g_ModStageMapNames[STAGE_MAX_ID + 1][32];
 /**
- * The GoldenEye remake's solo missions: the stage each one of GoldenEye's
- * twenty missions registered as, in GoldenEye's own mission order, from the
- * converted mod's `missions` block. A mission is a stage like any other but is
+ * The GoldenEye remake's solo missions: which of GoldenEye's twenty missions a
+ * stage is, plus one, from its converted mod's `missions` block, in
+ * GoldenEye's own mission order. A mission is a stage like any other but is
  * not an arena, so it never reaches the Combat Simulator's list; GE Plus's
  * folder is what starts it (gexfront.c).
+ *
+ * There is a set of them a converted mod: GoldenEye's own, and a GoldenEye
+ * ROM hack's (Goldfinger 64's), which keeps GoldenEye's mission numbers for
+ * its own missions. A number names the set of the mode chosen
+ * (modloaderStageInGexPlusList(): GE Plus's, or the hack's g_GexPlusVariant).
  */
-static s32 g_ModMissionStages[MODLOADER_MAX_MISSIONS];
+static u8 g_ModStageMission[STAGE_MAX_ID + 1];
 // And its sky and fog where the maps block gives them, else the default the
 // chooser falls back to for a stage no table names
 static struct fogenvironment g_ModStageFog[STAGE_MAX_ID + 1];
@@ -113,6 +119,11 @@ static struct nofogenvironment g_ModStageNoFog[STAGE_MAX_ID + 1];
 // background and X theme, -1 for none, and whether the line gave any
 static s16 g_ModStageMusic[STAGE_MAX_ID + 1][3];
 static u8 g_ModStageHasMusic[STAGE_MAX_ID + 1];
+// The picture GE Plus's Level page shows an arena by (gexfront.c), where its
+// line names one (`picture`): GoldenEye's own image number, which a GoldenEye
+// ROM hack's arena table gives (Goldfinger's own pictures in GoldenEye's
+// slots); 0 for the page's own choice by name
+static s16 g_ModStagePicture[STAGE_MAX_ID + 1];
 // The models a mod's `models` block brings for its maps: slot i of the
 // remake's model states (MODEL_REMAKE_FIRST + i), the file and its scale
 struct modmodel {
@@ -149,6 +160,22 @@ struct modrevision {
 };
 
 static struct modrevision g_ModStageRevision[STAGE_MAX_ID + 1];
+
+/**
+ * A converted stage's Community Edition copies (a line's `ce`): files the
+ * stage loads in place of its own while the HD look and the Community Edition
+ * are on (geRoomCeData(), modloaderGetStageCeFile()). The N64 look keeps the
+ * cartridge's (geconvert.c, g_RomPatchesOn).
+ */
+#define MODLOADER_MAX_CEFILES 8
+
+struct modcefiles {
+	s32 num;
+	s32 from[MODLOADER_MAX_CEFILES];
+	s32 to[MODLOADER_MAX_CEFILES];
+};
+
+static struct modcefiles g_ModStageCe[STAGE_MAX_ID + 1];
 
 /**
  * The mod directory a runtime-registered stage belongs to, or NULL for a stock
@@ -455,7 +482,7 @@ static bool modloaderAddStage(s32 modIndex, const char *mapName, const char *mod
 			dst->id = 0;
 			return false;
 		}
-		g_ModMissionStages[mission] = stageId;
+		g_ModStageMission[stageId] = (u8)(mission + 1);
 		snprintf(label, sizeof(label), "%.30s", mapName);
 	} else if (!mpRegisterArena(dst->id, label)) {
 		dst->id = 0; // hand the slot back
@@ -822,6 +849,12 @@ static void modloaderSetStageMusic(s32 stagenum, const char *text)
 	}
 }
 
+/** The image an arena's `picture` names, or 0. */
+s32 modloaderGetStagePicture(s32 stagenum)
+{
+	return stagenum > 0 && stagenum <= STAGE_MAX_ID && g_ModStageDirs[stagenum] ? g_ModStagePicture[stagenum] : 0;
+}
+
 /** A Stage Loader map's music row in its mod's own sequence numbers; false when its line has none. */
 s32 modloaderGetStageMusic(s32 stagenum, s32 *tracks)
 {
@@ -883,6 +916,58 @@ s32 modloaderGetStageRevisionSetup(s32 stagenum, s32 filenum)
 	return g_ModStageRevision[stagenum].setup;
 }
 
+static s32 modloaderFileSlot(s32 modIndex, const char *rel);
+
+/** A line's `ce`: pairs of a file the stage loads and the Community Edition's copy of it. */
+static void modloaderSetStageCe(s32 modIndex, s32 stagenum, const char *pairs)
+{
+	struct modcefiles *ce;
+	char from[UTIL_MAX_TOKEN + 1];
+	char to[UTIL_MAX_TOKEN + 1];
+	s32 used = 0;
+
+	if (stagenum <= 0 || stagenum > STAGE_MAX_ID) {
+		return;
+	}
+
+	ce = &g_ModStageCe[stagenum];
+
+	while (pairs[0] && ce->num < MODLOADER_MAX_CEFILES
+			&& sscanf(pairs, "%127s %127s%n", from, to, &used) == 2) {
+		pairs += used;
+
+		if (modloaderModHasFile(modIndex, "%s", to)) {
+			const s32 a = modloaderFileSlot(modIndex, from);
+			const s32 b = modloaderFileSlot(modIndex, to);
+
+			if (a > 0 && b > 0) {
+				ce->from[ce->num] = a;
+				ce->to[ce->num] = b;
+				ce->num++;
+			}
+		}
+
+		while (pairs[0] == ' ') {
+			pairs++;
+		}
+	}
+}
+
+s32 modloaderGetStageCeFile(s32 stagenum, s32 filenum)
+{
+	if (stagenum <= 0 || stagenum > STAGE_MAX_ID || !g_ModStageDirs[stagenum]) {
+		return filenum;
+	}
+
+	for (s32 i = 0; i < g_ModStageCe[stagenum].num; i++) {
+		if (g_ModStageCe[stagenum].from[i] == filenum) {
+			return g_ModStageCe[stagenum].to[i];
+		}
+	}
+
+	return filenum;
+}
+
 s32 modloaderGetStageRevisionPortals(s32 stagenum, const u16 **portals, const u8 **codes)
 {
 	if (stagenum <= 0 || stagenum > STAGE_MAX_ID || !g_ModStageDirs[stagenum]) {
@@ -924,6 +1009,7 @@ static void modloaderReadMissions(s32 modIndex, const char *dir, const char *mod
 			char music[UTIL_MAX_TOKEN + 1] = { 0 };
 			char revsetup[UTIL_MAX_TOKEN + 1] = { 0 };
 			char revportals[UTIL_MAX_TOKEN + 1] = { 0 };
+			char cefiles[UTIL_MAX_TOKEN + 1] = { 0 };
 			s32 mission;
 
 			if (strcmp(token, "mission") != 0) {
@@ -952,9 +1038,12 @@ static void modloaderReadMissions(s32 modIndex, const char *dir, const char *mod
 				const bool ismusic = !strcmp(token, "music");
 				const bool isrevsetup = !strcmp(token, "revsetup");
 				const bool isrevportals = !strcmp(token, "revportals");
+				const bool isce = !strcmp(token, "ce");
 				p = strParseToken(p, token, NULL);
 				if (which >= 0) {
 					snprintf(files[which], sizeof(files[which]), "%s", strUnquote(token));
+				} else if (isce) {
+					snprintf(cefiles, sizeof(cefiles), "%s", strUnquote(token));
 				} else if (isrevsetup) {
 					snprintf(revsetup, sizeof(revsetup), "%s", strUnquote(token));
 				} else if (isrevportals) {
@@ -1009,6 +1098,10 @@ static void modloaderReadMissions(s32 modIndex, const char *dir, const char *mod
 					modloaderSetStageRevision(modIndex, stageId, setupid, revsetup, revportals);
 				}
 
+				if (cefiles[0]) {
+					modloaderSetStageCe(modIndex, stageId, cefiles);
+				}
+
 				++count;
 			}
 		}
@@ -1021,41 +1114,45 @@ static void modloaderReadMissions(s32 modIndex, const char *dir, const char *mod
 	}
 }
 
-/** The stage GoldenEye's mission `mission` is registered as, or 0. */
+/** The stage mission `mission` is registered as in the set of the mode chosen, or 0. */
 s32 modloaderMissionStage(s32 mission)
 {
 	if (mission < 0 || mission >= MODLOADER_MAX_MISSIONS) {
 		return 0;
 	}
 
-	return g_ModMissionStages[mission];
-}
-
-/** The mission a stage is, in GoldenEye's own mission order, or -1. */
-s32 modloaderStageMission(s32 stagenum)
-{
-	for (s32 i = 0; i < MODLOADER_MAX_MISSIONS; i++) {
-		if (g_ModMissionStages[i] && g_ModMissionStages[i] == stagenum) {
-			return i;
+	for (s32 stagenum = 1; stagenum <= STAGE_MAX_ID; stagenum++) {
+		if (g_ModStageMission[stagenum] == mission + 1 && modloaderStageInGexPlusList(stagenum)) {
+			return stagenum;
 		}
 	}
 
-	return -1;
+	return 0;
 }
 
-/** Whether a stage is one of the remake's converted GoldenEye missions. */
+/** The mission a stage is, in GoldenEye's own mission order, or -1 - whichever set it is in. */
+s32 modloaderStageMission(s32 stagenum)
+{
+	if (stagenum <= 0 || stagenum > STAGE_MAX_ID) {
+		return -1;
+	}
+
+	return (s32)g_ModStageMission[stagenum] - 1;
+}
+
+/** Whether a stage is one of the remake's converted missions, GoldenEye's or a ROM hack's. */
 s32 modloaderStageIsMission(s32 stagenum)
 {
 	return modloaderStageMission(stagenum) >= 0;
 }
 
-/** How many of GoldenEye's twenty missions are registered. */
+/** How many missions the set of the mode chosen has registered. */
 s32 modloaderNumMissions(void)
 {
 	s32 n = 0;
 
 	for (s32 i = 0; i < MODLOADER_MAX_MISSIONS; i++) {
-		if (g_ModMissionStages[i]) {
+		if (modloaderMissionStage(i)) {
 			n++;
 		}
 	}
@@ -1142,6 +1239,135 @@ s32 modloaderStageIsRemake(s32 stagenum)
 	return 0;
 }
 
+/**
+ * Whether a stage is one of GE Plus's own: a remake arena of the GoldenEye ROM's
+ * conversion (GEXPLUSROM_DIR). A GoldenEye ROM hack's (Goldfinger 64's) are
+ * remake arenas as well - GoldenEye's rooms, lights and props - but never GE
+ * Plus's, which is GoldenEye's ROM alone.
+ */
+// whether a mod dir's last part is name
+static s32 modloaderDirIs(const char *dir, const char *name)
+{
+	const char *base = dir;
+
+	if (!dir) {
+		return 0;
+	}
+
+	for (; *dir; ++dir) {
+		if (*dir == '/' || *dir == '\\') {
+			base = dir + 1;
+		}
+	}
+
+	return strcasecmp(base, name) == 0;
+}
+
+static s32 modloaderDirIsGexPlus(const char *dir)
+{
+	return modloaderDirIs(dir, GEXPLUSROM_DIR);
+}
+
+/** Whether mounted mod dir `moddir` is the GoldenEye conversion's (GEXPLUSROM_DIR). */
+s32 modloaderDirIndexIsGexPlus(s32 moddir)
+{
+	const char *dir = moddir >= 0 ? fsGetModDirAt(moddir) : NULL;
+
+	return dir && modloaderDirIsGexPlus(dir);
+}
+
+/**
+ * Whether mounted mod dir `moddir` is a conversion of a GoldenEye ROM's - GE
+ * Plus's or a ROM hack's (gexPlusRomIsConversionDir()) - whose files are the
+ * cartridge's own in Perfect Dark's formats.
+ */
+s32 modloaderDirIndexIsConversion(s32 moddir)
+{
+	const char *dir = moddir >= 0 ? fsGetModDirAt(moddir) : NULL;
+	const char *base = dir;
+
+	if (!dir) {
+		return 0;
+	}
+
+	for (; *dir; ++dir) {
+		if (*dir == '/' || *dir == '\\') {
+			base = dir + 1;
+		}
+	}
+
+	return gexPlusRomIsConversionDir(base);
+}
+
+/**
+ * The mounted mod dir that is the GoldenEye conversion's, or -1. What reads a
+ * converted file of GoldenEye's own outside a level asks for this rather than
+ * for the first dir holding the file, which a GoldenEye ROM hack's conversion
+ * (Goldfinger 64's) may be, mounted in whatever order the directory lists.
+ */
+s32 modloaderGexPlusDirIndex(void)
+{
+	for (s32 i = 0; i < fsGetNumModDirs(); i++) {
+		if (modloaderDirIndexIsGexPlus(i)) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+s32 modloaderStageIsGexPlus(s32 stagenum)
+{
+	return modloaderStageIsRemake(stagenum) && modloaderDirIsGexPlus(modloaderGetStageModDir(stagenum));
+}
+
+s32 modloaderStageIsGeLevel(s32 stagenum, const char *key)
+{
+	const s32 index = stageGetIndex(stagenum);
+	const char *name;
+	const char *slash;
+	size_t len;
+
+	if (index < 0 || !modloaderStageIsGexPlus(stagenum)) {
+		return 0;
+	}
+
+	name = romdataFileGetName(g_Stages[index].bgfileid);
+
+	if (!name) {
+		return 0;
+	}
+
+	slash = strrchr(name, '/');
+	name = slash ? slash + 1 : name;
+	len = strlen(key);
+
+	return strncmp(name, "bg_gx", 5) == 0 && strncmp(name + 5, key, len) == 0 && strcmp(name + 5 + len, ".seg") == 0;
+}
+
+const char *g_GexPlusVariant;
+
+/** The mounted mod dir of the GoldenEye ROM hack whose mode is chosen (g_GexPlusVariant), or -1. */
+s32 modloaderGexPlusVariantDirIndex(void)
+{
+	for (s32 i = 0; g_GexPlusVariant && i < fsGetNumModDirs(); i++) {
+		if (modloaderDirIs(fsGetModDirAt(i), g_GexPlusVariant)) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+s32 modloaderStageInGexPlusList(s32 stagenum)
+{
+	if (g_GexPlusVariant) {
+		return modloaderStageIsRemake(stagenum) && modloaderDirIs(modloaderGetStageModDir(stagenum), g_GexPlusVariant);
+	}
+
+	return modloaderStageIsGexPlus(stagenum);
+}
+
 void modloaderApplyStageModels(s32 stagenum)
 {
 	const s32 modindex = modloaderGetStageModDirIndex(stagenum);
@@ -1201,7 +1427,8 @@ s32 modloaderLendRemakeModel(s32 slot)
 	for (s32 i = 0; i < g_NumModModels; i++) {
 		const struct modmodel *m = &g_ModModels[i];
 
-		if (m->slot == slot) {
+		// GoldenEye's own, never a ROM hack's under the same number
+		if (m->slot == slot && modloaderDirIsGexPlus(fsGetModDirAt(m->modindex))) {
 			const s32 fileid = modloaderRegister(m->modindex, "%s", m->name);
 
 			if (fileid > 0) {
@@ -1266,6 +1493,8 @@ static bool modloaderAddFromConfig(s32 modIndex, const char *dir, struct modload
 			char music[UTIL_MAX_TOKEN + 1] = { 0 };
 			char revsetup[UTIL_MAX_TOKEN + 1] = { 0 };
 			char revportals[UTIL_MAX_TOKEN + 1] = { 0 };
+			char cefiles[UTIL_MAX_TOKEN + 1] = { 0 };
+			char picture[UTIL_MAX_TOKEN + 1] = { 0 };
 
 			if (strcmp(token, "map") != 0) {
 				sysLogPrintf(LOG_WARNING, "modloader: %s: unexpected %s in the maps block", dir, token);
@@ -1292,9 +1521,15 @@ static bool modloaderAddFromConfig(s32 modIndex, const char *dir, struct modload
 				const bool ismusic = !strcmp(token, "music");
 				const bool isrevsetup = !strcmp(token, "revmpsetup");
 				const bool isrevportals = !strcmp(token, "revportals");
+				const bool isce = !strcmp(token, "ce");
+				const bool ispicture = !strcmp(token, "picture");
 				p = strParseToken(p, token, NULL);
 				if (which >= 0) {
 					snprintf(files[which], sizeof(files[which]), "%s", strUnquote(token));
+				} else if (ispicture) {
+					snprintf(picture, sizeof(picture), "%s", strUnquote(token));
+				} else if (isce) {
+					snprintf(cefiles, sizeof(cefiles), "%s", strUnquote(token));
 				} else if (isfog) {
 					snprintf(fog, sizeof(fog), "%s", strUnquote(token));
 				} else if (isprops) {
@@ -1329,6 +1564,14 @@ static bool modloaderAddFromConfig(s32 modIndex, const char *dir, struct modload
 
 					if (revsetup[0] || revportals[0]) {
 						modloaderSetStageRevision(modIndex, stageId, g_Stages[g_ModStageNextSlot - 1].mpsetupfileid, revsetup, revportals);
+					}
+
+					if (cefiles[0]) {
+						modloaderSetStageCe(modIndex, stageId, cefiles);
+					}
+
+					if (picture[0] && stageId > 0 && stageId <= STAGE_MAX_ID) {
+						g_ModStagePicture[stageId] = (s16)atoi(picture);
 					}
 
 					if (props[0] && propsfrom[0] && modloaderModHasFile(modIndex, "%s", props)) {
@@ -1410,13 +1653,14 @@ void modloaderInit(void)
 	g_ModStageNextSlot = MODSTAGE_FIRST_SLOT;
 	memset(g_ModStageDirs, 0, sizeof(g_ModStageDirs));
 	memset(g_ModStageMapNames, 0, sizeof(g_ModStageMapNames));
-	memset(g_ModMissionStages, 0, sizeof(g_ModMissionStages));
+	memset(g_ModStageMission, 0, sizeof(g_ModStageMission));
 	memset(g_ModStageFog, 0, sizeof(g_ModStageFog));
 	memset(g_ModStageFogAlt, 0, sizeof(g_ModStageFogAlt));
 	memset(g_ModStageFogCinema, 0, sizeof(g_ModStageFogCinema));
 	memset(g_ModStageHasMusic, 0, sizeof(g_ModStageHasMusic));
 	memset(g_ModStageProps, 0, sizeof(g_ModStageProps));
 	memset(g_ModStageRevision, 0, sizeof(g_ModStageRevision));
+	memset(g_ModStageCe, 0, sizeof(g_ModStageCe));
 	free(g_ModModels);
 	g_ModModels = NULL;
 	g_NumModModels = 0;

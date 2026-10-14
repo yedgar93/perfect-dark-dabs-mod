@@ -12,6 +12,9 @@ u8 roomGetSettledRegionalBrightnessForPlayer(s32 roomnum);
 u8 roomGetSettledLocalBrightness(s32 room);
 s32 roomGetFlashBrightness(s32 roomnum);
 f32 roomGetLightOpCurFrac(s32 roomnum);
+#ifndef PLATFORM_N64
+f32 roomRemakeLightFrac(s32 roomnum);
+#endif
 f32 roomGetSettledLocalBrightnessFrac(s32 roomnum);
 bool lightGetBboxCentre(s32 roomnum, u32 lightnum, struct coord *pos);
 bool lightIsHealthy(s32 roomnum, s32 lightnum);
@@ -21,6 +24,9 @@ void roomSetFlashBrightness(s32 roomnum, s32 value);
 void roomSetDefaults(struct room *room);
 Gfx *lightsSetForRoom(Gfx *gdl, RoomNum roomnum);
 Gfx *lightsSetDefault(Gfx *gdl);
+#ifndef PLATFORM_N64
+Gfx *lightsSetForGeRoom(Gfx *gdl);
+#endif
 void roomInitLights(s32 roomnum);
 bool lightsHandleHit(struct coord *gunpos, struct coord *hitpos, s32 roomnum);
 void roomSetLightsFaulty(s32 roomnum, s32 chance);

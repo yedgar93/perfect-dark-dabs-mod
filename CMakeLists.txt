@@ -574,6 +574,39 @@ set_source_files_properties(${SRC_HDP} PROPERTIES
 )
 list(APPEND SRC_PORT ${SRC_HDP})
 
+# Recast/Detour (port/src/external/recastnavigation, zlib, v1.6.0 - see its
+# VERSION.txt), for the simulants' navmesh. Only the port's wrapper,
+# port/src/simnav.cpp, its links, port/src/simnavlinks.cpp, and the simulants' agents,
+# port/src/simnavagents.cpp, include it. -O2: a build runs at stage load.
+# DT_POLYREF64 and DT_VIRTUAL_QUERYFILTER (simnavagents.cpp's filter prices
+# ways blamed for a stuck simulant) must be the same for the library and the wrapper.
+list(FILTER SRC_PORT_CXX EXCLUDE REGEX "/external/recastnavigation/")
+set(RECAST_DIR "${CMAKE_SOURCE_DIR}/port/src/external/recastnavigation")
+file(GLOB SRC_RECAST
+  "${RECAST_DIR}/Recast/Source/*.cpp"
+  "${RECAST_DIR}/Detour/Source/*.cpp"
+  "${RECAST_DIR}/DetourCrowd/Source/*.cpp"
+  "${RECAST_DIR}/DetourTileCache/Source/*.cpp"
+)
+set(RECAST_INCLUDES
+  "${RECAST_DIR}/Recast/Include"
+  "${RECAST_DIR}/Detour/Include"
+  "${RECAST_DIR}/DetourCrowd/Include"
+  "${RECAST_DIR}/DetourTileCache/Include"
+)
+set_source_files_properties(${SRC_RECAST} PROPERTIES
+  INCLUDE_DIRECTORIES "${RECAST_INCLUDES}"
+  COMPILE_DEFINITIONS "DT_POLYREF64=1;DT_VIRTUAL_QUERYFILTER=1"
+  COMPILE_OPTIONS "-w;-O2"
+)
+set_source_files_properties("${CMAKE_SOURCE_DIR}/port/src/simnav.cpp" "${CMAKE_SOURCE_DIR}/port/src/simnavlinks.cpp"
+  "${CMAKE_SOURCE_DIR}/port/src/simnavagents.cpp" PROPERTIES
+  INCLUDE_DIRECTORIES "${RECAST_INCLUDES}"
+  COMPILE_DEFINITIONS "DT_POLYREF64=1;DT_VIRTUAL_QUERYFILTER=1"
+  COMPILE_OPTIONS "-O2"
+)
+list(APPEND SRC_PORT_CXX ${SRC_RECAST})
+
 # The display list interpreter (port/fast3d) is the port's own C++, not
 # decompiled code, and it is where a crowded frame spends most of its main
 # thread: every vertex is lit and transformed and every triangle written out

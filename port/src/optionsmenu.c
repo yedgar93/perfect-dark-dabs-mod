@@ -42,6 +42,7 @@
 #include "xblasky.h"
 #include "gexplus.h"
 #include "gechranims.h"
+#include "gehud.h"
 #include "gexfront.h"
 #include "gebean.h"
 #include "menuimage.h"
@@ -55,6 +56,7 @@
 #endif
 #include "game/hudmsg.h"
 #include "langpack.h"
+#include "simbrain.h"
 
 static s32 g_ExtMenuPlayer = 0;
 static struct menudialogdef *g_ExtNextDialog = NULL;
@@ -864,6 +866,28 @@ static MenuItemHandlerResult menuhandlerFramerateLimit(s32 operation, struct men
 }
 
 /**
+ * GPU Vertex Shading: the XBLA release's and GoldenEye XBLA's meshes posed,
+ * lit and transformed by the GPU from a copy it keeps, and the level's rooms
+ * (the ROM's, the release's and the HD levels') and the models' nodes (every
+ * character, gun and prop in the N64 look) transformed the same way, instead
+ * of a vertex at a time on the CPU (Video.GpuVertices, gfxmesh.h,
+ * roommesh.c, modelmesh.c). The same picture either way to within a pixel's
+ * edge; off is the old way, for comparing. Live.
+ */
+static MenuItemHandlerResult menuhandlerGpuVertices(s32 operation, struct menuitem *item, union handlerdata *data)
+{
+	switch (operation) {
+	case MENUOP_GET:
+		return videoGetGpuVertices();
+	case MENUOP_SET:
+		videoSetGpuVertices(data->checkbox.value);
+		break;
+	}
+
+	return 0;
+}
+
+/**
  * SMAA: edge anti-aliasing on the finished frame, which reaches what MSAA
  * cannot (alpha cut-outs, the edges inside a texture) and costs a fraction of
  * it. The two stack. Live.
@@ -1324,6 +1348,27 @@ static MenuItemHandlerResult menuhandlerMuzzleFlashLight(s32 operation, struct m
 	return 0;
 }
 
+/**
+ * Shot-Out Lights Darken GoldenEye Rooms: on GoldenEye's remade levels a light
+ * shot out takes its share of the room's brightness away, as Perfect Dark's
+ * own levels always do (and the props, guards and gun in the room go dark
+ * with it, propobj.c). Off by default, as GoldenEye: only the fixture goes
+ * dark and sheds its glass, and the room stays lit (F3 20260930-225233).
+ * Live: roomsTickLighting() sums every room's lighting again on a change.
+ */
+static MenuItemHandlerResult menuhandlerGeShotLightsDim(s32 operation, struct menuitem *item, union handlerdata *data)
+{
+	switch (operation) {
+	case MENUOP_GET:
+		return g_ModOptions.geroomdim;
+	case MENUOP_SET:
+		g_ModOptions.geroomdim = data->checkbox.value;
+		break;
+	}
+
+	return 0;
+}
+
 static MenuItemHandlerResult menuhandlerOverexposureScale(s32 operation, struct menuitem *item, union handlerdata *data)
 {
 	switch (operation) {
@@ -1443,6 +1488,14 @@ struct menuitem g_ExtendedVideoMenuItems[] = {
 		(uintptr_t)"Renderer",
 		0,
 		menuhandlerRenderer,
+	},
+	{
+		MENUITEMTYPE_CHECKBOX,
+		0,
+		MENUITEMFLAG_LITERAL_TEXT,
+		(uintptr_t)"GPU Vertex Shading",
+		0,
+		menuhandlerGpuVertices,
 	},
 	{
 		MENUITEMTYPE_SEPARATOR,
@@ -1571,6 +1624,14 @@ struct menuitem g_ExtendedVideoMenuItems[] = {
 		(uintptr_t)"Muzzle Flash Lights GoldenEye Rooms",
 		0,
 		menuhandlerMuzzleFlashLight,
+	},
+	{
+		MENUITEMTYPE_CHECKBOX,
+		0,
+		MENUITEMFLAG_LITERAL_TEXT,
+		(uintptr_t)"Shot-Out Lights Darken GoldenEye Rooms",
+		0,
+		menuhandlerGeShotLightsDim,
 	},
 	{
 		MENUITEMTYPE_SLIDER,
@@ -1899,17 +1960,6 @@ static MenuItemHandlerResult menuhandlerCrosshairSize(s32 operation, struct menu
 	return 0;
 }
 
-static MenuItemHandlerResult menuhandlerCrosshairAimOnly(s32 operation, struct menuitem *item, union handlerdata *data)
-{
-	if (operation == MENUOP_GET) {
-		return g_PlayerExtCfg[g_ExtMenuPlayer].crosshairaimonly;
-	}
-	if (operation == MENUOP_SET) {
-		g_PlayerExtCfg[g_ExtMenuPlayer].crosshairaimonly = data->checkbox.value;
-	}
-	return 0;
-}
-
 static MenuItemHandlerResult menuhandlerCrosshairHealth(s32 operation, struct menuitem *item, union handlerdata *data)
 {
 	static const char *opts[] = {
@@ -2004,7 +2054,7 @@ struct menuitem g_ExtendedGameCrosshairColourMenuItems[] = {
 
 struct menudialogdef g_ExtendedGameCrosshairColourMenuDialog = {
 	MENUDIALOGTYPE_DEFAULT,
-	(uintptr_t)"Crosshair Colour",
+	(uintptr_t)"Crosshair Color",
 	g_ExtendedGameCrosshairColourMenuItems,
 	NULL,
 	MENUDIALOGFLAG_LITERAL_TEXT,
@@ -2061,18 +2111,10 @@ struct menuitem g_ExtendedGameMenuItems[] = {
 		menuhandlerCrosshairSize,
 	},
 	{
-		MENUITEMTYPE_CHECKBOX,
-		0,
-		MENUITEMFLAG_LITERAL_TEXT,
-		(uintptr_t)"Crosshair Only While Aiming",
-		0,
-		menuhandlerCrosshairAimOnly,
-	},
-	{
 		MENUITEMTYPE_SELECTABLE,
 		0,
 		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_SELECTABLE_OPENSDIALOG,
-		(uintptr_t)"Crosshair Colour\n",
+		(uintptr_t)"Crosshair Color\n",
 		0,
 		(void*)&g_ExtendedGameCrosshairColourMenuDialog,
 	},
@@ -2080,7 +2122,7 @@ struct menuitem g_ExtendedGameMenuItems[] = {
 		MENUITEMTYPE_DROPDOWN,
 		0,
 		MENUITEMFLAG_LITERAL_TEXT,
-		(uintptr_t)"Crosshair Colour by Health",
+		(uintptr_t)"Crosshair Color by Health",
 		0,
 		menuhandlerCrosshairHealth,
 	},
@@ -2835,11 +2877,8 @@ void modEnhancementsTick(void)
 
 		modEnhancementsSetOn(on);
 
-		if (STAGE_IS_LEVEL(g_Vars.stagenum) && g_Vars.currentplayer && g_Vars.lvframenum > 0) {
-			// Replaces the last press's message rather than queueing behind it
-			hudmsgRemoveByPrefix("Enhancements ");
-			hudmsgCreateWithFlags((char *)langTr(on ? "Enhancements On\n" : "Enhancements Off\n"), HUDMSGTYPE_DEFAULT, HUDMSGFLAG_ALLOWDUPES);
-		}
+		// Replaces the last press's message rather than queueing behind it
+		hudmsgSayToggle(langTr("Enhancements On\n"), langTr("Enhancements Off\n"), on);
 	}
 }
 
@@ -2957,10 +2996,7 @@ static void modHdAssetsTick(void)
 
 		modHdAssetsSetOn(on);
 
-		if (STAGE_IS_LEVEL(g_Vars.stagenum) && g_Vars.currentplayer && g_Vars.lvframenum > 0) {
-			hudmsgRemoveByPrefix("HD Assets ");
-			hudmsgCreateWithFlags((char *)langTr(on ? "HD Assets On\n" : "HD Assets Off\n"), HUDMSGTYPE_DEFAULT, HUDMSGFLAG_ALLOWDUPES);
-		}
+		hudmsgSayToggle(langTr("HD Assets On\n"), langTr("HD Assets Off\n"), on);
 	}
 }
 
@@ -3690,6 +3726,31 @@ static MenuItemHandlerResult menuhandlerModRoll(s32 operation, struct menuitem *
 	return 0;
 }
 
+/**
+ * Mod.SimBrain: the simulants' stock AI, or stock's decisions on the navmesh's
+ * legs (simbrain.c). Read as a match starts, so a change during one takes
+ * effect at the next.
+ */
+static MenuItemHandlerResult menuhandlerModSimBrain(s32 operation, struct menuitem *item, union handlerdata *data)
+{
+	static const char *opts[] = { "Stock", "Modern Movement" };
+
+	switch (operation) {
+	case MENUOP_GETOPTIONCOUNT:
+		data->dropdown.value = ARRAYCOUNT(opts);
+		break;
+	case MENUOP_GETOPTIONTEXT:
+		return (intptr_t)opts[data->dropdown.value];
+	case MENUOP_SET:
+		simbrainSetOption(data->dropdown.value != 0);
+		break;
+	case MENUOP_GETSELECTEDINDEX:
+		data->dropdown.value = simbrainGetOption() ? 1 : 0;
+	}
+
+	return 0;
+}
+
 static MenuItemHandlerResult menuhandlerModStartArmed(s32 operation, struct menuitem *item, union handlerdata *data)
 {
 	static const char *opts[] = { "Off", "First Weapon", "Random" };
@@ -4053,7 +4114,7 @@ static MenuItemHandlerResult menuhandlerModCamSide(s32 operation, struct menuite
 		} else if (side > 0) {
 			snprintf(data->slider.label, MENU_SLIDERLABEL_LEN, langTr("Right %d"), side);
 		} else {
-			snprintf(data->slider.label, MENU_SLIDERLABEL_LEN, "%s", langTr("Centre"));
+			snprintf(data->slider.label, MENU_SLIDERLABEL_LEN, "%s", langTr("Center"));
 		}
 		break;
 	}
@@ -4095,7 +4156,7 @@ static MenuItemHandlerResult menuhandlerModCamFwd(s32 operation, struct menuitem
 		} else if (fwd > 0) {
 			snprintf(data->slider.label, MENU_SLIDERLABEL_LEN, langTr("Back %d"), fwd);
 		} else {
-			snprintf(data->slider.label, MENU_SLIDERLABEL_LEN, "%s", langTr("Centre"));
+			snprintf(data->slider.label, MENU_SLIDERLABEL_LEN, "%s", langTr("Center"));
 		}
 		break;
 	}
@@ -4136,7 +4197,7 @@ static MenuItemHandlerResult menuhandlerModCamHeight(s32 operation, struct menui
 		} else if (height > 0) {
 			snprintf(data->slider.label, MENU_SLIDERLABEL_LEN, langTr("Up %d"), height);
 		} else {
-			snprintf(data->slider.label, MENU_SLIDERLABEL_LEN, "%s", langTr("Centre"));
+			snprintf(data->slider.label, MENU_SLIDERLABEL_LEN, "%s", langTr("Center"));
 		}
 		break;
 	}
@@ -4812,6 +4873,14 @@ struct menuitem g_ExtendedDabsModPlayerMenuItems[] = {
 	{
 		MENUITEMTYPE_DROPDOWN,
 		0,
+		MENUITEMFLAG_LITERAL_TEXT,
+		(uintptr_t)"Simulant AI",
+		0,
+		menuhandlerModSimBrain,
+	},
+	{
+		MENUITEMTYPE_DROPDOWN,
+		0,
 		0,
 		(uintptr_t)menutextModBind,
 		2,
@@ -5205,7 +5274,7 @@ struct menuitem g_ExtendedDabsModDisplayMenuItems[] = {
 		MENUITEMTYPE_DROPDOWN,
 		0,
 		MENUITEMFLAG_LITERAL_TEXT,
-		(uintptr_t)"Vivid Colours",
+		(uintptr_t)"Vivid Colors",
 		0,
 		menuhandlerModVividColours,
 	},
@@ -7164,7 +7233,7 @@ struct menuitem g_ExtendedModsMenuItems[] = {
 	{
 		MENUITEMTYPE_LABEL,
 		0,
-		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING,
+		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING | MENUITEMFLAG_SMALLFONT,
 		(uintptr_t)"One mod at a time. Mods live in mods/, or beside\n",
 		0,
 		NULL,
@@ -7172,7 +7241,7 @@ struct menuitem g_ExtendedModsMenuItems[] = {
 	{
 		MENUITEMTYPE_LABEL,
 		0,
-		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING,
+		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING | MENUITEMFLAG_SMALLFONT,
 		(uintptr_t)"the game in a folder named mod-something. One that\n",
 		0,
 		NULL,
@@ -7180,7 +7249,7 @@ struct menuitem g_ExtendedModsMenuItems[] = {
 	{
 		MENUITEMTYPE_LABEL,
 		0,
-		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING,
+		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING | MENUITEMFLAG_SMALLFONT,
 		(uintptr_t)"replaces ROM audio or textures needs a restart.\n",
 		0,
 		NULL,
@@ -7386,7 +7455,7 @@ struct menuitem g_ExtendedMapsMenuItems[] = {
 	{
 		MENUITEMTYPE_LABEL,
 		0,
-		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING,
+		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING | MENUITEMFLAG_SMALLFONT,
 		(uintptr_t)"A mod's maps join the Combat Simulator's arena list\n",
 		0,
 		NULL,
@@ -7394,7 +7463,7 @@ struct menuitem g_ExtendedMapsMenuItems[] = {
 	{
 		MENUITEMTYPE_LABEL,
 		0,
-		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING,
+		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING | MENUITEMFLAG_SMALLFONT,
 		(uintptr_t)"beside the game's own, named after the map and the\n",
 		0,
 		NULL,
@@ -7402,7 +7471,7 @@ struct menuitem g_ExtendedMapsMenuItems[] = {
 	{
 		MENUITEMTYPE_LABEL,
 		0,
-		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING,
+		MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_LESSLEFTPADDING | MENUITEMFLAG_SMALLFONT,
 		(uintptr_t)"mod. Nothing in the game's own maps is replaced.\n",
 		0,
 		NULL,
@@ -7718,15 +7787,29 @@ struct menudialogdef g_ExtendedAdvancedMenuDialog = {
 #ifdef PD_PHYSICS
 static MenuItemHandlerResult menuhandlerRagdollSwitch(s32 operation, struct menuitem *item, union handlerdata *data)
 {
-    s32 *value = item->param == 0 ? &g_RagdollsEnabled : &g_RagdollDismember;
+    s32 *value = item->param == 0 ? &g_RagdollsEnabled : item->param == 1 ? &g_RagdollDismember : &g_RagdollGrab;
+    if (operation == MENUOP_CHECKDISABLED) return item->param != 0 && !g_RagdollsEnabled;
     if (operation == MENUOP_GET) return *value;
     if (operation == MENUOP_SET) *value = data->checkbox.value;
+    return 0;
+}
+
+static MenuItemHandlerResult menuhandlerBodyDragStrength(s32 operation, struct menuitem *item, union handlerdata *data)
+{
+    switch (operation) {
+    case MENUOP_CHECKDISABLED: return !g_RagdollsEnabled || !g_RagdollGrab;
+    case MENUOP_GETSLIDER: data->slider.value = (g_RagdollGrabStrength - 0.25f) * 100.0f + 0.5f; break;
+    case MENUOP_SET: g_RagdollGrabStrength = 0.25f + (f32)data->slider.value / 100.0f; break;
+    case MENUOP_GETSLIDERLABEL: sprintf(data->slider.label, "%.2fx", 0.25f + (f32)data->slider.value / 100.0f); break;
+    }
     return 0;
 }
 
 static struct menuitem g_RagdollMenuItems[] = {
     { MENUITEMTYPE_CHECKBOX, 0, MENUITEMFLAG_LITERAL_TEXT, (uintptr_t)"Ragdolls\n", 0, menuhandlerRagdollSwitch },
     { MENUITEMTYPE_CHECKBOX, 1, MENUITEMFLAG_LITERAL_TEXT, (uintptr_t)"Dismemberment\n", 0, menuhandlerRagdollSwitch },
+    { MENUITEMTYPE_CHECKBOX, 2, MENUITEMFLAG_LITERAL_TEXT, (uintptr_t)"Body Dragging (Hold Use)\n", 0, menuhandlerRagdollSwitch },
+    { MENUITEMTYPE_SLIDER, 0, MENUITEMFLAG_LITERAL_TEXT | MENUITEMFLAG_SLIDER_WIDE, (uintptr_t)"Drag Strength", 375, menuhandlerBodyDragStrength },
     { MENUITEMTYPE_SELECTABLE, 0, MENUITEMFLAG_SELECTABLE_CLOSESDIALOG, L_OPTIONS_213, 0, NULL },
     { MENUITEMTYPE_END },
 };

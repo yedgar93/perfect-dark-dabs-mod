@@ -1,5 +1,8 @@
 #include <ultra64.h>
 #include "constants.h"
+#ifdef PD_PHYSICS
+#include "ragdoll.h"
+#endif
 #include "game/activemenu.h"
 #include "game/modoptions.h"
 #include "game/bondbike.h"
@@ -660,8 +663,17 @@ f32 bmoveCalculateLookahead(void)
 	return result;
 }
 
+#ifndef PLATFORM_N64
+// Of this frame's btapcount, how many were the trigger pulled with a
+// fire-to-activate gadget in the hand - see JO_ACTION_FROMTRIGGER
+static s32 g_BmoveTriggerTaps;
+#endif
+
 void bmoveResetMoveData(struct movedata *data)
 {
+#ifndef PLATFORM_N64
+	g_BmoveTriggerTaps = 0;
+#endif
 	data->canswivelgun = 0;
 	data->canmanualaim = 0;
 	data->triggeron = false;
@@ -782,6 +794,10 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 	const f32 mlookscale = g_Vars.lvupdate240 ? (4.f / (f32)g_Vars.lvupdate240) : 4.f;
 	const bool allowmlook = (g_Vars.currentplayernum == 0) && (allowc1x || allowc1y);
 	bool allowmcross = false;
+	// GoldenEye's tank with the cannon in hand holds its sight in the middle
+	// as Aim Lock does, the mouse turning the turret in aim mode (getank.c)
+	const bool tanksight = geTankHoldsSight();
+	const bool aimlock = modIsCodAimLockOn() || tanksight;
 #endif
 
 	controlmode = optionsGetControlMode(g_Vars.currentplayerstats->mpindex);
@@ -839,9 +855,15 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 	movedata.analogwalk = movedata.c1stickysafe;
 
 #ifndef PLATFORM_N64
+	if (tanksight) {
+		// where the mouse had the sight before the tank, forgotten
+		g_Vars.currentplayer->swivelpos[0] = 0.0f;
+		g_Vars.currentplayer->swivelpos[1] = 0.0f;
+	}
+
 	if (allowmlook) {
 		inputMouseGetScaledDelta(&movedata.freelookdx, &movedata.freelookdy);
-		allowmcross = (PLAYER_EXTCFG().mouseaimmode == MOUSEAIM_CLASSIC) && !modIsCodAimLockOn() &&
+		allowmcross = (PLAYER_EXTCFG().mouseaimmode == MOUSEAIM_CLASSIC) && !aimlock &&
 			(movedata.freelookdx || movedata.freelookdy || g_Vars.currentplayer->swivelpos[0] || g_Vars.currentplayer->swivelpos[1]);
 		if (movedata.invertpitch) {
 			movedata.freelookdy = -movedata.freelookdy;
@@ -1117,6 +1139,13 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 					// Handle B button activation
 					if (allowc1buttons && controlmode != CONTROLMODE_PC) {
 						for (i = 0; i < numsamples; i++) {
+#ifdef PD_PHYSICS
+							// Consume Use throughout a drag, including the frame it is released.
+							if (ragdollIsHolding()) {
+								g_Vars.currentplayer->usedowntime = -1;
+								continue;
+							}
+#endif
 							if (joyGetButtonsOnSample(i, contpad1, c1allowedbuttons & B_BUTTON)
 									|| joyGetButtonsOnSample(i, contpad2, c2allowedbuttons & B_BUTTON)) {
 								if (g_Vars.currentplayer->usedowntime >= -1) {
@@ -1285,7 +1314,12 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 							geTankFireCannon();
 						} else
 #endif
-						movedata.btapcount++;
+						{
+							movedata.btapcount++;
+#ifndef PLATFORM_N64
+							g_BmoveTriggerTaps++;
+#endif
+						}
 #ifndef PLATFORM_N64
 						// GoldenEye's camera and watch magnet, whose trigger
 						// does something of its own as well (gegadgets.c)
@@ -1457,7 +1491,7 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 								movedata.analogwalk = 0;
 								movedata.analoglean = 0.f;
 							}
-							if (modIsCodAimLockOn()) {
+							if (aimlock) {
 								// Aim Lock: the aim stick turns the view as it
 								// does outside aim mode, the crosshair staying
 								// put, and the mouse with it. The fov scaling
@@ -1650,6 +1684,13 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 						B_BUTTON;
 					if (allowc1buttons) {
 						for (i = 0; i < numsamples; i++) {
+#ifdef PD_PHYSICS
+							// Consume Use throughout a drag, including the frame it is released.
+							if (ragdollIsHolding()) {
+								g_Vars.currentplayer->usedowntime = -1;
+								continue;
+							}
+#endif
 							if (joyGetButtonsOnSample(i, contpad1, c1allowedbuttons & usemask)) {
 								if (g_Vars.currentplayer->usedowntime >= -1) {
 									if (controlmode != CONTROLMODE_PC) {
@@ -2019,7 +2060,12 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 							geTankFireCannon();
 						} else
 #endif
-						movedata.btapcount++;
+						{
+							movedata.btapcount++;
+#ifndef PLATFORM_N64
+							g_BmoveTriggerTaps++;
+#endif
+						}
 #ifndef PLATFORM_N64
 						// GoldenEye's camera and watch magnet, whose trigger
 						// does something of its own as well (gegadgets.c)
@@ -2066,6 +2112,15 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 			g_Vars.currentplayer->bondactivateorreload = movedata.btapcount ?
 				(g_Vars.currentplayer->bondactivateorreload | JO_ACTION_ACTIVATE | JO_ACTION_RELOAD) : 0;
 		}
+
+#ifndef PLATFORM_N64
+		// Jump shares the use button, and a fire-to-activate gadget's trigger
+		// is a use press: GoldenEye's camera jumped with every photo (F3
+		// 20261002-155304). Marked so it reaches a door and never the jump.
+		if (g_BmoveTriggerTaps >= movedata.btapcount) {
+			g_Vars.currentplayer->bondactivateorreload |= JO_ACTION_FROMTRIGGER;
+		}
+#endif
 
 		bmoveHandleActivate();
 	}
@@ -2413,6 +2468,15 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 
 		bgunSetAimType(0);
 
+#ifndef PLATFORM_N64
+		if (tanksight) {
+			// no swing with the turn and no auto aim: the shell goes where
+			// the turret points, the middle of the view (getank.c)
+			bgunSwivelWithoutDamp(0.0f, 0.0f);
+			return;
+		}
+#endif
+
 		if (
 				(
 				 movedata.canautoaim
@@ -2472,7 +2536,7 @@ void bmoveProcessInput(bool allowc1x, bool allowc1y, bool allowc1buttons, bool i
 		// when holding aim and moving stick
 		bgunSetAimType(0);
 #ifndef PLATFORM_N64
-		if (modIsCodAimLockOn()) {
+		if (aimlock) {
 			// Aim Lock: the crosshair is held in the centre and the stick
 			// has gone to turning the view
 			bgunSwivelWithoutDamp(0.0f, 0.0f);

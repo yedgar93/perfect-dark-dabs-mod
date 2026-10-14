@@ -6,6 +6,7 @@
 #include <cstring>
 #include <cassert>
 #include <cstdio>
+#include <cstdarg>
 
 #include <map>
 #include <set>
@@ -17,6 +18,7 @@
 #include <iostream>
 #include <memory>
 #include <limits>
+#include <algorithm>
 
 #ifndef _LANGUAGE_C
 #define _LANGUAGE_C
@@ -38,6 +40,7 @@
 #include "menuimage.h"
 #include "gfx_texscale.h"
 #include "gfx_post.h"
+#include "gfxmesh.h"
 
 uintptr_t gfxFramebuffer;
 
@@ -246,6 +249,7 @@ struct LoadedTexture {
     uint32_t size_bytes; // line_size_bytes * height
     uint32_t full_image_line_size_bytes;
     uint32_t line_size_bytes;
+    uint32_t block_bytes; // what the load put in TMEM from addr, every mip level of a mipmapped texture; 0 unknown
     uint32_t tex_flags;
     uint32_t glyph;      // gDPSetFontGlyphEXT, 0 when this is not a font glyph
     struct RawTexMetadata raw_tex_metadata;
@@ -359,6 +363,8 @@ static struct BatchState {
     uint32_t tex_size[2][2]; // [texture][0 = width, 1 = height], kept for GFX_VERIFY_BATCH_STATE
 
     bool use_alpha, use_fog, use_grayscale, use_modulate, use_additive, use_envmap;
+    bool fog_vertex; // SHADER_OPT_FOG_VERTEX: the fog slot carries per-vertex factors
+    bool shade_linear; // SHADER_OPT_SHADE_LINEAR: the inputs are carried linearly on the screen
 } batch;
 
 /**
@@ -1015,6 +1021,52 @@ static void gfx_texture_cache_drop_texnum(int32_t texturenum) {
 
 static struct GfxTraceStats g_GfxLastFrame;
 
+static inline void *seg_addr(uintptr_t w1);
+
+extern "C" int gfx_trace_texture_entries(const void *addr, struct GfxTraceTexEntry *out, int max) {
+    TextureCacheKey probe = { (const uint8_t *)addr, { 0 }, 0, 0 }; // the bucket is the address's alone
+    int count = 0;
+
+    if (gfx_texture_cache.map.bucket_count() == 0) {
+        return 0;
+    }
+
+    const size_t bucket = gfx_texture_cache.map.bucket(probe);
+
+    for (auto it = gfx_texture_cache.map.begin(bucket); it != gfx_texture_cache.map.end(bucket); ++it) {
+        if (it->first.texture_addr != (const uint8_t *)addr) {
+            continue;
+        }
+
+        if (count < max) {
+            struct GfxTraceTexEntry *e = &out[count];
+            e->palette = it->first.palette_addrs[0];
+            e->palette1 = it->first.palette_addrs[1];
+            e->glyph = it->first.glyph;
+            e->fmt = it->first.fmt;
+            e->siz = it->first.siz;
+            e->palindex = it->first.palette_index;
+            e->source = it->second.source;
+            e->width = it->second.width;
+            e->height = it->second.height;
+            e->upload_frame = it->second.upload_frame;
+            e->last_frame = it->second.last_frame;
+        }
+
+        count++;
+    }
+
+    return count;
+}
+
+extern "C" uint32_t gfx_trace_frame(void) {
+    return gfx_texture_cache.frame;
+}
+
+extern "C" const void *gfx_trace_seg_addr(uintptr_t w1) {
+    return seg_addr(w1);
+}
+
 extern "C" void gfx_trace_stats(struct GfxTraceStats *out) {
     *out = g_GfxLastFrame;
     out->cacheentries = (uint32_t)gfx_texture_cache.map.size();
@@ -1085,6 +1137,7 @@ static bool gfx_texture_cache_lookup(int i, const TextureCacheKey& key) {
     node->second.texture_id = texture_id;
     node->second.lru_location = gfx_texture_cache.lru.insert(gfx_texture_cache.lru.end(), { it });
     node->second.last_frame = gfx_texture_cache.frame;
+    node->second.upload_frame = gfx_texture_cache.frame;
     gfx_texture_cache_filling = node;
     if (gfx_texture_cache.map.size() > gfx_texture_cache.peak) {
         gfx_texture_cache.peak = (uint32_t)gfx_texture_cache.map.size();
@@ -1185,6 +1238,8 @@ static void gfx_texture_cache_charge(uint32_t width, uint32_t height, bool gen_m
     }
     gfx_texture_cache.bytes -= std::min<uint64_t>(gfx_texture_cache.bytes, node->second.bytes);
     node->second.bytes = (uint32_t)std::min<uint64_t>(bytes, UINT32_MAX);
+    node->second.width = (uint16_t)std::min<uint32_t>(width, 0xffff);
+    node->second.height = (uint16_t)std::min<uint32_t>(height, 0xffff);
     gfx_texture_cache.bytes += node->second.bytes;
 }
 
@@ -1617,6 +1672,97 @@ static void gfx_decode_original(int tile, const LoadedTexture& loaded_texture, u
 }
 
 /**
+ * G_TEX_OWN_LODS_EXT: a mipmapped texture uploaded with the levels of detail
+ * its data holds, as the RDP samples them - tile k after the first is level k,
+ * half the size of the one before, at its own place in the block the load put
+ * in TMEM - rather than levels the GPU makes from the first. The cartridge's
+ * levels are not always a picture of the first at a distance: GoldenEye's
+ * shrink finds each averaged colour in an unsorted palette by a search that
+ * assumes it sorted (getexshrink.c), and Crab Key's wall grille, a dark mesh
+ * up close, is a white one from a few steps back.
+ *
+ * Only a texture read out of a ROM conversion's folder, whose levels
+ * GoldenEye's shrink made: Perfect Dark's own models drawn in the same scene
+ * keep the levels the GPU makes.
+ *
+ * True when it went up so, with level 0 left in tex_upload_buffer as the other
+ * imports leave it. False when the levels are no chain a GPU texture can hold
+ * - a row padded past the tile, a level not half the one before, a tile in
+ * another format, a level past the end of what was loaded - and nothing went
+ * up.
+ */
+static bool gfx_import_own_lods(int tile, const LoadedTexture& loaded_texture, uint8_t fmt, uint8_t siz) {
+    static std::vector<uint8_t> levels;
+    const auto& t0 = rdp.texture_tile[tile];
+    const uint32_t count = std::min<uint32_t>(rdp.tex_max_lod + 1u, 8u - tile);
+
+    if (count < 2 || !loaded_texture.addr || !loaded_texture.block_bytes || siz == G_IM_SIZ_32b ||
+        loaded_texture.raw_tex_metadata.h_byte_scale != 1 || loaded_texture.raw_tex_metadata.v_pixel_scale != 1) {
+        return false;
+    }
+
+    gfx_decode_original(tile, loaded_texture, fmt, siz);
+
+    const uint32_t w0 = last_upload_width;
+    const uint32_t h0 = last_upload_height;
+
+    if (w0 == 0 || w0 != t0.width || h0 != t0.height) {
+        return false;
+    }
+
+    size_t total = 0;
+    for (uint32_t k = 0; k < count; k++) {
+        total += (size_t)std::max(1u, w0 >> k) * std::max(1u, h0 >> k) * 4;
+    }
+    levels.resize(total);
+    memcpy(levels.data(), tex_upload_buffer, (size_t)w0 * h0 * 4);
+
+    const uint8_t* ptrs[8] = { levels.data() };
+    size_t at = (size_t)w0 * h0 * 4;
+
+    for (uint32_t k = 1; k < count; k++) {
+        const auto& tk = rdp.texture_tile[tile + k];
+        const uint32_t wk = std::max(1u, w0 >> k);
+        const uint32_t hk = std::max(1u, h0 >> k);
+        const uint32_t off = (tk.tmem - t0.tmem) * 8u;
+
+        if (tk.fmt != fmt || tk.siz != siz || tk.palette != t0.palette || tk.width != wk || tk.height != hk ||
+            tk.tmem < t0.tmem || !tk.line_size_bytes || off + tk.line_size_bytes * hk > loaded_texture.block_bytes) {
+            return false;
+        }
+
+        LoadedTexture lk = loaded_texture;
+        lk.addr = loaded_texture.addr + off;
+        lk.line_size_bytes = lk.full_image_line_size_bytes = tk.line_size_bytes;
+        lk.size_bytes = lk.orig_size_bytes = lk.full_size_bytes = tk.line_size_bytes * hk;
+
+        gfx_decode_original(tile + k, lk, fmt, siz);
+
+        // a level's row is whole 8-byte lines: the level is its left wk texels
+        if (last_upload_width < wk || last_upload_height != hk) {
+            return false;
+        }
+
+        for (uint32_t y = 0; y < hk; y++) {
+            memcpy(levels.data() + at + (size_t)y * wk * 4, tex_upload_buffer + (size_t)y * last_upload_width * 4,
+                   (size_t)wk * 4);
+        }
+
+        ptrs[k] = levels.data() + at;
+        at += (size_t)wk * hk * 4;
+    }
+
+    gfx_rapi->upload_texture_levels(ptrs, w0, h0, count);
+    gfx_texture_cache_charge(w0, h0, true);
+
+    memcpy(tex_upload_buffer, levels.data(), (size_t)w0 * h0 * 4);
+    last_upload_width = w0;
+    last_upload_height = h0;
+
+    return true;
+}
+
+/**
  * A pack's opaque picture standing in for a texture the game draws with alpha.
  *
  * The XBLA release's art carries no alpha for most of the textures whose N64
@@ -1736,6 +1882,9 @@ static void import_texture(int i, int tile, bool importReplacement) {
 
     if ((rdp.tex_lod && tile >= rdp.first_tile_index + rdp.tex_detail) || self_detail || !loaded_texture.addr) {
         // set up miplevel 0; also acts as a catch-all for when .addr is NULL because my texture loader sucks
+        if (loaded_texture.addr != rdp.texture_to_load.addr) {
+            loaded_texture.block_bytes = 0;
+        }
         loaded_texture.addr = rdp.texture_to_load.addr;
         loaded_texture.glyph = rdp.texture_to_load.glyph;
         loaded_texture.line_size_bytes = rdp.texture_tile[tile].line_size_bytes;
@@ -1780,10 +1929,18 @@ static void import_texture(int i, int tile, bool importReplacement) {
 
     TextureCacheKey key;
     if (fmt == G_IM_FMT_CI) {
-        key = { orig_addr, { rdp.palette_addrs[0], rdp.palette_addrs[1] }, fmt, siz, palette_index, glyph };
+        key = { orig_addr, { rdp.palette_addrs[0], rdp.palette_addrs[1] }, fmt, siz, palette_index, glyph, 0 };
     } else {
-        key = { orig_addr, {}, fmt, siz, palette_index, glyph };
+        key = { orig_addr, {}, fmt, siz, palette_index, glyph, 0 };
     }
+
+    // One of GoldenEye XBLA's animated pictures (xblaTexBindAnimation()): the
+    // frame it shows now is its own entry, asked for by number below so the
+    // entry holds the frame it is keyed on
+    const int32_t anim_frame = xblaTexHaveAnimations() ? xblaTexAnimFrame(orig_addr) : -1;
+    key.anim_frame = (uint16_t)(anim_frame + 1);
+    key.own_lods = rdp.tex_lod && !rdp.tex_detail && tile == rdp.first_tile_index && !glyph &&
+                   (rsp.extra_geometry_mode & G_TEX_OWN_LODS_EXT) && gfx_texture_enhance_scale <= 1;
 
     if (gfx_texture_cache_lookup(i, key)) {
         return;
@@ -1812,6 +1969,7 @@ static void import_texture(int i, int tile, bool importReplacement) {
             gfx_upload_texture(rep, rep_width, rep_height, rdp.tex_lod);
             menuImageFreeReplacement(rep);
             rendering_state.textures[i]->second.replaced = true;
+            rendering_state.textures[i]->second.source = 'm';
             return;
         }
     }
@@ -1827,7 +1985,8 @@ static void import_texture(int i, int tile, bool importReplacement) {
     if (xblaTexHaveTextures()) {
         int32_t rep_width;
         int32_t rep_height;
-        uint8_t* rep = xblaTexLoadReplacement(orig_addr, &rep_width, &rep_height);
+        uint8_t* rep = anim_frame >= 0 ? xblaTexLoadAnimFrame(orig_addr, anim_frame, &rep_width, &rep_height)
+                                       : xblaTexLoadReplacement(orig_addr, &rep_width, &rep_height);
 
         if (rep) {
             import_enhance_scale = 1; // the release's own art, at the size it drew at
@@ -1835,6 +1994,7 @@ static void import_texture(int i, int tile, bool importReplacement) {
             xblaTexFreeReplacement(rep);
             rendering_state.textures[i]->second.replaced = true;
             rendering_state.textures[i]->second.exact_uv = true;
+            rendering_state.textures[i]->second.source = 'x';
             return;
         }
     }
@@ -1959,6 +2119,7 @@ static void import_texture(int i, int tile, bool importReplacement) {
             }
 
             rendering_state.textures[i]->second.replaced = true;
+            rendering_state.textures[i]->second.source = xbla_rep ? 'X' : xbla_font_rep ? 'f' : 'p';
             return;
         }
     }
@@ -1970,7 +2131,9 @@ static void import_texture(int i, int tile, bool importReplacement) {
     // over its far edge is padding and not the other side of the picture.
     gfx_set_import_enhance(tile, loaded_texture, tex_row_bytes, siz);
 
-    if (fmt == G_IM_FMT_RGBA) {
+    if (key.own_lods && texpackTextureIsConverted(orig_addr) && gfx_import_own_lods(tile, loaded_texture, fmt, siz)) {
+        // with its own levels of detail
+    } else if (fmt == G_IM_FMT_RGBA) {
         if (siz == G_IM_SIZ_16b) {
             import_texture_rgba16(tile, loaded_texture, rdp.tex_lod);
         } else if (siz == G_IM_SIZ_32b) {
@@ -2062,15 +2225,8 @@ static void gfx_matrix_mul(float res[4][4], const float a[4][4], const float b[4
     memcpy(res, tmp, sizeof(tmp));
 }
 
-static void gfx_sp_matrix(uint8_t parameters, const int32_t* addr) {
-    float matrix[4][4];
-
-    if (parameters & G_MTX_FLOATS) {
-        // The port's own flag: a matrix a port file built as floats and never
-        // converted (xblamesh.c's divided draw matrix). Read as it is written,
-        // for the precision s15.16 does not have for rows well under one.
-        memcpy(matrix, addr, sizeof(matrix));
-    } else {
+// A G_MTX's matrix as the RSP reads it, from addr
+static inline void gfx_mtx_read(const int32_t* addr, float matrix[4][4]) {
 #ifndef GBI_FLOATS
     // Original GBI where fixed point matrices are used
     for (int i = 0; i < 4; i++) {
@@ -2083,8 +2239,20 @@ static void gfx_sp_matrix(uint8_t parameters, const int32_t* addr) {
     }
 #else
     // For a modified GBI where fixed point values are replaced with floats
-    memcpy(matrix, addr, sizeof(matrix));
+    memcpy(matrix, addr, sizeof(float) * 16);
 #endif
+}
+
+static void gfx_sp_matrix(uint8_t parameters, const int32_t* addr) {
+    float matrix[4][4];
+
+    if (parameters & G_MTX_FLOATS) {
+        // The port's own flag: a matrix a port file built as floats and never
+        // converted (xblamesh.c's divided draw matrix). Read as it is written,
+        // for the precision s15.16 does not have for rows well under one.
+        memcpy(matrix, addr, sizeof(matrix));
+    } else {
+        gfx_mtx_read(addr, matrix);
     }
 
     if (parameters & G_MTX_PROJECTION) {
@@ -2204,8 +2372,9 @@ static inline void gfx_texgen_eye_normal(float px, float py, float pz, float n[3
  * vertex's colour entry read as a normal; gfx_sp_tri_emit() hands it the
  * triangle's own under G_TEXGEN_FACE_EXT. Alpha is left to the caller.
  */
-static inline __attribute__((always_inline)) void gfx_light_vertex(struct LoadedVertex* d, float px, float py, float pz,
-                                                                   float nx, float ny, float nz, float* U, float* V) {
+// The lights' and the LookAt's directions in model space, after a light or
+// the modelview has changed
+static inline void gfx_refresh_light_coeffs(void) {
     if (rsp.lights_changed) {
         for (int i = 0; i < rsp.current_num_lights - 1; i++) {
             calculate_normal_dir(&rsp.current_lights[i], rsp.current_lights_coeffs[i]);
@@ -2216,6 +2385,11 @@ static inline __attribute__((always_inline)) void gfx_light_vertex(struct Loaded
         }
         rsp.lights_changed = false;
     }
+}
+
+static inline __attribute__((always_inline)) void gfx_light_vertex(struct LoadedVertex* d, float px, float py, float pz,
+                                                                   float nx, float ny, float nz, float* U, float* V) {
+    gfx_refresh_light_coeffs();
 
     int r = rsp.current_lights[rsp.current_num_lights - 1].col[0];
     int g = rsp.current_lights[rsp.current_num_lights - 1].col[1];
@@ -2434,10 +2608,19 @@ static inline __attribute__((always_inline)) void gfx_sp_load_vertex(struct Load
     }
 }
 
+// Slots a room's or a model's kept run filled on the GPU alone: the CPU's
+// copy of them is stale until a load puts something there (for the stats:
+// a triangle the CPU draws over one is drawn wrong)
+static uint32_t gfx_gpu_only_slots;
+
 static void gfx_sp_vertex(size_t n_vertices, size_t dest_index, const Vtx* vertices) {
     SUPPORT_CHECK(n_vertices <= MAX_VERTICES);
 
     g_GfxNumVerts += n_vertices;
+
+    if (gfx_gpu_only_slots && dest_index < 32) {
+        gfx_gpu_only_slots &= ~((n_vertices >= 32 ? 0xffffffffu : (1u << n_vertices) - 1) << dest_index);
+    }
 
     for (size_t i = 0; i < n_vertices; i++, dest_index++) {
         const Vtx* v = &vertices[i];
@@ -2467,6 +2650,23 @@ static inline int gfx_lod_tile_offset(const int i) {
 }
 
 /**
+ * Whether the combiner's last cycle hands the blender an alpha that is nought
+ * whatever it is fed: (A - B) * C + D with nothing left of the product (A the
+ * same as B, or C nought) and D nought, cycle 1's COMBINED read through.
+ */
+static bool gfx_cc_alpha_zero(uint64_t cm, int cycle) {
+    const uint32_t a = (cm >> (cycle * 28 + 16)) & 7;
+    const uint32_t b = (cm >> (cycle * 28 + 19)) & 7;
+    const uint32_t c = (cm >> (cycle * 28 + 22)) & 7;
+    const uint32_t d = (cm >> (cycle * 28 + 25)) & 7;
+    auto zero = [&](uint32_t in) {
+        return in == G_ACMUX_0 || (cycle == 1 && in == G_ACMUX_COMBINED && gfx_cc_alpha_zero(cm, 0));
+    };
+
+    return (a == b || c == G_ACMUX_0 || (zero(a) && zero(b))) && zero(d);
+}
+
+/**
  * Work out everything about the current RDP/RSP state that gfx_sp_tri1 needs
  * but that no longer changes from one triangle to the next, and park it in
  * `batch`. Called only when gfx_mark_state_dirty() has fired or a texture is
@@ -2478,7 +2678,7 @@ static void gfx_derive_batch_state(void) {
     bool use_alpha =
         (rdp.other_mode_l & (3 << 20)) == (G_BL_CLR_MEM << 20) && (rdp.other_mode_l & (3 << 16)) == (G_BL_1MA << 16);
     const bool use_fog = ((rdp.other_mode_l >> 30) == G_BL_CLR_FOG) || ((rdp.other_mode_l >> 26) == G_BL_A_FOG);
-    const bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
+    bool texture_edge = (rdp.other_mode_l & CVG_X_ALPHA) == CVG_X_ALPHA;
     const bool use_noise = (rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == G_AC_DITHER;
     const bool use_2cyc = (rdp.other_mode_h & (3U << G_MDSFT_CYCLETYPE)) == G_CYC_2CYCLE;
     const bool alpha_threshold = (rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == G_AC_THRESHOLD;
@@ -2491,12 +2691,42 @@ static void gfx_derive_batch_state(void) {
         use_alpha = true;
     }
 
+    // Under a mode that selects coverage for alpha without FORCE_BL, the RDP
+    // blends only partly covered edge pixels, by their coverage: a covered
+    // pixel is the combiner's colour whatever alpha the combiner hands on. A
+    // combiner whose alpha is nought outright, blended by it here, drew nothing
+    // at all - GE Editor writes its levels' lists that way, under
+    // G_RM_AA_ZB_OPA_TERR2 (ten of Goldfinger 64's twenty missions; Cartel,
+    // Bodega, China and Crab Key drew no walls or floors). Such a draw is
+    // opaque, as on the console. Only
+    // that alpha: one that can be anything else (a texture's, a vertex's) still
+    // blends as before - a span of Defection's release rooms needs its
+    // texture's, and a lit corner's byte is mended in gfx_sp_load_vertex().
+    // Not under CVG_X_ALPHA or an alpha compare, where the RDP does read the
+    // combined alpha. Under G_COVERAGE_ALPHA_EXT (a converted GoldenEye level
+    // in the N64 look) any combined alpha is passed over this way, as the RDP
+    // does: GE Editor's I4 walls hand on their texels' intensity.
+    if (use_alpha && (rdp.other_mode_l & (ALPHA_CVG_SEL | FORCE_BL | CVG_X_ALPHA)) == ALPHA_CVG_SEL &&
+        (rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == G_AC_NONE &&
+        ((rsp.extra_geometry_mode & G_COVERAGE_ALPHA_EXT) || gfx_cc_alpha_zero(rdp.combine_mode, use_2cyc ? 1 : 0))) {
+        use_alpha = false;
+    }
+
     // A faded body's depth pass (chrRender()): blended to nothing, so only the
     // depth it writes is left (gfx_emit_prepare() turns the write on). A
     // cutout's clear texels are still discarded before it, as they would be.
     if (rsp.extra_geometry_mode & G_DEPTH_PREPASS_EXT) {
         use_alpha = true;
         invisible = true;
+
+        // With G_ALPHA_CORE_EXT as well, only the solid texels (three
+        // quarters alpha and more) write their depth, whatever the render
+        // mode: a room's translucent layer laid into the depth buffer after
+        // it has been blended (bgRenderRoomXlu()), so a grating's metal hides
+        // the props drawn after it and its holes do not.
+        if (rsp.extra_geometry_mode & G_ALPHA_CORE_EXT) {
+            texture_edge = true;
+        }
     }
 
     if (use_alpha) {
@@ -2507,6 +2737,10 @@ static void gfx_derive_batch_state(void) {
     }
     if (texture_edge) {
         cc_options |= (uint64_t)SHADER_OPT_TEXTURE_EDGE;
+
+        if (rsp.extra_geometry_mode & G_ALPHA_CORE_EXT) {
+            cc_options |= (uint64_t)SHADER_OPT_ALPHA_CORE;
+        }
     }
     if (use_noise) {
         cc_options |= (uint64_t)SHADER_OPT_NOISE;
@@ -2534,6 +2768,17 @@ static void gfx_derive_batch_state(void) {
     }
     if (use_fog && rsp.fog_linear && (rsp.geometry_mode & G_FOG)) {
         cc_options |= (uint64_t)SHADER_OPT_FOG_LINEAR;
+    }
+    // G_FOG_VERTEX_EXT: the N64's fog, worked out per vertex (gfx_emit_vertex())
+    const bool fog_vertex = use_fog && (rsp.extra_geometry_mode & G_FOG_VERTEX_EXT) != 0 &&
+                            !(rsp.fog_linear && (rsp.geometry_mode & G_FOG));
+    if (fog_vertex) {
+        cc_options |= (uint64_t)SHADER_OPT_FOG_VERTEX;
+    }
+    // G_SHADE_LINEAR_EXT: the shade as the RDP carries it (gfx_emit_tri3())
+    const bool shade_linear = (rsp.extra_geometry_mode & G_SHADE_LINEAR_EXT) != 0;
+    if (shade_linear) {
+        cc_options |= (uint64_t)SHADER_OPT_SHADE_LINEAR;
     }
 
     // If we are not using alpha, clear the alpha components of the combiner as they have no effect
@@ -2645,6 +2890,8 @@ static void gfx_derive_batch_state(void) {
     batch.tm = tm;
     batch.use_alpha = use_alpha;
     batch.use_fog = use_fog;
+    batch.fog_vertex = fog_vertex;
+    batch.shade_linear = shade_linear;
     batch.use_grayscale = use_grayscale;
     batch.use_modulate = use_alpha && (rsp.extra_geometry_mode & G_MODULATE_EXT) != 0;
     batch.use_additive = use_alpha && !batch.use_modulate && (rsp.extra_geometry_mode & G_ADDITIVE_EXT) != 0;    batch.use_envmap = use_envmap;
@@ -3155,6 +3402,12 @@ static inline __attribute__((always_inline)) void gfx_emit_prepare(void) {
 }
 
 /*
+ * Under G_FOG_VERTEX_EXT, the triangle being emitted carries its corners' own
+ * fog factors (gfx_emit_tri3()).
+ */
+static bool emit_fog_tri;
+
+/*
  * One vertex into buf_vbo in the batch's layout.
  */
 static inline __attribute__((always_inline)) void gfx_emit_vertex(const struct LoadedVertex* v, bool is_rect) {
@@ -3198,8 +3451,26 @@ static inline __attribute__((always_inline)) void gfx_emit_vertex(const struct L
                 break;
             }
             case EMIT_SLOT_FOG_LINE:
-                o[0] = (float)v->fog_mul;
-                o[1] = (float)v->fog_offset;
+                if (batch.fog_vertex) {
+                    // The offset times w, which the fragment divides by its
+                    // own interpolated w: a value carried that way is linear
+                    // on the screen, as the N64's shade alpha is. A triangle
+                    // carries each corner's own factor, clamped there as the
+                    // RSP clamps it (gfx_emit_tri3() has cut it where the RSP
+                    // would first); a rectangle keeps the line.
+                    if (emit_fog_tri) {
+                        float f = (v->z / w) * (float)v->fog_mul + (float)v->fog_offset;
+                        f = f < 0.0f ? 0.0f : f > 255.0f ? 255.0f : f;
+                        o[0] = 0.0f;
+                        o[1] = f * w;
+                    } else {
+                        o[0] = (float)v->fog_mul;
+                        o[1] = (float)v->fog_offset * w;
+                    }
+                } else {
+                    o[0] = (float)v->fog_mul;
+                    o[1] = (float)v->fog_offset;
+                }
                 break;
             case EMIT_SLOT_SHADE_RGB:
                 o[0] = byte_unit.f[v->color.r];
@@ -3234,6 +3505,150 @@ static inline __attribute__((always_inline)) void gfx_emit_tri_done(void) {
     if (++buf_vbo_num_tris >= g_GfxMaxBufferedTris) {
         g_GfxNumBufferFullFlushes++;
         gfx_flush_for(GFX_FLUSH_BUFFERFULL);
+    }
+}
+
+/*
+ * A point on the edge from p to q, t of the way along it in clip space, as a
+ * clipper makes one: every attribute carried linearly.
+ */
+static void gfx_lerp_vertex(struct LoadedVertex* o, const struct LoadedVertex* p, const struct LoadedVertex* q, float t) {
+    *o = *p;
+#define LERP_F(f) o->f = p->f + (q->f - p->f) * t
+    LERP_F(x);
+    LERP_F(y);
+    LERP_F(z);
+    LERP_F(w);
+    LERP_F(u);
+    LERP_F(v);
+    for (int e = 0; e < 6; e++) {
+        LERP_F(env[e]);
+    }
+#undef LERP_F
+    const uint8_t* pc = &p->color.r;
+    const uint8_t* qc = &q->color.r;
+    uint8_t* oc = &o->color.r;
+    for (int e = 0; e < 4; e++) {
+        const float f = pc[e] + (qc[e] - pc[e]) * t + 0.5f;
+        oc[e] = f <= 0 ? 0 : f >= 255 ? 255 : (uint8_t)f;
+    }
+    o->clip_rej = 0;
+}
+
+/*
+ * The clip volume of the N64's RSP under gSPClipRatio(FRUSTRATIO_2), which
+ * both games set (lv.c): a guard band twice the screen's size, and the eye's
+ * own plane - not the near plane: the cartridge draws what stands nearer than
+ * it (Dam's pad 157, a rock face a step away), as the renderers here do with
+ * depth clamping on. Distance inside plane k (0 the eye's, 1-4 left, right,
+ * bottom, top).
+ */
+#define GFX_RSP_CLIP_W 0.01f
+
+static inline float gfx_rsp_clip_dist(const struct LoadedVertex* v, int k) {
+    switch (k) {
+        case 0:
+            return v->w - GFX_RSP_CLIP_W;
+        case 1:
+            return 2.0f * v->w + v->x;
+        case 2:
+            return 2.0f * v->w - v->x;
+        case 3:
+            return 2.0f * v->w + v->y;
+        default:
+            return 2.0f * v->w - v->y;
+    }
+}
+
+/*
+ * One triangle into the batch. Under G_FOG_VERTEX_EXT each corner carries its
+ * own fog factor, worked out from its own depth (gfx_emit_vertex()), and the
+ * triangle is cut first where the RSP would cut it - behind the eye and at
+ * the guard band - so that its new corners work theirs out where they stand,
+ * as the RSP's clipper does. A floor triangle reaching behind the camera then
+ * has corners just under the screen with the fog of their own depth, not the
+ * far corner's fog carried down to Bond's feet: measured on the cartridge at
+ * Surface 2's pad 245 (fog 76, 97, 123, 142 up the middle of the screen;
+ * this model 81, 101, 122, 142; without the guard band, 147-169).
+ * G_SHADE_LINEAR_EXT cuts it the same way: the RDP carries the shade
+ * linearly across each piece the RSP hands it, so a cut corner's colour,
+ * taken along the edge in clip space, is where its gradient starts.
+ */
+static void gfx_emit_tri3(const struct LoadedVertex* a, const struct LoadedVertex* b, const struct LoadedVertex* c,
+                          bool is_rect) {
+    emit_fog_tri = batch.fog_vertex && !is_rect;
+
+    if (!emit_fog_tri && (!batch.shade_linear || is_rect)) {
+        gfx_emit_vertex(a, is_rect);
+        gfx_emit_vertex(b, is_rect);
+        gfx_emit_vertex(c, is_rect);
+        gfx_emit_tri_done();
+        return;
+    }
+
+    const struct LoadedVertex* in3[3] = { a, b, c };
+    int outside = 0;
+
+    for (int k = 0; k < 5; k++) {
+        for (int i = 0; i < 3; i++) {
+            if (gfx_rsp_clip_dist(in3[i], k) < 0.0f) {
+                outside |= 1 << k;
+            }
+        }
+    }
+
+    if (outside == 0) {
+        gfx_emit_vertex(a, is_rect);
+        gfx_emit_vertex(b, is_rect);
+        gfx_emit_vertex(c, is_rect);
+        gfx_emit_tri_done();
+        return;
+    }
+
+    // Sutherland-Hodgman, a plane at a time: three corners and five planes
+    // make at most eight
+    struct LoadedVertex buf[2][8];
+    int n = 3;
+
+    buf[0][0] = *a;
+    buf[0][1] = *b;
+    buf[0][2] = *c;
+
+    int cur = 0;
+
+    for (int k = 0; k < 5 && n >= 3; k++) {
+        if (!(outside & (1 << k))) {
+            continue;
+        }
+
+        const struct LoadedVertex* poly = buf[cur];
+        struct LoadedVertex* out = buf[cur ^ 1];
+        int m = 0;
+
+        for (int i = 0; i < n; i++) {
+            const struct LoadedVertex* p = &poly[i];
+            const struct LoadedVertex* q = &poly[(i + 1) % n];
+            const float dp = gfx_rsp_clip_dist(p, k);
+            const float dq = gfx_rsp_clip_dist(q, k);
+
+            if (dp >= 0.0f && m < 8) {
+                out[m++] = *p;
+            }
+
+            if ((dp >= 0.0f) != (dq >= 0.0f) && m < 8) {
+                gfx_lerp_vertex(&out[m++], p, q, dp / (dp - dq));
+            }
+        }
+
+        n = m;
+        cur ^= 1;
+    }
+
+    for (int i = 1; i + 1 < n; i++) {
+        gfx_emit_vertex(&buf[cur][0], is_rect);
+        gfx_emit_vertex(&buf[cur][i], is_rect);
+        gfx_emit_vertex(&buf[cur][i + 1], is_rect);
+        gfx_emit_tri_done();
     }
 }
 
@@ -3483,23 +3898,34 @@ static void gfx_sp_tri_emit(struct LoadedVertex* v1, struct LoadedVertex* v2, st
         }
 
         gfx_emit_prepare();
-
-        gfx_emit_vertex(&f[0], is_rect);
-        gfx_emit_vertex(&f[1], is_rect);
-        gfx_emit_vertex(&f[2], is_rect);
-        gfx_emit_tri_done();
+        gfx_emit_tri3(&f[0], &f[1], &f[2], is_rect);
         return;
     }
 
     gfx_emit_prepare();
-
-    gfx_emit_vertex(v1, is_rect);
-    gfx_emit_vertex(v2, is_rect);
-    gfx_emit_vertex(v3, is_rect);
-    gfx_emit_tri_done();
+    gfx_emit_tri3(v1, v2, v3, is_rect);
 }
 
+extern "C" uint32_t g_GfxStaleSlotTris;
+static bool gfx_vertices_lost;   // the last vertex load was refused, and so are its triangles
+// G_MESH_EXT, below: whether the triangle was the GPU's to draw
+static const struct gfxmeshdraw* mesh_cur;
+static bool mesh_room; // mesh_cur is a room's (gfxmesh.room): kept runs or the CPU, below
+static bool mesh_model; // mesh_cur is a model node's (gSPModelMeshEXT()): the same, below
+static bool gfx_mesh_tri(uint8_t a, uint8_t b, uint8_t c);
+
 static void gfx_sp_tri1(uint8_t vtx1_idx, uint8_t vtx2_idx, uint8_t vtx3_idx, bool is_rect) {
+    if (mesh_cur && gfx_mesh_tri(vtx1_idx, vtx2_idx, vtx3_idx)) {
+        return;
+    }
+
+    // (the rectangles' corners are slots past MAX_VERTICES, never a list's)
+    if (gfx_gpu_only_slots && ((vtx1_idx < 32 && (gfx_gpu_only_slots >> vtx1_idx & 1)) ||
+                               (vtx2_idx < 32 && (gfx_gpu_only_slots >> vtx2_idx & 1)) ||
+                               (vtx3_idx < 32 && (gfx_gpu_only_slots >> vtx3_idx & 1)))) {
+        g_GfxStaleSlotTris++;
+    }
+
     struct LoadedVertex* v1 = &rsp.loaded_vertices[vtx1_idx];
     struct LoadedVertex* v2 = &rsp.loaded_vertices[vtx2_idx];
     struct LoadedVertex* v3 = &rsp.loaded_vertices[vtx3_idx];
@@ -3523,6 +3949,2921 @@ static inline void gfx_sp_tri4(Gfx *cmd) {
     }
 
     gfx_seal_this = false;
+}
+
+/*
+ * G_MESH_EXT: a mesh drawn from the GPU's copy of it (gfxmesh.h).
+ *
+ * Between a gSPMeshEXT() and the one of NULL that ends it, a G_VTX that loads
+ * the mesh's own vertices does no work here: the slots it fills remember the
+ * vertices' places in the mesh, and the triangles over them are gathered as
+ * indices (gfx_mesh_tri()) until a command that is not part of the geometry
+ * comes along. Then the run goes to the backend as one draw (gfx_mesh_flush()),
+ * with what gfx_sp_load_vertex() and gfx_emit_vertex() would have worked out
+ * for every vertex - the transform, the aspect and the jitter, the fog line,
+ * the texture coordinates, the combiner's inputs - handed to the vertex shader
+ * as the parameters of the draw (gfx_mesh_params()), and the shader poses the
+ * bind pose by the draw's palette first. A list holds no state change inside
+ * a run, so the state a run is drawn under is the state its vertices were
+ * loaded under, as the CPU would have had it. Culling is the GPU's, by the
+ * winding gfx_tri_is_culled() would have dropped (gfx_mesh_cull()).
+ *
+ * What the vertex shader does not do is loaded on the CPU as any list is,
+ * posed here from the bind pose first (gfx_mesh_load_cpu()): lighting and
+ * texgen (the sheens' passes), the reflection's per-pixel normals, a face's
+ * own texgen, the sky's unclipped lists and the rooms' sealed seams.
+ */
+extern "C" {
+// Video.GpuVertices
+bool gfx_gpu_vertices = true;
+// The last frame's meshes drawn by the GPU, their triangles, and the
+// triangles a backend would not draw, which went to the CPU instead
+uint32_t g_GfxMeshDraws = 0, g_GfxMeshTris = 0, g_GfxMeshRefused = 0;
+// The same for rooms (and of those triangles, the ones of rooms dyntex
+// animates), and a room's triangles drawn on the CPU after all: those of runs
+// the GPU cannot draw, and those sealed (G_SEAL_SEAMS_EXT)
+uint32_t g_GfxRoomDraws = 0, g_GfxRoomTris = 0, g_GfxRoomDyntexTris = 0, g_GfxRoomRefused = 0, g_GfxRoomCpuTris = 0,
+         g_GfxRoomSealedTris = 0;
+// The same for models' nodes, and their triangles drawn on the CPU after all,
+// with the runs that went there and why (GFX_MODEL_WHY_*)
+uint32_t g_GfxModelDraws = 0, g_GfxModelTris = 0, g_GfxModelRefused = 0, g_GfxModelCpuTris = 0;
+uint32_t g_GfxModelWhy[8] = {};
+// Triangles the CPU drew over a slot a kept run had filled on the GPU alone,
+// after the room or node was done: never seen, and drawn wrong if ever
+uint32_t g_GfxStaleSlotTris = 0;
+}
+
+/*
+ * A run of a mesh's list - its loads and triangles between two commands that
+ * are not geometry - read once (gfx_mesh_read_run()), its triangles kept with
+ * the GPU's copy of the mesh, so a draw of it later skips the run whole. The
+ * lists do not change once built, so a run is the same every frame; what can
+ * change is what the segments name, which is checked each time.
+ */
+struct GfxMeshRun {
+    const Gfx* end;               // the first command past it
+    uintptr_t vtxseg;             // what its loads' segment held when it was read: the mesh's vertices
+    uint8_t vtxsegno, colseg;     // the segments its G_VTXs and G_COLs name
+    uint32_t lastcol;             // the last G_COL's offset into its colours, in entries
+    int32_t lastbase, lastcount;  // the last load, which the slots hold after the run
+    uint32_t numverts;            // vertices it loads, for the stats
+    uint32_t first;               // where its triangles start among the mesh's kept indices; UINT32_MAX when not kept
+    std::vector<uint32_t> indices;
+    bool ok;                      // drawable this way at all
+};
+
+struct GfxRoomData;
+struct GfxModelData;
+
+struct GfxMeshEntry {
+    std::unordered_map<const Gfx*, GfxMeshRun> runs;
+    std::unique_ptr<GfxRoomData> room; // a room's (gfxmesh.room), made with the entry
+    std::unique_ptr<GfxModelData> model; // a model node's (gSPModelMeshEXT()), made with the entry
+    uint32_t backend;    // the backend's name for its copy, 0 when it could not make one
+    const Vtx* vertices; // what the copy was made from: a mesh rebuilt in place is made again
+    int32_t numvertices;
+    const float* bindpos;
+    const float* normals;
+    uint32_t last_frame;
+};
+
+#define GFX_MESH_IDLE_FRAMES 1800
+
+static std::unordered_map<uint32_t, GfxMeshEntry> gfx_meshes;
+static uint32_t gfx_mesh_next_id = 1;
+static uint32_t gfx_mesh_frame;
+static GfxMeshEntry* mesh_entry;            // mesh_cur's copy on the GPU, NULL when it has none
+static int32_t mesh_slot[MAX_VERTICES + 4]; // a loaded slot's vertex in the mesh, -1 when the CPU loaded it
+static size_t mesh_slot_top = MAX_VERTICES + 4; // slots past this are all -1 (all of them to begin with)
+static std::vector<uint32_t> mesh_run;      // the triangles gathered for one draw, three indices each
+static const uint8_t* mesh_run_colours;     // the colour array they read, by vertex index
+static uint32_t mesh_mixed;                 // triangles over slots of both kinds, dropped (never seen)
+static const Gfx* mesh_skip_until;          // a run that cannot be drawn whole, interpreted until here
+
+static bool gfx_mesh_backend(void) {
+    return gfx_gpu_vertices && gfx_rapi->mesh_supported && gfx_rapi->mesh_create && gfx_rapi->mesh_draw &&
+           gfx_rapi->mesh_supported();
+}
+
+extern "C" s32 gfxMeshGpuAvailable(void) {
+    return gfx_rapi != NULL && gfx_mesh_backend();
+}
+
+extern "C" void gfxMeshForget(struct gfxmesh* mesh) {
+    if (!mesh || !mesh->id) {
+        return;
+    }
+
+    auto it = gfx_meshes.find(mesh->id);
+
+    if (it != gfx_meshes.end()) {
+        if (it->second.backend && gfx_rapi && gfx_rapi->mesh_delete) {
+            gfx_rapi->mesh_delete(it->second.backend);
+        }
+        if (mesh_entry == &it->second) {
+            mesh_entry = NULL;
+        }
+        gfx_meshes.erase(it);
+    }
+
+    mesh->id = 0;
+}
+
+/*
+ * The GPU's copy of a mesh, made the first time it is drawn. A rigid mesh's
+ * positions are its Vtx's; a skinned one's are the bind pose as it was read,
+ * before it was rounded to the s16 a Vtx holds.
+ */
+static void gfx_room_init(GfxMeshEntry* e, const struct gfxmesh* mesh);
+static void gfx_room_start(void);
+
+static GfxMeshEntry* gfx_mesh_entry(struct gfxmesh* mesh) {
+    if (mesh->id) {
+        auto it = gfx_meshes.find(mesh->id);
+
+        if (it != gfx_meshes.end()) {
+            GfxMeshEntry* e = &it->second;
+
+            if (e->vertices == mesh->vertices && e->numvertices == mesh->numvertices && e->bindpos == mesh->bindpos &&
+                e->normals == mesh->normals) {
+                e->last_frame = gfx_mesh_frame;
+                return e->backend ? e : NULL;
+            }
+
+            gfxMeshForget(mesh);
+        }
+    }
+
+    const bool skinned = mesh->bindpos && mesh->weights && mesh->bones;
+    std::vector<GfxMeshVertex> verts(mesh->numvertices);
+
+    for (int32_t i = 0; i < mesh->numvertices; i++) {
+        GfxMeshVertex* o = &verts[i];
+        const Vtx* v = &mesh->vertices[i];
+
+        if (skinned) {
+            const uint8_t* b = &mesh->bones[i * 4];
+
+            for (int k = 0; k < 3; k++) {
+                o->pos[k] = mesh->bindpos[i * 3 + k];
+                o->weights[k] = mesh->weights[i * 3 + k];
+                o->bones[k] = b[k] < mesh->nummatrices ? b[k] : 0;
+            }
+            o->bones[3] = b[3];
+        } else {
+            for (int k = 0; k < 3; k++) {
+                o->pos[k] = v->v[k];
+                o->weights[k] = k == 0 ? 1.0f : 0.0f;
+                o->bones[k] = 0;
+            }
+            o->bones[3] = 1;
+        }
+
+        o->st[0] = v->s;
+        o->st[1] = v->t;
+
+        for (int k = 0; k < 3; k++) {
+            o->normal[k] = mesh->normals ? mesh->normals[i * 3 + k] : 0.0f;
+        }
+    }
+
+    if (gfx_mesh_next_id == 0) {
+        gfx_mesh_next_id = 1;
+    }
+
+    const uint32_t id = gfx_mesh_next_id++;
+    GfxMeshEntry e;
+
+    e.backend = gfx_rapi->mesh_create(verts.data(), (uint32_t)verts.size());
+    e.vertices = mesh->vertices;
+    e.numvertices = mesh->numvertices;
+    e.bindpos = mesh->bindpos;
+    e.normals = mesh->normals;
+    e.last_frame = gfx_mesh_frame;
+
+    mesh->id = id;
+
+    if (mesh->room) {
+        gfx_room_init(&e, mesh);
+    }
+
+    GfxMeshEntry* ins = &gfx_meshes.emplace(id, std::move(e)).first->second;
+
+    return ins->backend ? ins : NULL;
+}
+
+// A new frame: nothing carries over, and copies nothing has drawn for a while go
+static void gfx_room_start_frame(void);
+static void gfx_model_start_frame(void);
+static void gfx_model_forget_key(const Vtx* vertices, uint32_t id);
+
+static void gfx_mesh_start_frame(void) {
+    gfx_mesh_frame++;
+    gfx_room_start_frame();
+    gfx_model_start_frame();
+    mesh_cur = NULL;
+    mesh_room = false;
+    mesh_model = false;
+    mesh_entry = NULL;
+    mesh_run.clear();
+    mesh_skip_until = NULL;
+
+    if ((gfx_mesh_frame & 255) == 0) {
+        for (auto it = gfx_meshes.begin(); it != gfx_meshes.end();) {
+            if (gfx_mesh_frame - it->second.last_frame > GFX_MESH_IDLE_FRAMES) {
+                if (it->second.backend && gfx_rapi->mesh_delete) {
+                    gfx_rapi->mesh_delete(it->second.backend);
+                }
+                if (it->second.model) {
+                    gfx_model_forget_key(it->second.vertices, it->first);
+                }
+                // the mesh still holds the id, and finds nothing under it
+                // the next time it is drawn, so it is made again then
+                it = gfx_meshes.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+}
+
+static void gfx_mesh_begin(const struct gfxmeshdraw* draw) {
+    mesh_cur = draw && draw->mesh && draw->mesh->vertices && draw->mesh->numvertices > 0 ? draw : NULL;
+    mesh_entry = NULL;
+    mesh_skip_until = NULL;
+    mesh_model = false;
+    // A room needs its colour table: without one its lists are drawn as any are
+    mesh_room = mesh_cur && mesh_cur->mesh->room;
+
+    if (mesh_room && (!draw->colours || draw->numcolours <= 0)) {
+        mesh_cur = NULL;
+        mesh_room = false;
+    }
+
+    if (mesh_cur && gfx_mesh_backend() && (!draw->palette || draw->mesh->nummatrices <= GFX_MESH_PALETTE_MAX)) {
+        mesh_entry = gfx_mesh_entry(draw->mesh);
+
+        if (mesh_entry && mesh_room != (mesh_entry->room != nullptr)) {
+            mesh_entry = NULL;
+        }
+    }
+
+    for (size_t i = 0; i < mesh_slot_top; i++) {
+        mesh_slot[i] = -1;
+    }
+
+    mesh_slot_top = 0;
+
+    if (mesh_room && mesh_entry) {
+        gfx_room_start();
+    }
+}
+
+// Whether the vertex shader can stand in for gfx_sp_load_vertex() under the
+// state the RSP is in
+static inline bool gfx_mesh_gpu_state(void) {
+    return !(rsp.extra_geometry_mode & (G_TEXGEN_FACE_EXT | G_NO_CLIPPING_EXT | G_SEAL_SEAMS_EXT));
+}
+
+// A skinned mesh lit or reflecting: its normal is its own, posed, not its
+// colour's three bytes (which a mesh drawn this way leaves at nothing)
+static inline bool gfx_mesh_posed_normals(void) {
+    return mesh_cur->palette && mesh_cur->mesh->bindpos && mesh_cur->mesh->normals &&
+           ((rsp.geometry_mode & G_LIGHTING) || (rsp.extra_geometry_mode & G_ENVMAP_EXT));
+}
+
+// Vertex i of the mesh in the pose: xblaMeshPose()'s sum, unrounded
+static inline void gfx_mesh_skin(const struct gfxmesh* m, const float* pal, int32_t i, float out[3]) {
+    const float* p = &m->bindpos[i * 3];
+    const float* w = &m->weights[i * 3];
+    const uint8_t* b = &m->bones[i * 4];
+    const int num = b[3] < 1 ? 1 : b[3] < 3 ? b[3] : 3;
+    float x = 0.0f, y = 0.0f, z = 0.0f;
+
+    for (int j = 0; j < num; j++) {
+        const float* r = &pal[(b[j] < m->nummatrices ? b[j] : 0) * GFXMESH_PALETTE_FLOATS];
+
+        x += (r[0] * p[0] + r[1] * p[1] + r[2] * p[2] + r[3]) * w[j];
+        y += (r[4] * p[0] + r[5] * p[1] + r[6] * p[2] + r[7]) * w[j];
+        z += (r[8] * p[0] + r[9] * p[1] + r[10] * p[2] + r[11]) * w[j];
+    }
+
+    out[0] = x;
+    out[1] = y;
+    out[2] = z;
+}
+
+// Vertex i's normal in the pose, 127 long and rounded as a colour's byte is
+// (xblaMeshEnvironmentVertices())
+static inline void gfx_mesh_skin_normal(const struct gfxmesh* m, const float* pal, int32_t i, struct NormalColor* out) {
+    const float* n = &m->normals[i * 3];
+    const float* w = &m->weights[i * 3];
+    const uint8_t* b = &m->bones[i * 4];
+    const int num = b[3] < 1 ? 1 : b[3] < 3 ? b[3] : 3;
+    float o[3] = { 0.0f, 0.0f, 0.0f };
+
+    for (int j = 0; j < num; j++) {
+        const float* r = &pal[(b[j] < m->nummatrices ? b[j] : 0) * GFXMESH_PALETTE_FLOATS];
+
+        o[0] += (r[0] * n[0] + r[1] * n[1] + r[2] * n[2]) * w[j];
+        o[1] += (r[4] * n[0] + r[5] * n[1] + r[6] * n[2]) * w[j];
+        o[2] += (r[8] * n[0] + r[9] * n[1] + r[10] * n[2]) * w[j];
+    }
+
+    const float len = sqrtf(o[0] * o[0] + o[1] * o[1] + o[2] * o[2]);
+    int8_t* dst[3] = { &out->x, &out->y, &out->z };
+
+    for (int k = 0; k < 3; k++) {
+        const float f = (len > 1e-6f ? o[k] / len : o[k]) * 127.0f;
+        *dst[k] = (int8_t)(f < 0 ? f - 0.5f : f + 0.5f);
+    }
+}
+
+// One of the mesh's vertices through gfx_sp_load_vertex(), posed first
+static inline void gfx_mesh_load_one(struct LoadedVertex* d, int32_t i, const struct NormalColor* vcn) {
+    const struct gfxmesh* m = mesh_cur->mesh;
+    const Vtx* v = &m->vertices[i];
+    const short U = v->s * rsp.texture_scaling_factor.s >> 16;
+    const short V = v->t * rsp.texture_scaling_factor.t >> 16;
+    struct NormalColor posed;
+    float p[3];
+
+    if (mesh_cur->palette && m->bindpos && m->weights && m->bones) {
+        gfx_mesh_skin(m, mesh_cur->palette, i, p);
+
+        if (gfx_mesh_posed_normals()) {
+            gfx_mesh_skin_normal(m, mesh_cur->palette, i, &posed);
+            posed.w = vcn->w;
+            vcn = &posed;
+        }
+    } else {
+        p[0] = v->v[0];
+        p[1] = v->v[1];
+        p[2] = v->v[2];
+    }
+
+    gfx_sp_load_vertex(d, p[0], p[1], p[2], vcn, U, V);
+}
+
+static void gfx_mesh_flush(void);
+
+/*
+ * A G_VTX under G_MESH_EXT: false when it names something other than the
+ * mesh's vertices, which is loaded the way any list's are.
+ */
+static bool gfx_mesh_load(const Vtx* src, size_t count, size_t dest) {
+    const struct gfxmesh* m = mesh_cur->mesh;
+
+    // A room's or a model's run that was not kept is loaded as any list's is
+    if (mesh_room || mesh_model) {
+        return false;
+    }
+
+    if (src < m->vertices || src + count > m->vertices + m->numvertices || dest + count > MAX_VERTICES) {
+        return false;
+    }
+
+    const int32_t base = (int32_t)(src - m->vertices);
+
+    g_GfxNumVerts += count;
+
+    // The colours by vertex index: xblaMeshWriteBatches()'s layout, checked
+    // at both ends of the load
+    if (mesh_entry && count > 0 && dest == 0 && rsp.vertex_colors && gfx_mesh_gpu_state() &&
+        src[0].colour == 0 && src[count - 1].colour == (count - 1) * 4) {
+        const uint8_t* colours = (const uint8_t*)(rsp.vertex_colors - base);
+
+        if (!mesh_run.empty() && colours != mesh_run_colours) {
+            gfx_mesh_flush();
+        }
+
+        mesh_run_colours = colours;
+        mesh_slot_top = std::max(mesh_slot_top, dest + count);
+
+        for (size_t i = 0; i < count; i++) {
+            mesh_slot[dest + i] = base + (int32_t)i;
+        }
+
+        return true;
+    }
+
+    for (size_t i = 0; i < count; i++) {
+        gfx_mesh_load_one(&rsp.loaded_vertices[dest + i], base + (int32_t)i, &rsp.vertex_colors[src[i].colour >> 2]);
+        mesh_slot[dest + i] = -1;
+    }
+
+    return true;
+}
+
+// Slots a plain G_VTX loaded under G_MESH_EXT
+static void gfx_mesh_cpu_slots(size_t dest, size_t count) {
+    for (size_t i = dest; i < dest + count && i < MAX_VERTICES; i++) {
+        mesh_slot[i] = -1;
+    }
+}
+
+static void gfx_room_materialise(uint8_t slot);
+static void gfx_model_materialise(uint8_t slot);
+
+static bool gfx_mesh_tri(uint8_t a, uint8_t b, uint8_t c) {
+    // A room's or a model's triangle on the CPU: a corner an earlier run left
+    // on the GPU alone is loaded here first
+    if (mesh_room || mesh_model) {
+        const uint8_t corners[3] = { a, b, c };
+
+        for (int i = 0; i < 3; i++) {
+            if (corners[i] < MAX_VERTICES && mesh_slot[corners[i]] >= 0) {
+                if (mesh_model) {
+                    gfx_model_materialise(corners[i]);
+                } else {
+                    gfx_room_materialise(corners[i]);
+                }
+            }
+        }
+
+        if (mesh_model) {
+            g_GfxModelCpuTris++;
+        } else {
+            g_GfxRoomCpuTris++;
+        }
+        return false;
+    }
+
+    const int32_t ia = mesh_slot[a];
+    const int32_t ib = mesh_slot[b];
+    const int32_t ic = mesh_slot[c];
+
+    if ((ia | ib | ic) < 0) {
+        if (ia >= 0 || ib >= 0 || ic >= 0) {
+            // corners the GPU has and corners it has not: no list does this
+            mesh_mixed++;
+            return true;
+        }
+        return false;
+    }
+
+    mesh_run.push_back((uint32_t)ia);
+    mesh_run.push_back((uint32_t)ib);
+    mesh_run.push_back((uint32_t)ic);
+
+    return true;
+}
+
+/*
+ * Which winding the run's triangles are dropped for, as gfx_tri_is_culled()
+ * decides it per triangle: 1 clockwise as emitted, -1 anticlockwise, 0
+ * neither. The CPU's cross product is negative for a triangle wound
+ * anticlockwise in clip space, so G_CULL_BACK drops the clockwise ones; the
+ * emitted y is flipped when the target is (invert_y), which turns the winding.
+ */
+static int8_t gfx_mesh_cull(void) {
+    if ((rsp.geometry_mode & G_CULL_BOTH) == 0) {
+        return 0;
+    }
+    if ((rsp.extra_geometry_mode & G_NO_CULLING_EXT) &&
+        ((rdp.other_mode_l & Z_UPD) || (rsp.extra_geometry_mode & (G_DEPTH_PREPASS_EXT | G_DEPTH_FRONT_EXT)))) {
+        return 0;
+    }
+
+    int8_t cull = (rsp.geometry_mode & G_CULL_BOTH) == G_CULL_FRONT ? -1 : 1;
+
+    if (rsp.extra_geometry_mode & G_INVERT_CULLING_EXT) {
+        cull = -cull;
+    }
+    if (batch.clip_parameters.invert_y) {
+        cull = -cull;
+    }
+
+    return cull;
+}
+
+static inline float gfx_mesh_kind(uint8_t kind) {
+    switch (kind) {
+        case EMIT_IN_SHADE:
+            return GFX_MESH_IN_SHADE;
+        case EMIT_IN_SHADE_ALPHA:
+            return GFX_MESH_IN_SHADE_ALPHA;
+        case EMIT_IN_LOD_FRACTION:
+            return GFX_MESH_IN_LOD;
+        default:
+            return GFX_MESH_IN_CONST;
+    }
+}
+
+/*
+ * The draw's parameters (GFX_MESH_PARAMS in gfx_rendering_api.h): everything
+ * gfx_sp_load_vertex() and gfx_emit_vertex() read that is the same for every
+ * vertex of the run, from the same state they read it from.
+ */
+static void gfx_mesh_params(float* P, bool skinned) {
+    memset(P, 0, sizeof(float) * 4 * GFX_MESH_PARAMS);
+    memcpy(P, rsp.MP_matrix, sizeof(rsp.MP_matrix));
+
+    // gfx_adjust_x_for_aspect_ratio()
+    P[16] = rsp.aspect_ofs;
+    P[17] = rsp.aspect_scale;
+    P[18] = gfx_current_dimensions.aspect_ratio;
+    P[19] = fbActive ? 0.0f : 1.0f;
+
+    const bool jitter = taa_active && !fbActive;
+    P[20] = jitter ? taa_jx : 0.0f;
+    P[21] = jitter ? taa_jy : 0.0f;
+    P[22] = batch.clip_parameters.invert_y ? -1.0f : 1.0f;
+    P[23] = batch.clip_parameters.z_is_from_0_to_1 ? 1.0f : 0.0f;
+
+    if (rsp.geometry_mode & G_FOG) {
+        P[24] = rsp.fog_mul;
+        P[25] = rsp.fog_offset;
+    } else {
+        // a constant factor: the fog colour's alpha
+        P[24] = 0.0f;
+        P[25] = rdp.fog_color.a;
+    }
+    P[26] = batch.fog_vertex ? 1.0f : 0.0f;
+
+    P[28] = byte_unit.f[rdp.fog_color.r];
+    P[29] = byte_unit.f[rdp.fog_color.g];
+    P[30] = byte_unit.f[rdp.fog_color.b];
+
+    for (int t = 0; t < 2; t++) {
+        P[32 + t * 4 + 0] = batch.uv_scale[t][0];
+        P[32 + t * 4 + 1] = batch.uv_scale[t][1];
+        P[32 + t * 4 + 2] = batch.uv_ofs[t][0];
+        P[32 + t * 4 + 3] = batch.uv_ofs[t][1];
+        P[40 + t * 2 + 0] = batch.tex_clamp[t][0];
+        P[40 + t * 2 + 1] = batch.tex_clamp[t][1];
+    }
+
+    P[44] = byte_unit.f[rdp.grayscale_color.r];
+    P[45] = byte_unit.f[rdp.grayscale_color.g];
+    P[46] = byte_unit.f[rdp.grayscale_color.b];
+    P[47] = byte_unit.f[rdp.grayscale_color.a];
+
+    P[48] = rsp.texture_scaling_factor.s;
+    P[49] = rsp.texture_scaling_factor.t;
+    P[50] = skinned ? 1.0f : 0.0f;
+
+    for (int j = 0; j < batch.num_inputs && j < 8; j++) {
+        const struct EmitInput* in = &emit_inputs.in[j];
+
+        P[52 + j * 4 + 0] = in->rgb[0];
+        P[52 + j * 4 + 1] = in->rgb[1];
+        P[52 + j * 4 + 2] = in->rgb[2];
+        P[52 + j * 4 + 3] = in->a;
+        P[84 + j] = gfx_mesh_kind(in->rgb_kind);
+        P[92 + j] = batch.use_alpha ? gfx_mesh_kind(in->a_kind) : GFX_MESH_IN_CONST;
+    }
+
+    // G_LIGHTING and G_TEXTURE_GEN: gfx_light_vertex()'s state
+    const bool lit = (rsp.geometry_mode & G_LIGHTING) != 0;
+
+    if (lit) {
+        gfx_refresh_light_coeffs();
+    }
+
+    const int numlights = rsp.current_num_lights - 1 < 0 ? 0 : rsp.current_num_lights - 1 > MAX_LIGHTS ? MAX_LIGHTS : rsp.current_num_lights - 1;
+
+    P[100] = (float)numlights;
+    P[101] = lit ? 1.0f : 0.0f;
+    P[102] = lit && (rsp.geometry_mode & G_TEXTURE_GEN) ? 1.0f : 0.0f;
+    P[103] = (rsp.geometry_mode & G_TEXTURE_GEN_LINEAR) ? 1.0f : 0.0f;
+    P[104] = (rsp.extra_geometry_mode & G_TEXGEN_EYE_EXT) ? 1.0f : 0.0f;
+    P[105] = (rsp.extra_geometry_mode & G_TEXGEN_TURN_EXT) ? 1.0f : 0.0f;
+    P[106] = rsp.lookat_enabled ? 1.0f : 0.0f;
+    P[107] = (rsp.extra_geometry_mode & G_ENVMAP_EXT) ? 1.0f : 0.0f;
+    // gfx_sp_load_vertex()'s coverage case: a lit corner's colour entry is its normal
+    P[108] = lit && (rdp.other_mode_l & (ALPHA_CVG_SEL | FORCE_BL | CVG_X_ALPHA)) == ALPHA_CVG_SEL &&
+                     (rdp.other_mode_l & (3U << G_MDSFT_ALPHACOMPARE)) == G_AC_NONE
+                 ? 1.0f
+                 : 0.0f;
+    P[109] = gfx_mesh_posed_normals() ? 1.0f : 0.0f;
+
+    const Light_t* ambient = &rsp.current_lights[numlights];
+    P[112] = ambient->col[0];
+    P[113] = ambient->col[1];
+    P[114] = ambient->col[2];
+
+    for (int i = 0; i < numlights; i++) {
+        P[116 + i * 4 + 0] = rsp.current_lights_coeffs[i][0];
+        P[116 + i * 4 + 1] = rsp.current_lights_coeffs[i][1];
+        P[116 + i * 4 + 2] = rsp.current_lights_coeffs[i][2];
+        P[132 + i * 4 + 0] = rsp.current_lights[i].col[0];
+        P[132 + i * 4 + 1] = rsp.current_lights[i].col[1];
+        P[132 + i * 4 + 2] = rsp.current_lights[i].col[2];
+    }
+
+    for (int k = 0; k < 3; k++) {
+        P[148 + k] = rsp.current_lookat_coeffs[0][k];
+        P[152 + k] = rsp.current_lookat_coeffs[1][k];
+    }
+
+    P[156] = rsp.texgen_shift[0];
+    P[157] = rsp.texgen_shift[1];
+    P[160] = rsp.texgen_turn[0];
+    P[161] = rsp.texgen_turn[1];
+    P[162] = rsp.texgen_turn[2];
+    P[163] = rsp.texgen_turn[3];
+
+    memcpy(&P[164], rsp.modelview_matrix_stack[rsp.modelview_matrix_stack_size - 1], sizeof(float) * 16);
+}
+
+/*
+ * Triangles on the CPU after all, for a backend that would not draw them:
+ * each corner loaded and posed on its own and drawn as any triangle is.
+ */
+static void gfx_mesh_draw_cpu(const uint32_t* indices, size_t numindices, const uint8_t* colourbytes) {
+    const struct NormalColor* colours = (const struct NormalColor*)colourbytes;
+
+    for (size_t t = 0; t + 2 < numindices; t += 3) {
+        struct LoadedVertex v[3];
+
+        for (int k = 0; k < 3; k++) {
+            gfx_mesh_load_one(&v[k], (int32_t)indices[t + k], &colours[indices[t + k]]);
+        }
+
+        gfx_sp_tri_emit(&v[0], &v[1], &v[2], false);
+    }
+}
+
+/*
+ * One draw of the mesh's triangles under the state the RSP and RDP are in:
+ * indices from the CPU, or the mesh's kept ones from first when indices is
+ * NULL (cpuindices are the same, for the CPU to fall back on).
+ */
+static void gfx_mesh_draw(const uint32_t* indices, uint32_t numindices, uint32_t first, const uint32_t* cpuindices,
+                          const uint8_t* colours) {
+    const uint32_t numtris = numindices / 3;
+
+    if (numtris == 0) {
+        return;
+    }
+
+    if ((rsp.geometry_mode & G_CULL_BOTH) == G_CULL_BOTH && gfx_mesh_cull() != 0) {
+        g_GfxTrisCulled += numtris;
+        return;
+    }
+
+    // What each triangle would have set up before it was written, and then the
+    // CPU's triangles so far, which the lists drew first
+    gfx_emit_prepare();
+    gfx_flush();
+
+    const bool skinned = mesh_cur->palette && mesh_cur->mesh->bindpos;
+    float params[4 * GFX_MESH_PARAMS];
+    gfx_mesh_params(params, skinned);
+
+    struct GfxMeshDraw d;
+    d.prg = rendering_state.shader_program;
+    d.mesh = mesh_entry ? mesh_entry->backend : 0;
+    d.colours = colours;
+    d.numcolours = (uint32_t)mesh_cur->mesh->numvertices;
+    d.indices = indices;
+    d.numindices = numindices;
+    d.first_index = first;
+    d.params = params;
+    d.palette = skinned ? mesh_cur->palette : NULL;
+    d.numpalette = skinned ? (uint32_t)mesh_cur->mesh->nummatrices : 0;
+    d.st = NULL;
+    d.cull = gfx_mesh_cull();
+
+    if (d.mesh && d.prg && gfx_rapi->mesh_draw(&d)) {
+        g_GfxNumDrawCalls++;
+        g_GfxNumTris += numtris;
+        g_GfxMeshDraws++;
+        g_GfxMeshTris += numtris;
+    } else {
+        g_GfxMeshRefused += numtris;
+        gfx_mesh_draw_cpu(cpuindices, numindices, colours);
+    }
+}
+
+static void gfx_mesh_flush(void) {
+    if (mesh_run.empty()) {
+        return;
+    }
+
+    gfx_mesh_draw(mesh_run.data(), (uint32_t)mesh_run.size(), 0, mesh_run.data(), mesh_run_colours);
+    mesh_run.clear();
+}
+
+/*
+ * Reads the run of geometry that starts at cmd, under the segments as they
+ * stand: the loads must name the mesh's vertices through one segment, with
+ * the colour layout gfx_mesh_load() checks, and the triangles must name only
+ * what the run itself loaded.
+ */
+static GfxMeshRun gfx_mesh_read_run(const Gfx* cmd) {
+    const struct gfxmesh* m = mesh_cur->mesh;
+    GfxMeshRun r;
+    int32_t slots[MAX_VERTICES];
+    int32_t colofs = -1;
+
+    r.end = cmd;
+    r.vtxseg = 0;
+    r.vtxsegno = 0;
+    r.colseg = 0;
+    r.lastcol = 0;
+    r.lastbase = -1;
+    r.lastcount = 0;
+    r.numverts = 0;
+    r.first = UINT32_MAX;
+    r.ok = true;
+
+    for (int i = 0; i < MAX_VERTICES; i++) {
+        slots[i] = -1;
+    }
+
+    auto tri = [&](uint32_t a, uint32_t b, uint32_t c) {
+        if (a >= MAX_VERTICES || b >= MAX_VERTICES || c >= MAX_VERTICES || slots[a] < 0 || slots[b] < 0 || slots[c] < 0) {
+            r.ok = false;
+            return;
+        }
+        r.indices.push_back((uint32_t)slots[a]);
+        r.indices.push_back((uint32_t)slots[b]);
+        r.indices.push_back((uint32_t)slots[c]);
+    };
+
+    for (const Gfx* c = cmd;; ++c) {
+        const uint32_t op = c->words.w0 >> 24;
+        const uintptr_t w1 = c->words.w1;
+
+        if (op == G_NOOP) {
+            continue;
+        }
+
+        if (op == G_COL) {
+            const uint8_t seg = (w1 & 1) ? (uint8_t)((w1 >> 24) & 0x0f) : 0;
+
+            if (!seg || (r.colseg && seg != r.colseg)) {
+                r.ok = false;
+            }
+
+            r.colseg = seg;
+            colofs = (int32_t)((w1 & 0x00fffffe) / sizeof(struct NormalColor));
+            r.lastcol = (uint32_t)colofs;
+            continue;
+        }
+
+        if (op == G_VTX) {
+            const Vtx* src = (const Vtx*)seg_addr(w1);
+            const size_t count = (c->words.w0 & 0xffff) / sizeof(Vtx);
+            const size_t dest = (c->words.w0 >> 16) & 0xf;
+            const uint8_t seg = (w1 & 1) ? (uint8_t)((w1 >> 24) & 0x0f) : 0;
+
+            if (!seg || (r.vtxsegno && seg != r.vtxsegno) || dest != 0 || count == 0 || count > MAX_VERTICES ||
+                src < m->vertices || src + count > m->vertices + m->numvertices) {
+                r.ok = false;
+                continue;
+            }
+
+            const int32_t base = (int32_t)(src - m->vertices);
+
+            if (colofs != base || src[0].colour != 0 || src[count - 1].colour != (count - 1) * 4) {
+                r.ok = false;
+            }
+
+            r.vtxsegno = seg;
+            r.vtxseg = segmentPointers[seg];
+
+            for (size_t i = 0; i < count; i++) {
+                slots[i] = base + (int32_t)i;
+            }
+
+            r.lastbase = base;
+            r.lastcount = (int32_t)count;
+            r.numverts += (uint32_t)count;
+            continue;
+        }
+
+        if (op == (uint8_t)G_TRI1) {
+            tri(((w1 >> 16) & 0xff) / 10, ((w1 >> 8) & 0xff) / 10, (w1 & 0xff) / 10);
+            continue;
+        }
+
+        if (op == (uint8_t)G_TRI4) {
+            for (int k = 0; k < 4; k++) {
+                const uint32_t x = (w1 >> (k * 8)) & 0xf;
+                const uint32_t y = (w1 >> (k * 8 + 4)) & 0xf;
+                const uint32_t z = (c->words.w0 >> (k * 4)) & 0xf;
+
+                if (x || y || z) {
+                    tri(x, y, z);
+                }
+            }
+            continue;
+        }
+
+        r.end = c;
+        break;
+    }
+
+    if (r.indices.empty() || !r.colseg || !r.vtxsegno || r.lastbase < 0) {
+        r.ok = false;
+    }
+
+    return r;
+}
+
+/*
+ * The run of a mesh's list that starts at cmd, drawn whole from the triangles
+ * kept for it. Hands back the run's last command, for the interpreter to step
+ * past, or NULL when the run cannot be drawn that way this time - the
+ * segments name something else, or the state is one the GPU does not do -
+ * and the interpreter reads it as any list until its end.
+ */
+static const Gfx* gfx_mesh_kept_run(const Gfx* cmd) {
+    auto it = mesh_entry->runs.find(cmd);
+
+    if (it == mesh_entry->runs.end()) {
+        GfxMeshRun r = gfx_mesh_read_run(cmd);
+
+        if (r.ok && gfx_rapi->mesh_add_indices) {
+            r.first = gfx_rapi->mesh_add_indices(mesh_entry->backend, r.indices.data(), (uint32_t)r.indices.size());
+        }
+
+        it = mesh_entry->runs.emplace(cmd, std::move(r)).first;
+    }
+
+    const GfxMeshRun& r = it->second;
+
+    if (!r.ok || segmentPointers[r.vtxsegno] != r.vtxseg || !segmentPointers[r.colseg] || !gfx_mesh_gpu_state()) {
+        mesh_skip_until = r.end;
+        return NULL;
+    }
+
+    // What the run leaves behind it, as reading it would have
+    const uint8_t* colours = (const uint8_t*)segmentPointers[r.colseg];
+    rsp.vertex_colors = (const struct NormalColor*)colours + r.lastcol;
+
+    mesh_slot_top = std::max(mesh_slot_top, (size_t)r.lastcount);
+
+    for (int32_t i = 0; i < r.lastcount; i++) {
+        mesh_slot[i] = r.lastbase + i;
+    }
+
+    g_GfxNumVerts += r.numverts;
+    gfx_vertices_lost = false;
+
+    gfx_mesh_draw(r.first != UINT32_MAX ? NULL : r.indices.data(), (uint32_t)r.indices.size(),
+                  r.first != UINT32_MAX ? r.first : 0, r.indices.data(), colours);
+
+    return r.end - 1;
+}
+
+/*
+ * G_MESH_EXT for a room (gfxmesh.room, roommesh.c): the level's rooms drawn
+ * from the GPU's copy of their vertices.
+ *
+ * A room's lists are the level's, not built for this the way a mesh's are, so
+ * none of the mesh's layout holds and its runs are read differently
+ * (gfx_room_read_run()). A load may name any of the room's vertices into any
+ * slot; a vertex's colour is the entry its colour byte names past the G_COL
+ * before the load, anywhere in the room's colour table, which roomHighlight()
+ * makes afresh every frame; and a triangle may name a slot an earlier run of
+ * the list loaded - a fifth of the ROM's rooms' triangles do, across a change
+ * of texture. What a run is read for:
+ *
+ *  - each vertex's place in the colour table, learnt the first time a run
+ *    loads it (a vertex two runs load with two different colours keeps the
+ *    second run on the CPU; no level seen does it). A table of up to
+ *    GFXMESH_ROOM_PALETTE entries - every Perfect Dark room and every HD
+ *    one - goes to the vertex shader whole with each draw, and the vertex
+ *    carries its place in it (in its bone bytes, which a room does not use).
+ *    A bigger one - a GoldenEye room converted from the ROM gives every
+ *    vertex its own - is gathered into a colour per vertex once a frame, or
+ *    named as it stands when each vertex's entry is its own index plus one
+ *    offset (gfx_room_colours()).
+ *  - its triangles, kept with the room's copy, as for a mesh: the list's
+ *    order, and when some are marked for sealing (bgMarkRoomSeams()), those
+ *    that are not apart.
+ *  - the slots it leaves loaded, and the slots it reads that an earlier run
+ *    loaded: those must hold the same vertices when the run is drawn, loaded
+ *    under the same state (gfx_room_vstate() - the GPU works a vertex out
+ *    under the state of the draw, the RSP under the state of its load).
+ *
+ * A room dyntex animates has its s and t rewritten in its own vertices every
+ * frame. Its draws hand the shader the frame's s and t beside the colours
+ * (gfx_room_st()), read in place of the copy's, so its runs are kept and
+ * drawn on the GPU like any other room's.
+ *
+ * Drawn on the CPU as any list is: a run the GPU cannot draw at all or under
+ * the state of the moment - per-vertex fog (whose RSP clipping the shader
+ * does not do, on a converted GoldenEye level in the N64 look), a face's own
+ * texgen, the sky's unclipped lists. A triangle such a run draws over a slot
+ * a kept run left on the GPU alone has that corner loaded first
+ * (gfx_room_materialise()), and the kept run is drawn on the CPU from then
+ * on, so its loads happen where the list has them. A run's sealed triangles
+ * are drawn on the CPU while sealing is on (gfx_seal_seams() works on the
+ * whole triangle on the screen), after the rest of the run.
+ */
+struct GfxRoomRun {
+    const Gfx* end;               // the first command past it
+    bool ok;                      // drawable on the GPU at all, from what its commands hold
+    bool forced_cpu;              // a run after it needed its loads on the CPU
+    uint8_t vtxsegno;             // the segment its loads name, 0 when it loads nothing
+    uintptr_t vtxseg;             // and what that held: the room's block's vertices
+    uint8_t colseg;               // the segment its G_COLs name, 0 when it has none
+    intptr_t coldelta;            // where that segment stood in the colour table, bytes
+    uint32_t outcolofs;           // its last G_COL's offset in the segment, which the RSP is left at
+    bool incol;                   // it loads under the colours a G_COL before it named
+    intptr_t incoldelta;          // and where those stood in the table, bytes
+    uint32_t loaded;              // the slots its loads leave filled
+    uint32_t incoming;            // the slots it reads that it does not load
+    int32_t slotout[16];          // the vertex each slot it loads is left holding
+    int32_t slotin[16];           // the vertex each incoming slot must hold
+    uint32_t numverts;            // vertices it loads, for the stats
+    uint32_t numsealed;           // triangles marked for sealing
+    uint32_t first_all;           // where all its triangles are kept with the room's copy; UINT32_MAX when not
+    uint32_t first_plain;         // and those not marked
+    float bmin[3], bmax[3];       // the box round its triangles' corners, in the room's space
+    std::vector<uint32_t> all;    // its triangles in the list's order, three vertices each
+    std::vector<uint32_t> plain;  // those not marked for sealing (only when some are)
+    std::vector<uint32_t> sealed; // those that are
+};
+
+struct GfxRoomData {
+    std::unordered_map<const Gfx*, GfxRoomRun> runs;
+    std::vector<int32_t> colidx; // each vertex's entry in the colour table, -1 until a run loads it
+    bool palette;                // the table goes to the vertex shader whole
+    int64_t direct;              // every colidx known is its vertex's index plus this; INT64_MIN when not, or none known
+    bool anyknown;
+    // A dynamic room's s and t as dyntex left them this frame (gfx_room_st())
+    uint32_t stframe;
+    const int16_t* st;
+    // This frame's colours as the draws read them (gfx_room_colours())
+    uint32_t frame;
+    const void* table;
+    const uint8_t* colours;
+    const float* pal;
+    uint32_t numpal;
+};
+
+// What gfx_sp_load_vertex() reads of the state, unlit: a slot an earlier run
+// loaded is good for a GPU draw only when its load was made under the same
+struct GfxRoomVState {
+    float mp[4][4];       // a model's: the projection alone, its vertices carrying their own matrices
+    float aspect[3];
+    float jitter[2];
+    float fog[2];
+    uint32_t flags;
+    uint32_t segs;        // a model's: segments set since its draw began (gfx_seg_epoch)
+    uint16_t tex[2];
+};
+
+static int32_t mesh_slot_sig[MAX_VERTICES + 4];        // a GPU slot's load state in room_sigs, -1 when unknown
+static GfxRoomRun* mesh_slot_run[MAX_VERTICES + 4];    // the kept run that loaded it
+static std::vector<GfxRoomVState> room_sigs;          // the room draw's load states so far
+// Colours and palettes made for this frame's draws: a buffer each, reused
+// next frame, so a draw's pointer names what it was made with for the frame
+static std::vector<std::vector<uint8_t>> room_bufs;
+static size_t room_bufs_used;
+
+static void* gfx_room_alloc(size_t bytes) {
+    if (room_bufs_used == room_bufs.size()) {
+        room_bufs.emplace_back();
+    }
+
+    std::vector<uint8_t>& b = room_bufs[room_bufs_used++];
+    b.resize(bytes);
+
+    return b.data();
+}
+
+static void gfx_room_start_frame(void) {
+    room_bufs_used = 0;
+    room_sigs.clear();
+}
+
+static void gfx_room_init(GfxMeshEntry* e, const struct gfxmesh* mesh) {
+    GfxRoomData* rd = new GfxRoomData();
+    const int32_t n = mesh->numvertices;
+
+    rd->colidx.assign(n, -1);
+    rd->palette = mesh_cur && mesh_cur->numcolours <= GFXMESH_ROOM_PALETTE;
+    rd->direct = INT64_MIN;
+    rd->anyknown = false;
+    rd->stframe = 0;
+    rd->st = NULL;
+    rd->frame = 0;
+    rd->table = NULL;
+    rd->colours = NULL;
+    rd->pal = NULL;
+    rd->numpal = 0;
+
+    e->room.reset(rd);
+}
+
+static void gfx_room_vstate(GfxRoomVState* s) {
+    const bool jitter = taa_active && !fbActive;
+
+    memset(s, 0, sizeof(*s));
+    memcpy(s->mp, rsp.MP_matrix, sizeof(s->mp));
+    s->aspect[0] = rsp.aspect_ofs;
+    s->aspect[1] = rsp.aspect_scale;
+    s->aspect[2] = gfx_current_dimensions.aspect_ratio;
+    s->jitter[0] = jitter ? taa_jx : 0.0f;
+    s->jitter[1] = jitter ? taa_jy : 0.0f;
+    s->flags = (rsp.geometry_mode & (G_LIGHTING | G_FOG)) | (fbActive ? 1u << 31 : 0) |
+               ((rsp.extra_geometry_mode & (G_TEXGEN_FACE_EXT | G_ENVMAP_EXT)) ? 1u << 30 : 0);
+    s->tex[0] = rsp.texture_scaling_factor.s;
+    s->tex[1] = rsp.texture_scaling_factor.t;
+
+    if (rsp.geometry_mode & G_FOG) {
+        s->fog[0] = rsp.fog_mul;
+        s->fog[1] = rsp.fog_offset;
+    } else {
+        s->fog[0] = rdp.fog_color.a;
+    }
+}
+
+// A room's draw begins: the slots know nothing of its runs yet
+static void gfx_room_start(void) {
+    room_sigs.clear();
+
+    for (size_t i = 0; i < 16; i++) {
+        mesh_slot_sig[i] = -1;
+        mesh_slot_run[i] = NULL;
+    }
+}
+
+/*
+ * A dynamic room's s and t this frame, two a vertex, which its draws hand the
+ * shader in place of the copy's. dyntex rewrites them in the room's own
+ * vertices as the frame's lists are made (dyntexTickRoom(), once a frame), so
+ * they hold still while the lists are drawn: read once, at the room's first
+ * GPU draw of the frame.
+ */
+static const int16_t* gfx_room_st(void) {
+    GfxRoomData* rd = mesh_entry->room.get();
+
+    if (rd->stframe != gfx_mesh_frame || !rd->st) {
+        const struct gfxmesh* m = mesh_cur->mesh;
+        int16_t* st = (int16_t*)gfx_room_alloc(sizeof(int16_t) * 2 * m->numvertices);
+
+        for (int32_t k = 0; k < m->numvertices; k++) {
+            st[k * 2 + 0] = m->vertices[k].s;
+            st[k * 2 + 1] = m->vertices[k].t;
+        }
+
+        rd->st = st;
+        rd->stframe = gfx_mesh_frame;
+    }
+
+    return rd->st;
+}
+
+// One of the room's vertices through gfx_sp_load_vertex(), its colour the
+// entry a run learnt for it
+static inline void gfx_room_load_one(struct LoadedVertex* d, int32_t k) {
+    const Vtx* v = &mesh_cur->mesh->vertices[k];
+    const int32_t c = mesh_entry ? mesh_entry->room->colidx[k] : -1;
+    static const struct NormalColor none = {};
+    const struct NormalColor* vcn = c >= 0 && c < mesh_cur->numcolours ? &((const struct NormalColor*)mesh_cur->colours)[c] : &none;
+    const short U = v->s * rsp.texture_scaling_factor.s >> 16;
+    const short V = v->t * rsp.texture_scaling_factor.t >> 16;
+
+    gfx_sp_load_vertex(d, v->v[0], v->v[1], v->v[2], vcn, U, V);
+}
+
+/*
+ * A CPU triangle names a slot that a kept run filled on the GPU alone: the
+ * vertex is loaded into it now, and the run that filled it is drawn on the
+ * CPU from the next frame on, so the load happens where the list has it and
+ * under the state it had there.
+ */
+static void gfx_room_materialise(uint8_t slot) {
+    const int32_t k = mesh_slot[slot];
+
+    if (mesh_slot_run[slot]) {
+        mesh_slot_run[slot]->forced_cpu = true;
+    }
+
+    mesh_slot[slot] = -1;
+    gfx_gpu_only_slots &= ~(1u << (slot & 31));
+
+    if (k >= 0 && k < mesh_cur->mesh->numvertices) {
+        gfx_room_load_one(&rsp.loaded_vertices[slot], k);
+    }
+}
+
+/*
+ * Under G_FOG_VERTEX_EXT (and G_SHADE_LINEAR_EXT) a triangle crossing the
+ * RSP's clip volume - behind the eye, or past the guard band - is cut on the
+ * CPU, and its new corners fogged and shaded where they stand
+ * (gfx_emit_tri3()). The shader fogs each corner as it is and cuts nothing,
+ * which is the same thing for a triangle wholly inside: so is every triangle
+ * of a run whose box has all eight corners inside every plane of it, the
+ * volume being convex.
+ */
+static bool gfx_room_inside_rsp_clip(const struct GfxRoomRun& r) {
+    const bool jitter = taa_active && !fbActive;
+
+    for (int c = 0; c < 8; c++) {
+        const float px = (c & 1) ? r.bmax[0] : r.bmin[0];
+        const float py = (c & 2) ? r.bmax[1] : r.bmin[1];
+        const float pz = (c & 4) ? r.bmax[2] : r.bmin[2];
+        const v4f pos = v4f_splat(px) * v4f_load(rsp.MP_matrix[0]) + v4f_splat(py) * v4f_load(rsp.MP_matrix[1]) +
+                        v4f_splat(pz) * v4f_load(rsp.MP_matrix[2]) + v4f_load(rsp.MP_matrix[3]);
+        struct LoadedVertex v;
+
+        v.w = pos[3];
+        v.x = gfx_adjust_x_for_aspect_ratio(pos[0], v.w);
+        v.y = pos[1];
+
+        if (jitter) {
+            v.x += taa_jx * v.w;
+            v.y += taa_jy * v.w;
+        }
+
+        for (int k = 0; k < 5; k++) {
+            // a hair inside, against the CPU's arithmetic and the shader's
+            // disagreeing at the edge
+            if (!(gfx_rsp_clip_dist(&v, k) > 1e-3f * fabsf(v.w) + 1e-4f)) {
+                return false;
+            }
+        }
+    }
+
+    return true;
+}
+
+// The run's draw can be the GPU's under the state of the moment
+static inline bool gfx_room_gpu_state(const struct GfxRoomRun& r) {
+    if (rsp.extra_geometry_mode & (G_TEXGEN_FACE_EXT | G_NO_CLIPPING_EXT)) {
+        return false;
+    }
+
+    return !(rsp.extra_geometry_mode & (G_FOG_VERTEX_EXT | G_SHADE_LINEAR_EXT)) || gfx_room_inside_rsp_clip(r);
+}
+
+// gfx_sp_tri_emit() would grow a marked triangle
+static inline bool gfx_room_sealing(void) {
+    return (rsp.extra_geometry_mode & G_SEAL_SEAMS_EXT) && g_GfxSealSeams > 0 && (rdp.other_mode_l & Z_UPD) &&
+           !(rdp.other_mode_l & FORCE_BL) && (rdp.other_mode_l & ZMODE_DEC) != ZMODE_DEC &&
+           !(rsp.extra_geometry_mode & G_DECAL_EXT);
+}
+
+/*
+ * The vertices a run has just taught their colours: the GPU's copy carries
+ * each one's entry where the table goes to the shader whole. Only vertices no
+ * draw has read yet - a vertex is only drawn by a kept run, and every run that
+ * draws one has been read by then.
+ */
+static void gfx_room_teach(const std::vector<int32_t>& taught) {
+    GfxRoomData* rd = mesh_entry->room.get();
+    const struct gfxmesh* m = mesh_cur->mesh;
+
+    if (taught.empty()) {
+        return;
+    }
+
+    // the frame's colours are made again for the next draw
+    rd->frame = 0;
+
+    if (!rd->palette || !gfx_rapi->mesh_update) {
+        return;
+    }
+
+    std::vector<int32_t> ks(taught);
+    std::sort(ks.begin(), ks.end());
+
+    std::vector<GfxMeshVertex> verts;
+
+    for (size_t i = 0; i < ks.size();) {
+        size_t j = i + 1;
+
+        while (j < ks.size() && ks[j] == ks[j - 1] + 1) {
+            j++;
+        }
+
+        verts.resize(j - i);
+
+        for (size_t n = 0; n < j - i; n++) {
+            const int32_t k = ks[i + n];
+            const Vtx* v = &m->vertices[k];
+            GfxMeshVertex* o = &verts[n];
+            const uint32_t c = (uint32_t)rd->colidx[k];
+
+            memset(o, 0, sizeof(*o));
+            o->pos[0] = v->v[0];
+            o->pos[1] = v->v[1];
+            o->pos[2] = v->v[2];
+            o->st[0] = v->s;
+            o->st[1] = v->t;
+            o->bones[0] = c & 0xff;
+            o->bones[1] = (c >> 8) & 0xff;
+            o->bones[2] = (c >> 16) & 0xff;
+            o->bones[3] = 1;
+            o->weights[0] = 1.0f;
+        }
+
+        gfx_rapi->mesh_update(mesh_entry->backend, (uint32_t)ks[i], verts.data(), (uint32_t)verts.size());
+        i = j;
+    }
+}
+
+/*
+ * Reads the room's run that starts at cmd, under the segments and slots as
+ * they stand.
+ */
+static GfxRoomRun gfx_room_read_run(const Gfx* cmd) {
+    const struct gfxmesh* m = mesh_cur->mesh;
+    GfxRoomData* rd = mesh_entry->room.get();
+    const uintptr_t table = (uintptr_t)mesh_cur->colours;
+    const int64_t numcolours = mesh_cur->numcolours;
+    GfxRoomRun r;
+    int32_t slots[16];
+    bool own[16];
+    int64_t colbase = 0; // entries from the table's start
+    bool havecol = false;
+    std::vector<int32_t> taught;
+
+    r.end = cmd;
+    r.ok = true;
+    r.forced_cpu = false;
+    r.vtxsegno = 0;
+    r.vtxseg = 0;
+    r.colseg = 0;
+    r.coldelta = 0;
+    r.outcolofs = 0;
+    r.incol = false;
+    r.incoldelta = 0;
+    r.loaded = 0;
+    r.incoming = 0;
+    r.numverts = 0;
+    r.numsealed = 0;
+    r.first_all = UINT32_MAX;
+    r.first_plain = UINT32_MAX;
+
+    for (int i = 0; i < 16; i++) {
+        slots[i] = mesh_slot[i] >= 0 ? mesh_slot[i] : -1;
+        own[i] = false;
+        r.slotout[i] = -1;
+        r.slotin[i] = -1;
+    }
+
+    auto tri = [&](uint32_t a, uint32_t b, uint32_t c, bool seal) {
+        const uint32_t s[3] = { a, b, c };
+
+        for (int i = 0; i < 3; i++) {
+            if (s[i] >= 16 || slots[s[i]] < 0) {
+                r.ok = false;
+                return;
+            }
+        }
+        for (int i = 0; i < 3; i++) {
+            if (!own[s[i]]) {
+                r.incoming |= 1u << s[i];
+                r.slotin[s[i]] = slots[s[i]];
+            }
+            r.all.push_back((uint32_t)slots[s[i]]);
+        }
+
+        std::vector<uint32_t>& to = seal ? r.sealed : r.plain;
+
+        to.push_back((uint32_t)slots[a]);
+        to.push_back((uint32_t)slots[b]);
+        to.push_back((uint32_t)slots[c]);
+
+        if (seal) {
+            r.numsealed++;
+        }
+    };
+
+    for (const Gfx* c = cmd;; ++c) {
+        const uint32_t op = c->words.w0 >> 24;
+        const uintptr_t w1 = c->words.w1;
+
+        if (op == G_NOOP) {
+            continue;
+        }
+
+        if (op == G_COL) {
+            const uint8_t seg = (w1 & 1) ? (uint8_t)((w1 >> 24) & 0x0f) : 0;
+
+            if (!seg || !segmentPointers[seg] || (r.colseg && seg != r.colseg)) {
+                r.ok = false;
+                continue;
+            }
+
+            r.colseg = seg;
+            r.coldelta = (intptr_t)(segmentPointers[seg] - table);
+            r.outcolofs = (uint32_t)(w1 & 0x00fffffe);
+
+            const intptr_t bytes = r.coldelta + (intptr_t)r.outcolofs;
+
+            if (bytes % (intptr_t)sizeof(struct NormalColor)) {
+                r.ok = false;
+            }
+
+            colbase = bytes / (intptr_t)sizeof(struct NormalColor);
+            havecol = true;
+            continue;
+        }
+
+        if (op == G_VTX) {
+            const Vtx* src = (const Vtx*)seg_addr(w1);
+            const size_t count = (c->words.w0 & 0xffff) / sizeof(Vtx);
+            const size_t dest = (c->words.w0 >> 16) & 0xf;
+            const uint8_t seg = (w1 & 1) ? (uint8_t)((w1 >> 24) & 0x0f) : 0;
+
+            if (!seg || (r.vtxsegno && seg != r.vtxsegno) || count == 0 || dest + count > 16 ||
+                src < m->vertices || src + count > m->vertices + m->numvertices) {
+                r.ok = false;
+
+                for (size_t i = dest; i < dest + count && i < 16; i++) {
+                    slots[i] = -1;
+                    own[i] = true;
+                }
+                continue;
+            }
+
+            if (!havecol) {
+                // the colours a G_COL before the run named
+                const intptr_t bytes = (intptr_t)((uintptr_t)rsp.vertex_colors - table);
+
+                if (!rsp.vertex_colors || bytes % (intptr_t)sizeof(struct NormalColor)) {
+                    r.ok = false;
+                }
+
+                r.incol = true;
+                r.incoldelta = bytes;
+                colbase = bytes / (intptr_t)sizeof(struct NormalColor);
+                havecol = true;
+            }
+
+            r.vtxsegno = seg;
+            r.vtxseg = segmentPointers[seg];
+
+            const int32_t base = (int32_t)(src - m->vertices);
+
+            for (size_t i = 0; i < count; i++) {
+                const int32_t k = base + (int32_t)i;
+                const int64_t ci = colbase + (src[i].colour >> 2);
+
+                if (ci < 0 || ci >= numcolours || (rd->palette && ci >= GFXMESH_ROOM_PALETTE)) {
+                    r.ok = false;
+                } else if (rd->colidx[k] < 0) {
+                    rd->colidx[k] = (int32_t)ci;
+                    taught.push_back(k);
+
+                    const int64_t d = ci - k;
+
+                    if (!rd->anyknown) {
+                        rd->direct = d;
+                        rd->anyknown = true;
+                    } else if (rd->direct != d) {
+                        rd->direct = INT64_MIN;
+                    }
+                } else if (rd->colidx[k] != ci) {
+                    // loaded with another colour by another run
+                    r.ok = false;
+                }
+
+                slots[dest + i] = k;
+                own[dest + i] = true;
+                r.loaded |= 1u << (dest + i);
+            }
+
+            r.numverts += (uint32_t)count;
+            continue;
+        }
+
+        if (op == (uint8_t)G_TRI1) {
+            tri(((w1 >> 16) & 0xff) / 10, ((w1 >> 8) & 0xff) / 10, (w1 & 0xff) / 10, (w1 >> 24) & 1);
+            continue;
+        }
+
+        if (op == (uint8_t)G_TRI4) {
+            for (int k = 0; k < 4; k++) {
+                const uint32_t x = (w1 >> (k * 8)) & 0xf;
+                const uint32_t y = (w1 >> (k * 8 + 4)) & 0xf;
+                const uint32_t z = (c->words.w0 >> (k * 4)) & 0xf;
+
+                if (x || y || z) {
+                    tri(x, y, z, (c->words.w0 >> (16 + k)) & 1);
+                }
+            }
+            continue;
+        }
+
+        r.end = c;
+        break;
+    }
+
+    for (int i = 0; i < 16; i++) {
+        if (r.loaded & (1u << i)) {
+            r.slotout[i] = slots[i];
+        }
+    }
+
+    if (r.numsealed == 0) {
+        r.plain.clear();
+    }
+
+    for (int k = 0; k < 3; k++) {
+        r.bmin[k] = 1e30f;
+        r.bmax[k] = -1e30f;
+    }
+    for (uint32_t i : r.all) {
+        const Vtx* v = &m->vertices[i];
+
+        for (int k = 0; k < 3; k++) {
+            r.bmin[k] = std::min(r.bmin[k], (float)v->v[k]);
+            r.bmax[k] = std::max(r.bmax[k], (float)v->v[k]);
+        }
+    }
+
+    if (r.loaded == 0 && r.all.empty()) {
+        r.ok = false;
+    }
+
+    gfx_room_teach(taught);
+
+    return r;
+}
+
+/*
+ * This frame's colours for the room's draws: the table as floats for the
+ * shader, or a colour per vertex - the table itself where it lines up with
+ * the vertices, else gathered from it.
+ */
+static void gfx_room_colours(void) {
+    GfxRoomData* rd = mesh_entry->room.get();
+    const void* table = mesh_cur->colours;
+
+    if (rd->frame == gfx_mesh_frame && rd->table == table) {
+        return;
+    }
+
+    rd->frame = gfx_mesh_frame;
+    rd->table = table;
+
+    const struct NormalColor* t = (const struct NormalColor*)table;
+    const int32_t numcolours = mesh_cur->numcolours;
+    const int32_t n = mesh_cur->mesh->numvertices;
+
+    if (rd->palette) {
+        const int32_t num = numcolours < GFXMESH_ROOM_PALETTE ? numcolours : GFXMESH_ROOM_PALETTE;
+        float* p = (float*)gfx_room_alloc(sizeof(float) * 4 * GFXMESH_ROOM_PALETTE);
+
+        for (int32_t i = 0; i < num; i++) {
+            p[i * 4 + 0] = t[i].r;
+            p[i * 4 + 1] = t[i].g;
+            p[i * 4 + 2] = t[i].b;
+            p[i * 4 + 3] = t[i].a;
+        }
+
+        rd->pal = p;
+        rd->numpal = (uint32_t)(num + 2) / 3;
+        rd->colours = NULL;
+        return;
+    }
+
+    if (rd->anyknown && rd->direct != INT64_MIN && rd->direct >= 0 && rd->direct + n <= numcolours) {
+        rd->colours = (const uint8_t*)(t + rd->direct);
+        return;
+    }
+
+    struct NormalColor* g = (struct NormalColor*)gfx_room_alloc(sizeof(struct NormalColor) * n);
+
+    for (int32_t k = 0; k < n; k++) {
+        const int32_t c = rd->colidx[k];
+
+        if (c >= 0 && c < numcolours) {
+            g[k] = t[c];
+        } else {
+            memset(&g[k], 0, sizeof(g[k]));
+        }
+    }
+
+    rd->colours = (const uint8_t*)g;
+}
+
+// A run's triangles on the CPU, each corner loaded on its own
+static void gfx_room_draw_cpu(const std::vector<uint32_t>& idx, bool seal) {
+    for (size_t t = 0; t + 2 < idx.size(); t += 3) {
+        struct LoadedVertex v[3];
+
+        for (int k = 0; k < 3; k++) {
+            gfx_room_load_one(&v[k], (int32_t)idx[t + k]);
+        }
+
+        gfx_seal_this = seal;
+        gfx_sp_tri_emit(&v[0], &v[1], &v[2], false);
+    }
+
+    gfx_seal_this = false;
+}
+
+// Triangles of the room's kept ones, from first, as one draw
+static void gfx_room_draw(const std::vector<uint32_t>& idx, uint32_t first) {
+    const uint32_t numtris = (uint32_t)idx.size() / 3;
+    GfxRoomData* rd = mesh_entry->room.get();
+
+    if (numtris == 0) {
+        return;
+    }
+
+    if ((rsp.geometry_mode & G_CULL_BOTH) == G_CULL_BOTH && gfx_mesh_cull() != 0) {
+        g_GfxTrisCulled += numtris;
+        return;
+    }
+
+    gfx_emit_prepare();
+    gfx_flush();
+    gfx_room_colours();
+
+    float params[4 * GFX_MESH_PARAMS];
+    gfx_mesh_params(params, false);
+    params[51] = rd->palette ? 1.0f : 0.0f;
+    params[110] = mesh_cur->mesh->dynamic ? 1.0f : 0.0f;
+
+    struct GfxMeshDraw d;
+    d.prg = rendering_state.shader_program;
+    d.mesh = mesh_entry->backend;
+    d.colours = rd->palette ? NULL : rd->colours;
+    d.numcolours = (uint32_t)mesh_cur->mesh->numvertices;
+    d.indices = first == UINT32_MAX ? idx.data() : NULL;
+    d.numindices = (uint32_t)idx.size();
+    d.first_index = first == UINT32_MAX ? 0 : first;
+    d.params = params;
+    d.palette = rd->palette ? rd->pal : NULL;
+    d.numpalette = rd->palette ? rd->numpal : 0;
+    d.st = mesh_cur->mesh->dynamic ? gfx_room_st() : NULL;
+    d.cull = gfx_mesh_cull();
+
+    if (d.mesh && d.prg && (d.colours || d.palette) && gfx_rapi->mesh_draw(&d)) {
+        g_GfxNumDrawCalls++;
+        g_GfxNumTris += numtris;
+        g_GfxRoomDraws++;
+        g_GfxRoomTris += numtris;
+        if (d.st) {
+            g_GfxRoomDyntexTris += numtris;
+        }
+    } else {
+        g_GfxRoomRefused += numtris;
+        gfx_room_draw_cpu(idx, false);
+    }
+}
+
+/*
+ * The room's run that starts at cmd, drawn whole from what was kept of it, or
+ * NULL when it is to be read as any list is this time (see above).
+ */
+static const Gfx* gfx_room_kept_run(const Gfx* cmd) {
+    GfxRoomData* rd = mesh_entry->room.get();
+    auto it = rd->runs.find(cmd);
+
+    if (it == rd->runs.end()) {
+        GfxRoomRun r = gfx_room_read_run(cmd);
+
+        if (r.ok && gfx_rapi->mesh_add_indices) {
+            if (!r.all.empty()) {
+                r.first_all = gfx_rapi->mesh_add_indices(mesh_entry->backend, r.all.data(), (uint32_t)r.all.size());
+            }
+            if (!r.plain.empty()) {
+                r.first_plain = gfx_rapi->mesh_add_indices(mesh_entry->backend, r.plain.data(), (uint32_t)r.plain.size());
+            }
+        }
+
+        it = rd->runs.emplace(cmd, std::move(r)).first;
+    }
+
+    GfxRoomRun& r = it->second;
+    const uintptr_t table = (uintptr_t)mesh_cur->colours;
+    bool go = r.ok && !r.forced_cpu && gfx_room_gpu_state(r);
+
+    if (go && r.vtxsegno && segmentPointers[r.vtxsegno] != r.vtxseg) {
+        go = false;
+    }
+    if (go && r.colseg && (intptr_t)(segmentPointers[r.colseg] - table) != r.coldelta) {
+        go = false;
+    }
+    if (go && r.incol && (intptr_t)((uintptr_t)rsp.vertex_colors - table) != r.incoldelta) {
+        go = false;
+    }
+
+    int32_t sig = -1;
+
+    if (go && (r.loaded || r.incoming)) {
+        GfxRoomVState cur;
+        gfx_room_vstate(&cur);
+
+        if (!room_sigs.empty() && memcmp(&room_sigs.back(), &cur, sizeof(cur)) == 0) {
+            sig = (int32_t)room_sigs.size() - 1;
+        } else {
+            room_sigs.push_back(cur);
+            sig = (int32_t)room_sigs.size() - 1;
+        }
+
+        // Slots an earlier run loaded: the same vertices, loaded under this
+        // state; a lit one's lights are not part of it
+        if (r.incoming && (rsp.geometry_mode & G_LIGHTING)) {
+            go = false;
+        }
+
+        for (int i = 0; go && i < 16; i++) {
+            if (r.incoming & (1u << i)) {
+                const int32_t s = mesh_slot_sig[i];
+
+                if (mesh_slot[i] != r.slotin[i] || s < 0 ||
+                    (s != sig && memcmp(&room_sigs[s], &cur, sizeof(cur)) != 0)) {
+                    go = false;
+                }
+            }
+        }
+    }
+
+    if (!go) {
+        mesh_skip_until = r.end;
+        return NULL;
+    }
+
+    // What the run leaves behind it, as reading it would have
+    if (r.colseg) {
+        rsp.vertex_colors = (const struct NormalColor*)(segmentPointers[r.colseg] + r.outcolofs);
+    }
+
+    if (r.loaded) {
+        mesh_slot_top = std::max(mesh_slot_top, (size_t)16);
+    }
+
+    for (int i = 0; i < 16; i++) {
+        if (r.loaded & (1u << i)) {
+            mesh_slot[i] = r.slotout[i];
+            mesh_slot_sig[i] = sig;
+            mesh_slot_run[i] = &r;
+        }
+    }
+
+    gfx_gpu_only_slots |= r.loaded;
+    g_GfxNumVerts += r.numverts;
+    gfx_vertices_lost = false;
+
+    if (r.numsealed && gfx_room_sealing()) {
+        gfx_room_draw(r.plain, r.first_plain);
+        g_GfxRoomSealedTris += r.numsealed;
+        gfx_room_draw_cpu(r.sealed, true);
+    } else {
+        gfx_room_draw(r.all, r.first_all);
+    }
+
+    return r.end - 1;
+}
+
+/*
+ * G_MESH_EXT for one node of a model (gSPModelMeshEXT(), modelmesh.c): a
+ * model's lists drawn from the GPU's copy of the node's vertices.
+ *
+ * A model's matrices are in segment 3, s15.16 like any G_MTX's by the time
+ * the frame is drawn (mtxF2LBulk()), and its lists load each batch of
+ * vertices under one of them: a G_MTX, a G_COL, a G_VTX, often another G_MTX
+ * and G_VTX into other slots, and then triangles across both, a joint
+ * stitched from the vertices of two bones. So a model's run is read with its
+ * G_MTXs in it (gfx_model_read_run()), and what is learnt of each vertex the
+ * first time a run loads it is its matrix - the bone, by where in segment 3
+ * the G_MTX before its load points - and its colour, as the segment the
+ * G_COL before it named and the entry in it. The GPU's copy carries the bone
+ * (bones.x, weight 1) and the draw hands the shader the model's matrices as
+ * a palette (gfx_model_palette(), read from segment 3 as it stands, as the
+ * RSP would read them) with the projection alone as the transform after it:
+ * every vertex is taken through its own matrix and then the projection, as
+ * gfx_sp_load_vertex() takes it through the product of the two. Colours are
+ * gathered from the segments into one per vertex once a frame for each set
+ * of colour tables (gfx_model_colours()): a body a bullet has bruised has
+ * its own.
+ *
+ * A model's run is like a room's otherwise (gfx_room_kept_run() above): it may
+ * draw slots an earlier run of the node loaded, across a texture change, and
+ * those must hold the same vertices loaded under the same state, the
+ * projection standing in for the transform (gfx_model_vstate()); it may load
+ * vertices before its own first G_MTX or G_COL, under ones an earlier
+ * command named (model_bone, model_col*), which must be the same each time.
+ * What the run leaves the RSP holding - the last matrix it loads, the last
+ * colours it names, its slots - is set as interpreting it would have.
+ *
+ * The node's lists are the model file's, which nothing promises are left be:
+ * a run's commands are kept with it and compared each time it is drawn, and
+ * the node's vertices are summed once a frame they are drawn
+ * (gfx_model_entry()): a change drops the copy and everything learnt, and an
+ * array that keeps changing (the laser's sliding liquid) is drawn on the CPU.
+ * A copy is only made once an array has been seen the same for a frame, so a
+ * list's vertices made afresh every frame never get one.
+ *
+ * Drawn on the CPU as any list is: a run under G_LIGHTING (a gun's chrome,
+ * texgenned from its lights), G_ENVMAP_EXT or per-vertex fog, and anything
+ * gfx_mesh_gpu_state() refuses; a run whose loads are not of the node's
+ * vertices or whose G_MTX is not a load from segment 3; a model with more
+ * matrices than the palette holds (GFX_MESH_PALETTE_MAX).
+ */
+enum {
+    GFX_MODEL_WHY_NEW,        // the node has no copy on the GPU this frame
+    GFX_MODEL_WHY_UNREADABLE, // its run loads something else, or names a slot nothing loaded
+    GFX_MODEL_WHY_LIT,        // G_LIGHTING
+    GFX_MODEL_WHY_STATE,      // other state gfx_model_gpu_state() refuses
+    GFX_MODEL_WHY_MATRIX,     // a matrix it cannot follow, or not the one it was read under
+    GFX_MODEL_WHY_COLOURS,    // colours it cannot follow, or not the ones it was read under
+    GFX_MODEL_WHY_SLOTS,      // slots an earlier run left, not as it was read; or a vertex two ways
+};
+
+// The bytes of a model's matrix in segment 3 (Mtxf, s15.16 once converted)
+#define GFX_MODEL_MTX_BYTES 64
+// A copy dropped this many times, each within this many frames of the last,
+// is the CPU's until its vertices hold still for the second count
+#define GFX_MODEL_UNSTEADY_CHANGES 3
+#define GFX_MODEL_UNSTEADY_FRAMES 60
+#define GFX_MODEL_STEADY_FRAMES 300
+
+struct GfxModelRun {
+    const Gfx* end;               // the first command past it
+    std::vector<uintptr_t> words; // its commands as they were read, w0 and w1 each
+    bool ok;                      // drawable on the GPU at all, from what its commands hold
+    uint8_t why;                  // and when not, why (GFX_MODEL_WHY_*)
+    bool forced_cpu;              // a run after it needed its loads on the CPU
+    uint8_t vtxsegno;             // the segment its loads name, 0 when it loads nothing
+    uintptr_t vtxseg;             // and what that held
+    int16_t inbone;               // the matrix its loads before its own first G_MTX are made under; -1 when none are
+    int16_t outbone;              // the matrix its last G_MTX loads, -1 when it has none
+    uintptr_t outmtx[2];          // and that G_MTX
+    bool incol;                   // its loads before its own first G_COL read the colours an earlier one named
+    uint8_t incolseg;
+    uint32_t incolofs;
+    bool outcol;                  // its last G_COL, which the RSP is left at
+    uint8_t outcolseg;
+    uint32_t outcolofs;
+    uint32_t loaded;              // the slots its loads leave filled
+    uint32_t incoming;            // the slots it reads that it does not load
+    int32_t slotout[16];          // the vertex each slot it loads is left holding
+    int32_t slotin[16];           // the vertex each incoming slot must hold
+    uint32_t numverts;            // vertices it loads, for the stats
+    uint32_t first;               // where its triangles are kept with the copy; UINT32_MAX when not
+    std::vector<uint32_t> idx;    // its triangles in the list's order, three vertices each
+};
+
+struct GfxModelColours {
+    uintptr_t bases[4];           // the colour segments' bases they were gathered from
+    const uint8_t* colours;       // four bytes a vertex
+};
+
+struct GfxModelData {
+    std::unordered_map<const Gfx*, GfxModelRun> runs;
+    std::vector<int16_t> bone;    // each vertex's matrix, -1 until a run loads it
+    std::vector<uint32_t> colref; // each vertex's colour, segment << 24 | entry, UINT32_MAX until a run loads it
+    int32_t maxbone;              // the highest matrix a run loads under
+    uint8_t colsegs[4];           // the segments the colours are in
+    int numcolsegs;
+    // The vertices' contents, summed once a frame they are drawn
+    uint64_t sum;
+    uint32_t sumframe;
+    uint32_t seenframe;           // when the sum last changed, or was first taken
+    uint32_t changes;             // changes in a row, each within GFX_MODEL_UNSTEADY_FRAMES of the last
+    bool unsteady;                // the CPU's for now
+    bool refused;                 // the backend would not make a copy: the CPU's until the entry idles out
+    // This frame's colours (gfx_model_colours())
+    uint32_t colframe;
+    std::vector<GfxModelColours> cols;
+};
+
+static struct gfxmesh model_mesh;      // the node being drawn, for mesh_cur
+static struct gfxmeshdraw model_draw;
+static std::unordered_map<const Vtx*, uint32_t> gfx_model_ids; // a node's vertices' copy in gfx_meshes
+static GfxModelRun* mesh_slot_mrun[MAX_VERTICES + 4];         // the kept run that loaded a GPU slot
+// The RSP's state as a model's runs read it: the matrix the modelview was
+// loaded from (a bone, -1 when it is not a model's), the colours the last
+// G_COL named, and segments set since a model's draw began
+static int32_t model_bone = -1;
+static bool model_col_ok;
+static uint8_t model_colseg;
+static uint32_t model_colofs;
+static uint32_t gfx_seg_epoch;
+// This frame's palettes, by segment 3's base: entries converted so far
+struct GfxModelPalette {
+    const float* pal;
+    uint32_t count;
+};
+static std::unordered_map<uintptr_t, GfxModelPalette> model_palettes;
+static uintptr_t model_palette_base; // the last asked for, a model's draws coming together
+static GfxModelPalette* model_palette_last;
+
+// The bone a G_MTX loads the modelview from: a load of one of segment 3's
+// matrices, -1 for any other
+static inline int32_t gfx_model_mtx_bone(const Gfx* cmd) {
+    const uintptr_t w1 = cmd->words.w1;
+    const uint32_t params = (cmd->words.w0 >> 16) & 0xff;
+    const uint32_t ofs = (uint32_t)(w1 & 0x00fffffe);
+
+    if (!(w1 & 1) || ((w1 >> 24) & 0x0f) != 3 || !segmentPointers[3] ||
+        (params & (G_MTX_PROJECTION | G_MTX_PUSH | G_MTX_FLOATS)) || !(params & G_MTX_LOAD) ||
+        ofs % GFX_MODEL_MTX_BYTES) {
+        return -1;
+    }
+
+    return (int32_t)(ofs / GFX_MODEL_MTX_BYTES);
+}
+
+// A G_MTX interpreted: the projection leaves the modelview as it was
+static inline void gfx_model_note_mtx(const Gfx* cmd) {
+    if (!(((cmd->words.w0 >> 16) & 0xff) & G_MTX_PROJECTION)) {
+        model_bone = gfx_model_mtx_bone(cmd);
+    }
+}
+
+// A G_COL interpreted: a segment's colours at a whole entry, or none a model follows
+static inline void gfx_model_note_col(uintptr_t w1) {
+    model_colseg = (uint8_t)((w1 >> 24) & 0x0f);
+    model_colofs = (uint32_t)(w1 & 0x00fffffe);
+    model_col_ok = (w1 & 1) && model_colseg && segmentPointers[model_colseg] && (model_colofs & 3) == 0;
+}
+
+static inline void gfx_model_note_segment(uint32_t seg) {
+    if (seg == 3) {
+        model_bone = -1;
+    }
+    if (model_col_ok && seg == model_colseg) {
+        // rsp.vertex_colors still names the old table
+        model_col_ok = false;
+    }
+    gfx_seg_epoch++;
+}
+
+static void gfx_model_start_frame(void) {
+    model_palettes.clear();
+    model_palette_base = 0;
+    model_palette_last = NULL;
+    model_bone = -1;
+    model_col_ok = false;
+}
+
+static void gfx_model_forget_key(const Vtx* vertices, uint32_t id) {
+    auto it = gfx_model_ids.find(vertices);
+
+    if (it != gfx_model_ids.end() && it->second == id) {
+        gfx_model_ids.erase(it);
+    }
+}
+
+// The node's vertices summed, every byte: s and t slid, a vertex moved or
+// recoloured, or another file's in their place all change it
+static uint64_t gfx_model_sum(const Vtx* v, int32_t n) {
+    const uint8_t* p = (const uint8_t*)v;
+    const size_t bytes = (size_t)n * sizeof(Vtx);
+    // the second sum adds up the first as it goes, so a word moved is a change too
+    uint64_t a = 0, b = 0;
+    size_t i = 0;
+
+    for (; i + 8 <= bytes; i += 8) {
+        uint64_t w;
+        memcpy(&w, p + i, 8);
+        a += w;
+        b += a;
+    }
+    for (; i < bytes; i++) {
+        a += (uint64_t)p[i] << (i & 7) * 8;
+        b += a;
+    }
+
+    return a ^ (b * 0xff51afd7ed558ccdull) ^ (uint64_t)n;
+}
+
+/*
+ * The GPU's copy of a node's vertices, keyed by their address: NULL when the
+ * node is the CPU's this frame (seen for the first time, changed, or changing
+ * too often, see above).
+ */
+static GfxMeshEntry* gfx_model_entry(const Vtx* vertices, int32_t n) {
+    GfxMeshEntry* e = NULL;
+    auto key = gfx_model_ids.find(vertices);
+
+    if (key != gfx_model_ids.end()) {
+        auto it = gfx_meshes.find(key->second);
+
+        if (it != gfx_meshes.end() && it->second.model && it->second.numvertices == n) {
+            e = &it->second;
+        } else {
+            if (it != gfx_meshes.end()) {
+                if (it->second.backend && gfx_rapi->mesh_delete) {
+                    gfx_rapi->mesh_delete(it->second.backend);
+                }
+                gfx_meshes.erase(it);
+            }
+            gfx_model_ids.erase(key);
+        }
+    }
+
+    if (!e) {
+        GfxMeshEntry ne;
+        GfxModelData* md = new GfxModelData();
+
+        md->maxbone = -1;
+        md->numcolsegs = 0;
+        md->sum = gfx_model_sum(vertices, n);
+        md->sumframe = gfx_mesh_frame;
+        md->seenframe = gfx_mesh_frame;
+        md->changes = 0;
+        md->unsteady = false;
+        md->refused = false;
+        md->colframe = 0;
+
+        ne.model.reset(md);
+        ne.backend = 0;
+        ne.vertices = vertices;
+        ne.numvertices = n;
+        ne.bindpos = NULL;
+        ne.normals = NULL;
+        ne.last_frame = gfx_mesh_frame;
+
+        if (gfx_mesh_next_id == 0) {
+            gfx_mesh_next_id = 1;
+        }
+
+        const uint32_t id = gfx_mesh_next_id++;
+        gfx_meshes.emplace(id, std::move(ne));
+        gfx_model_ids[vertices] = id;
+        return NULL;
+    }
+
+    GfxModelData* md = e->model.get();
+    e->last_frame = gfx_mesh_frame;
+
+    if (md->refused) {
+        return NULL;
+    }
+
+    if (md->sumframe != gfx_mesh_frame) {
+        const uint64_t sum = gfx_model_sum(vertices, n);
+
+        md->sumframe = gfx_mesh_frame;
+
+        if (sum != md->sum) {
+            md->changes = gfx_mesh_frame - md->seenframe <= GFX_MODEL_UNSTEADY_FRAMES ? md->changes + 1 : 1;
+            md->sum = sum;
+            md->seenframe = gfx_mesh_frame;
+
+            if (md->changes >= GFX_MODEL_UNSTEADY_CHANGES) {
+                md->unsteady = true;
+            }
+
+            if (e->backend) {
+                if (gfx_rapi->mesh_delete) {
+                    gfx_rapi->mesh_delete(e->backend);
+                }
+                e->backend = 0;
+            }
+
+            md->runs.clear();
+            md->bone.clear();
+            md->colref.clear();
+            md->maxbone = -1;
+            md->numcolsegs = 0;
+            md->colframe = 0;
+            return NULL;
+        }
+
+        if (md->unsteady && gfx_mesh_frame - md->seenframe > GFX_MODEL_STEADY_FRAMES) {
+            md->unsteady = false;
+            md->changes = 0;
+        }
+    }
+
+    if (md->unsteady) {
+        return NULL;
+    }
+
+    if (!e->backend) {
+        // seen as it stands for a frame first
+        if (md->seenframe == gfx_mesh_frame) {
+            return NULL;
+        }
+
+        std::vector<GfxMeshVertex> verts(n);
+
+        for (int32_t k = 0; k < n; k++) {
+            GfxMeshVertex* o = &verts[k];
+            const Vtx* v = &vertices[k];
+
+            memset(o, 0, sizeof(*o));
+            o->pos[0] = v->v[0];
+            o->pos[1] = v->v[1];
+            o->pos[2] = v->v[2];
+            o->st[0] = v->s;
+            o->st[1] = v->t;
+            o->bones[3] = 1;
+            o->weights[0] = 1.0f;
+        }
+
+        e->backend = gfx_rapi->mesh_create(verts.data(), (uint32_t)n);
+
+        if (!e->backend) {
+            md->refused = true;
+            return NULL;
+        }
+
+        md->bone.assign(n, -1);
+        md->colref.assign(n, UINT32_MAX);
+    }
+
+    return e;
+}
+
+// A model's node begins: its copy, or the CPU's this time
+static void gfx_model_begin(const Vtx* vertices, uint32_t count) {
+    gfx_mesh_begin(NULL);
+
+    if (!vertices || count == 0 || !gfx_mesh_backend()) {
+        return;
+    }
+
+    memset(&model_mesh, 0, sizeof(model_mesh));
+    model_mesh.vertices = vertices;
+    model_mesh.numvertices = (s32)count;
+    memset(&model_draw, 0, sizeof(model_draw));
+    model_draw.mesh = &model_mesh;
+
+    mesh_cur = &model_draw;
+    mesh_model = true;
+    mesh_entry = gfx_model_entry(vertices, (int32_t)count);
+
+    if (!mesh_entry) {
+        g_GfxModelWhy[GFX_MODEL_WHY_NEW]++;
+        return;
+    }
+
+    room_sigs.clear();
+
+    for (size_t i = 0; i < 16; i++) {
+        mesh_slot_sig[i] = -1;
+        mesh_slot_mrun[i] = NULL;
+    }
+}
+
+// What gfx_sp_load_vertex() reads of the state, with the projection in place
+// of the transform: a model's vertices bring their own matrices
+static void gfx_model_vstate(GfxRoomVState* s) {
+    gfx_room_vstate(s);
+    memcpy(s->mp, rsp.P_matrix, sizeof(s->mp));
+    s->segs = gfx_seg_epoch;
+}
+
+static inline bool gfx_model_gpu_state(void) {
+    return gfx_mesh_gpu_state() && !(rsp.geometry_mode & G_LIGHTING) &&
+           !(rsp.extra_geometry_mode & (G_ENVMAP_EXT | G_FOG_VERTEX_EXT | G_SHADE_LINEAR_EXT));
+}
+
+// Vertex k's colour as the segments stand
+static inline struct NormalColor gfx_model_colour(const GfxModelData* md, int32_t k) {
+    const uint32_t cref = md->colref.empty() ? UINT32_MAX : md->colref[k];
+    struct NormalColor c;
+
+    memset(&c, 0, sizeof(c));
+
+    if (cref != UINT32_MAX && segmentPointers[cref >> 24]) {
+        c = ((const struct NormalColor*)segmentPointers[cref >> 24])[cref & 0xffffff];
+    }
+
+    return c;
+}
+
+// One of the node's vertices through gfx_sp_load_vertex(), under its own
+// matrix as the RSP had it when the list loaded it
+static void gfx_model_load_one(struct LoadedVertex* d, int32_t k) {
+    const GfxModelData* md = mesh_entry->model.get();
+    const Vtx* v = &model_mesh.vertices[k];
+    const int32_t b = md->bone.empty() ? -1 : md->bone[k];
+    const struct NormalColor c = gfx_model_colour(md, k);
+    const short U = v->s * rsp.texture_scaling_factor.s >> 16;
+    const short V = v->t * rsp.texture_scaling_factor.t >> 16;
+    float saved[4][4];
+
+    memcpy(saved, rsp.MP_matrix, sizeof(saved));
+
+    if (b >= 0 && segmentPointers[3]) {
+        float m[4][4];
+
+        gfx_mtx_read((const int32_t*)(segmentPointers[3] + (uintptr_t)b * GFX_MODEL_MTX_BYTES), m);
+        gfx_matrix_mul(rsp.MP_matrix, m, rsp.P_matrix);
+    }
+
+    gfx_sp_load_vertex(d, v->v[0], v->v[1], v->v[2], &c, U, V);
+    memcpy(rsp.MP_matrix, saved, sizeof(saved));
+}
+
+// A slot a kept run filled on the GPU alone, for a triangle on the CPU (see
+// gfx_room_materialise())
+static void gfx_model_materialise(uint8_t slot) {
+    const int32_t k = mesh_slot[slot];
+
+    if (mesh_slot_mrun[slot]) {
+        mesh_slot_mrun[slot]->forced_cpu = true;
+    }
+
+    mesh_slot[slot] = -1;
+    gfx_gpu_only_slots &= ~(1u << (slot & 31));
+
+    if (mesh_entry && k >= 0 && k < model_mesh.numvertices) {
+        gfx_model_load_one(&rsp.loaded_vertices[slot], k);
+    }
+}
+
+/*
+ * The vertices a run has just taught their matrices: the GPU's copy carries
+ * each one's bone. Only vertices no draw has read yet (gfx_room_teach()).
+ */
+static void gfx_model_teach(const std::vector<int32_t>& taught) {
+    GfxModelData* md = mesh_entry->model.get();
+
+    if (taught.empty()) {
+        return;
+    }
+
+    // the frame's colours are gathered again for the next draw
+    md->colframe = 0;
+
+    if (!gfx_rapi->mesh_update) {
+        return;
+    }
+
+    std::vector<int32_t> ks(taught);
+    std::sort(ks.begin(), ks.end());
+
+    std::vector<GfxMeshVertex> verts;
+
+    for (size_t i = 0; i < ks.size();) {
+        size_t j = i + 1;
+
+        while (j < ks.size() && ks[j] == ks[j - 1] + 1) {
+            j++;
+        }
+
+        verts.resize(j - i);
+
+        for (size_t q = 0; q < j - i; q++) {
+            const int32_t k = ks[i + q];
+            const Vtx* v = &model_mesh.vertices[k];
+            GfxMeshVertex* o = &verts[q];
+
+            memset(o, 0, sizeof(*o));
+            o->pos[0] = v->v[0];
+            o->pos[1] = v->v[1];
+            o->pos[2] = v->v[2];
+            o->st[0] = v->s;
+            o->st[1] = v->t;
+            o->bones[0] = (uint8_t)md->bone[k];
+            o->bones[3] = 1;
+            o->weights[0] = 1.0f;
+        }
+
+        gfx_rapi->mesh_update(mesh_entry->backend, (uint32_t)ks[i], verts.data(), (uint32_t)verts.size());
+        i = j;
+    }
+}
+
+/*
+ * Reads the node's run that starts at cmd, under the segments, the slots and
+ * the matrix and colours named before it, as they stand.
+ */
+static GfxModelRun gfx_model_read_run(const Gfx* cmd) {
+    GfxModelData* md = mesh_entry->model.get();
+    const Vtx* verts = model_mesh.vertices;
+    const int32_t n = model_mesh.numvertices;
+    GfxModelRun r;
+    int32_t slots[16];
+    bool own[16];
+    int32_t bone = model_bone;
+    bool ownmtx = false;
+    bool havecol = false;
+    bool colbad = false; // a G_COL it cannot follow: its loads' colours are unknown
+    uint8_t colseg = 0;
+    uint32_t colofs = 0;
+    std::vector<int32_t> taught;
+
+    r.end = cmd;
+    r.ok = true;
+    r.why = 0;
+    r.forced_cpu = false;
+    r.vtxsegno = 0;
+    r.vtxseg = 0;
+    r.inbone = -1;
+    r.outbone = -1;
+    r.outmtx[0] = r.outmtx[1] = 0;
+    r.incol = false;
+    r.incolseg = 0;
+    r.incolofs = 0;
+    r.outcol = false;
+    r.outcolseg = 0;
+    r.outcolofs = 0;
+    r.loaded = 0;
+    r.incoming = 0;
+    r.numverts = 0;
+    r.first = UINT32_MAX;
+
+    auto refuse = [&](uint8_t why) {
+        if (r.ok) {
+            r.ok = false;
+            r.why = why;
+        }
+    };
+
+    for (int i = 0; i < 16; i++) {
+        slots[i] = mesh_slot[i] >= 0 ? mesh_slot[i] : -1;
+        own[i] = false;
+        r.slotout[i] = -1;
+        r.slotin[i] = -1;
+    }
+
+    auto tri = [&](uint32_t a, uint32_t b, uint32_t c) {
+        const uint32_t s3[3] = { a, b, c };
+
+        for (int i = 0; i < 3; i++) {
+            if (s3[i] >= 16 || slots[s3[i]] < 0) {
+                refuse(GFX_MODEL_WHY_UNREADABLE);
+                return;
+            }
+        }
+        for (int i = 0; i < 3; i++) {
+            if (!own[s3[i]]) {
+                r.incoming |= 1u << s3[i];
+                r.slotin[s3[i]] = slots[s3[i]];
+            }
+            r.idx.push_back((uint32_t)slots[s3[i]]);
+        }
+    };
+
+    const Gfx* c = cmd;
+
+    for (;; ++c) {
+        const uint32_t op = c->words.w0 >> 24;
+        const uintptr_t w1 = c->words.w1;
+
+        if (op == G_NOOP) {
+            continue;
+        }
+
+        if (op == G_MTX) {
+            const int32_t b = gfx_model_mtx_bone(c);
+
+            // the projection, or a matrix of no bone: the run ends before it
+            if ((((c->words.w0 >> 16) & 0xff) & G_MTX_PROJECTION) || b < 0) {
+                break;
+            }
+            if (b >= GFX_MESH_PALETTE_MAX) {
+                refuse(GFX_MODEL_WHY_MATRIX);
+            }
+
+            bone = b;
+            ownmtx = true;
+            r.outbone = (int16_t)b;
+            r.outmtx[0] = c->words.w0;
+            r.outmtx[1] = w1;
+            continue;
+        }
+
+        if (op == G_COL) {
+            const uint8_t seg = (w1 & 1) ? (uint8_t)((w1 >> 24) & 0x0f) : 0;
+            const uint32_t ofs = (uint32_t)(w1 & 0x00fffffe);
+
+            if (!seg || !segmentPointers[seg] || (ofs & 3)) {
+                refuse(GFX_MODEL_WHY_COLOURS);
+                havecol = false;
+                colbad = true;
+                continue;
+            }
+
+            colbad = false;
+            colseg = seg;
+            colofs = ofs;
+            havecol = true;
+            r.outcol = true;
+            r.outcolseg = seg;
+            r.outcolofs = ofs;
+            continue;
+        }
+
+        if (op == G_VTX) {
+            const Vtx* src = (const Vtx*)seg_addr(w1);
+            const size_t count = (c->words.w0 & 0xffff) / sizeof(Vtx);
+            const size_t dest = (c->words.w0 >> 16) & 0xf;
+            const uint8_t seg = (w1 & 1) ? (uint8_t)((w1 >> 24) & 0x0f) : 0;
+
+            if (!seg || (r.vtxsegno && seg != r.vtxsegno) || count == 0 || dest + count > 16 || src < verts ||
+                src + count > verts + n) {
+                refuse(GFX_MODEL_WHY_UNREADABLE);
+
+                for (size_t i = dest; i < dest + count && i < 16; i++) {
+                    slots[i] = -1;
+                    own[i] = true;
+                }
+                continue;
+            }
+
+            r.vtxsegno = seg;
+            r.vtxseg = segmentPointers[seg];
+
+            if (!havecol && !colbad) {
+                if (model_col_ok && !r.incol) {
+                    r.incol = true;
+                    r.incolseg = model_colseg;
+                    r.incolofs = model_colofs;
+                    colseg = model_colseg;
+                    colofs = model_colofs;
+                    havecol = true;
+                } else {
+                    refuse(GFX_MODEL_WHY_COLOURS);
+                }
+            }
+
+            if (bone < 0) {
+                refuse(GFX_MODEL_WHY_MATRIX);
+            } else if (!ownmtx) {
+                r.inbone = (int16_t)bone;
+            }
+
+            const int32_t base = (int32_t)(src - verts);
+
+            for (size_t i = 0; i < count; i++) {
+                const int32_t k = base + (int32_t)i;
+
+                if (havecol && bone >= 0 && bone < GFX_MESH_PALETTE_MAX) {
+                    const uint32_t entry = colofs / 4 + (src[i].colour >> 2);
+                    int si = 0;
+
+                    while (si < md->numcolsegs && md->colsegs[si] != colseg) {
+                        si++;
+                    }
+
+                    if (entry >= (1u << 24) || (si == md->numcolsegs && si == 4)) {
+                        refuse(GFX_MODEL_WHY_COLOURS);
+                    } else if (md->bone[k] < 0) {
+                        if (si == md->numcolsegs) {
+                            md->colsegs[md->numcolsegs++] = colseg;
+                        }
+                        md->bone[k] = (int16_t)bone;
+                        md->colref[k] = (uint32_t)colseg << 24 | entry;
+                        md->maxbone = std::max(md->maxbone, bone);
+                        taught.push_back(k);
+                    } else if (md->bone[k] != bone || md->colref[k] != ((uint32_t)colseg << 24 | entry)) {
+                        // loaded another way by another run
+                        refuse(GFX_MODEL_WHY_SLOTS);
+                    }
+                }
+
+                slots[dest + i] = k;
+                own[dest + i] = true;
+                r.loaded |= 1u << (dest + i);
+            }
+
+            r.numverts += (uint32_t)count;
+            continue;
+        }
+
+        if (op == (uint8_t)G_TRI1) {
+            tri(((w1 >> 16) & 0xff) / 10, ((w1 >> 8) & 0xff) / 10, (w1 & 0xff) / 10);
+            continue;
+        }
+
+        if (op == (uint8_t)G_TRI4) {
+            for (int k = 0; k < 4; k++) {
+                const uint32_t x = (w1 >> (k * 8)) & 0xf;
+                const uint32_t y = (w1 >> (k * 8 + 4)) & 0xf;
+                const uint32_t z = (c->words.w0 >> (k * 4)) & 0xf;
+
+                if (x || y || z) {
+                    tri(x, y, z);
+                }
+            }
+            continue;
+        }
+
+        break;
+    }
+
+    r.end = c;
+
+    for (const Gfx* w = cmd; w < r.end; w++) {
+        r.words.push_back(w->words.w0);
+        r.words.push_back(w->words.w1);
+    }
+
+    for (int i = 0; i < 16; i++) {
+        if (r.loaded & (1u << i)) {
+            r.slotout[i] = slots[i];
+        }
+    }
+
+    if (r.end == cmd) {
+        refuse(GFX_MODEL_WHY_UNREADABLE);
+    }
+
+    gfx_model_teach(taught);
+
+    return r;
+}
+
+// The run's commands are still the ones it was read from
+static inline bool gfx_model_same_words(const GfxModelRun& r, const Gfx* cmd) {
+    const size_t num = r.words.size() / 2;
+
+    for (size_t i = 0; i < num; i++) {
+        if (cmd[i].words.w0 != r.words[i * 2] || cmd[i].words.w1 != r.words[i * 2 + 1]) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+/*
+ * The model's matrices as a palette (GFXMESH_PALETTE_FLOATS an entry), read
+ * from segment 3 as it stands: once a frame for each model, as far as the
+ * node's highest bone, and read again further for a node with a higher one.
+ * False when one is not affine, which the palette cannot hold.
+ */
+static bool gfx_model_palette(const float** pal, uint32_t* count) {
+    const GfxModelData* md = mesh_entry->model.get();
+    const uintptr_t base = segmentPointers[3];
+    const uint32_t need = (uint32_t)(md->maxbone + 1);
+
+    if (!base || md->maxbone < 0 || need > GFX_MESH_PALETTE_MAX) {
+        return false;
+    }
+
+    if (base != model_palette_base || !model_palette_last) {
+        model_palette_last = &model_palettes[base];
+        model_palette_base = base;
+    }
+
+    GfxModelPalette& p = *model_palette_last;
+
+    if (p.pal && p.count >= need) {
+        *pal = p.pal;
+        *count = p.count;
+        return true;
+    }
+
+    // a fresh array: draws already handed the shorter one keep it
+    float* out = (float*)gfx_room_alloc(sizeof(float) * GFXMESH_PALETTE_FLOATS * need);
+
+    for (uint32_t b = 0; b < need; b++) {
+        float m[4][4];
+        float* e = &out[b * GFXMESH_PALETTE_FLOATS];
+
+        gfx_mtx_read((const int32_t*)(base + (uintptr_t)b * GFX_MODEL_MTX_BYTES), m);
+
+        if (m[0][3] != 0.0f || m[1][3] != 0.0f || m[2][3] != 0.0f || m[3][3] != 1.0f) {
+            p.pal = NULL;
+            p.count = 0;
+            return false;
+        }
+
+        for (int j = 0; j < 3; j++) {
+            e[j * 4 + 0] = m[0][j];
+            e[j * 4 + 1] = m[1][j];
+            e[j * 4 + 2] = m[2][j];
+            e[j * 4 + 3] = m[3][j];
+        }
+    }
+
+    p.pal = out;
+    p.count = need;
+    *pal = out;
+    *count = need;
+    return true;
+}
+
+// This frame's colours for the node's draws, one per vertex, gathered from
+// the segments as they stand
+static const uint8_t* gfx_model_colours(void) {
+    GfxModelData* md = mesh_entry->model.get();
+    GfxModelColours key;
+
+    if (md->colframe != gfx_mesh_frame) {
+        md->colframe = gfx_mesh_frame;
+        md->cols.clear();
+    }
+
+    memset(&key, 0, sizeof(key));
+
+    for (int i = 0; i < md->numcolsegs; i++) {
+        key.bases[i] = segmentPointers[md->colsegs[i]];
+    }
+
+    for (const GfxModelColours& c : md->cols) {
+        if (memcmp(c.bases, key.bases, sizeof(key.bases)) == 0) {
+            return c.colours;
+        }
+    }
+
+    const int32_t n = model_mesh.numvertices;
+    struct NormalColor* g = (struct NormalColor*)gfx_room_alloc(sizeof(struct NormalColor) * n);
+    const struct NormalColor* bases[16] = {};
+
+    for (int i = 0; i < md->numcolsegs; i++) {
+        bases[md->colsegs[i]] = (const struct NormalColor*)key.bases[i];
+    }
+
+    for (int32_t k = 0; k < n; k++) {
+        const uint32_t cref = md->colref[k];
+        const struct NormalColor* t = cref != UINT32_MAX ? bases[cref >> 24] : NULL;
+
+        if (t) {
+            g[k] = t[cref & 0xffffff];
+        } else {
+            memset(&g[k], 0, sizeof(g[k]));
+        }
+    }
+
+    key.colours = (const uint8_t*)g;
+    md->cols.push_back(key);
+
+    return key.colours;
+}
+
+// A run's triangles on the CPU, each corner loaded on its own
+static void gfx_model_draw_cpu(const std::vector<uint32_t>& idx) {
+    for (size_t t = 0; t + 2 < idx.size(); t += 3) {
+        struct LoadedVertex v[3];
+
+        for (int k = 0; k < 3; k++) {
+            gfx_model_load_one(&v[k], (int32_t)idx[t + k]);
+        }
+
+        gfx_sp_tri_emit(&v[0], &v[1], &v[2], false);
+    }
+}
+
+// The run's triangles as one draw
+static void gfx_model_draw(const GfxModelRun& r) {
+    const uint32_t numtris = (uint32_t)r.idx.size() / 3;
+    const float* pal = NULL;
+    uint32_t numpal = 0;
+
+    if (numtris == 0) {
+        return;
+    }
+
+    if ((rsp.geometry_mode & G_CULL_BOTH) == G_CULL_BOTH && gfx_mesh_cull() != 0) {
+        g_GfxTrisCulled += numtris;
+        return;
+    }
+
+    if (!gfx_model_palette(&pal, &numpal)) {
+        g_GfxModelRefused += numtris;
+        gfx_model_draw_cpu(r.idx);
+        return;
+    }
+
+    gfx_emit_prepare();
+    gfx_flush();
+
+    float params[4 * GFX_MESH_PARAMS];
+    gfx_mesh_params(params, true);
+
+    // The palette takes each vertex to the eye, so the transform after it is
+    // the projection alone, and the modelview the eye's own
+    memcpy(params, rsp.P_matrix, sizeof(float) * 16);
+    memset(&params[164], 0, sizeof(float) * 16);
+    params[164] = params[169] = params[174] = params[179] = 1.0f;
+
+    struct GfxMeshDraw d;
+    d.prg = rendering_state.shader_program;
+    d.mesh = mesh_entry->backend;
+    d.colours = gfx_model_colours();
+    d.numcolours = (uint32_t)model_mesh.numvertices;
+    d.indices = r.first == UINT32_MAX ? r.idx.data() : NULL;
+    d.numindices = (uint32_t)r.idx.size();
+    d.first_index = r.first == UINT32_MAX ? 0 : r.first;
+    d.params = params;
+    d.palette = pal;
+    d.numpalette = numpal;
+    d.st = NULL;
+    d.cull = gfx_mesh_cull();
+
+    if (d.mesh && d.prg && gfx_rapi->mesh_draw(&d)) {
+        g_GfxNumDrawCalls++;
+        g_GfxNumTris += numtris;
+        g_GfxModelDraws++;
+        g_GfxModelTris += numtris;
+    } else {
+        g_GfxModelRefused += numtris;
+        gfx_model_draw_cpu(r.idx);
+    }
+}
+
+/*
+ * The node's run that starts at cmd, drawn whole from what was kept of it, or
+ * NULL when it is to be read as any list is this time (see above).
+ */
+static const Gfx* gfx_model_kept_run(const Gfx* cmd) {
+    GfxModelData* md = mesh_entry->model.get();
+    auto it = md->runs.find(cmd);
+
+    // rewritten in place: read again (what it kept stays in the copy, unused)
+    if (it != md->runs.end() && !gfx_model_same_words(it->second, cmd)) {
+        for (int i = 0; i < 16; i++) {
+            if (mesh_slot_mrun[i] == &it->second) {
+                mesh_slot_mrun[i] = NULL;
+            }
+        }
+        md->runs.erase(it);
+        it = md->runs.end();
+    }
+
+    if (it == md->runs.end()) {
+        GfxModelRun r = gfx_model_read_run(cmd);
+
+        if (r.ok && !r.idx.empty() && gfx_rapi->mesh_add_indices) {
+            r.first = gfx_rapi->mesh_add_indices(mesh_entry->backend, r.idx.data(), (uint32_t)r.idx.size());
+        }
+
+        it = md->runs.emplace(cmd, std::move(r)).first;
+    }
+
+    GfxModelRun& r = it->second;
+    int why = -1;
+
+    // a command that only ends a run (a G_MTX no model follows)
+    if (r.end == cmd) {
+        return NULL;
+    }
+
+    if (!r.ok) {
+        why = r.why;
+    } else if (r.forced_cpu) {
+        why = GFX_MODEL_WHY_SLOTS;
+    } else if (!gfx_model_gpu_state()) {
+        why = (rsp.geometry_mode & G_LIGHTING) ? GFX_MODEL_WHY_LIT : GFX_MODEL_WHY_STATE;
+    } else if (r.vtxsegno && segmentPointers[r.vtxsegno] != r.vtxseg) {
+        why = GFX_MODEL_WHY_UNREADABLE;
+    } else if (r.inbone >= 0 && model_bone != r.inbone) {
+        why = GFX_MODEL_WHY_MATRIX;
+    } else if (r.incol && (!model_col_ok || model_colseg != r.incolseg || model_colofs != r.incolofs)) {
+        why = GFX_MODEL_WHY_COLOURS;
+    }
+
+    int32_t sig = -1;
+
+    if (why < 0 && (r.loaded || r.incoming)) {
+        GfxRoomVState cur;
+        gfx_model_vstate(&cur);
+
+        if (!room_sigs.empty() && memcmp(&room_sigs.back(), &cur, sizeof(cur)) == 0) {
+            sig = (int32_t)room_sigs.size() - 1;
+        } else {
+            room_sigs.push_back(cur);
+            sig = (int32_t)room_sigs.size() - 1;
+        }
+
+        for (int i = 0; why < 0 && i < 16; i++) {
+            if (r.incoming & (1u << i)) {
+                const int32_t s = mesh_slot_sig[i];
+
+                if (mesh_slot[i] != r.slotin[i] || s < 0 ||
+                    (s != sig && memcmp(&room_sigs[s], &cur, sizeof(cur)) != 0)) {
+                    why = GFX_MODEL_WHY_SLOTS;
+                }
+            }
+        }
+    }
+
+    if (why >= 0) {
+        g_GfxModelWhy[why]++;
+        mesh_skip_until = r.end;
+        return NULL;
+    }
+
+    // What the run leaves behind it, as reading it would have
+    if (r.outcol) {
+        rsp.vertex_colors = (const struct NormalColor*)(segmentPointers[r.outcolseg] + r.outcolofs);
+        model_col_ok = true;
+        model_colseg = r.outcolseg;
+        model_colofs = r.outcolofs;
+    }
+
+    if (r.outbone >= 0) {
+        gfx_sp_matrix((uint8_t)((r.outmtx[0] >> 16) & 0xff), (const int32_t*)seg_addr(r.outmtx[1]));
+        model_bone = r.outbone;
+    }
+
+    if (r.loaded) {
+        mesh_slot_top = std::max(mesh_slot_top, (size_t)16);
+    }
+
+    for (int i = 0; i < 16; i++) {
+        if (r.loaded & (1u << i)) {
+            mesh_slot[i] = r.slotout[i];
+            mesh_slot_sig[i] = sig;
+            mesh_slot_mrun[i] = &r;
+        }
+    }
+
+    gfx_gpu_only_slots |= r.loaded;
+    g_GfxNumVerts += r.numverts;
+    gfx_vertices_lost = false;
+
+    gfx_model_draw(r);
+
+    return r.end - 1;
+}
+
+/*
+ * The mesh vertex shader's functions and main() (G_MESH_EXT), shared by both
+ * backends, which put their own declarations in front: the inputs aPos, aST,
+ * aBones, aWeights, aCol, aNormal and aSTd (GfxMeshVertex, the colour stream
+ * and the s and t stream of a room dyntex animates), the parameters
+ * uP[GFX_MESH_PARAMS] and the palette uPal[3 * GFX_MESH_PALETTE_MAX], and the
+ * outputs the program's fragment shader reads. The vertex is posed by the
+ * palette, put through the RSP's transform, and every output is worked out
+ * from the draw's parameters in the order gfx_sp_load_vertex(),
+ * gfx_light_vertex() and gfx_emit_vertex() work them out on the CPU.
+ * depth_clamp_hack squeezes z as a renderer without depth clamping does;
+ * vulkan_depth takes OpenGL's -1..1 depth into Vulkan's 0..1 last.
+ */
+static std::string gfx_mesh_strf(const char* fmt, ...) {
+    char buf[512];
+    va_list ap;
+
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+
+    return buf;
+}
+
+std::string gfx_mesh_vs_main(const struct CCFeatures& cc, bool depth_clamp_hack, bool vulkan_depth) {
+    std::string s;
+
+    s += "vec3 skinBy(uint b, vec4 q) {\n";
+    s += "    int i = int(b) * 3;\n";
+    s += "    return vec3(dot(uPal[i], q), dot(uPal[i + 1], q), dot(uPal[i + 2], q));\n";
+    s += "}\n";
+    // a value put into a short, as gfx_sp_vertex()'s U and V are
+    s += "float toShort(int x) { return float(((x + 32768) & 65535) - 32768); }\n";
+    // gfx_texgen_eye_normal(): the half-way vector between the straight-on
+    // ray and the reflection of the one the vertex is seen along
+    s += "vec3 eyeNormal(vec3 p, vec3 n) {\n";
+    s += "    vec3 ne = n.x * uP[41].xyz + n.y * uP[42].xyz + n.z * uP[43].xyz;\n";
+    s += "    vec3 pe = p.x * uP[41].xyz + p.y * uP[42].xyz + p.z * uP[43].xyz + uP[44].xyz;\n";
+    s += "    float nl = length(ne);\n";
+    s += "    float pl = length(pe);\n";
+    s += "    if (nl < 1e-6 || pl < 1e-6) return n;\n";
+    s += "    float d = dot(ne, pe) / (nl * pl);\n";
+    s += "    vec3 h = pe / pl - 2.0 * d * ne / nl;\n";
+    s += "    h.z += 1.0;\n";
+    s += "    vec3 m = vec3(dot(h, uP[41].xyz), dot(h, uP[42].xyz), dot(h, uP[43].xyz));\n";
+    s += "    float ml = length(m);\n";
+    s += "    if (ml < 1e-6) return n;\n";
+    s += "    return m * 127.0 / ml;\n";
+    s += "}\n";
+    // gfx_light_vertex()'s texture coordinates from the normal
+    s += "vec2 texgen(vec3 p, vec3 n) {\n";
+    s += "    bool eye = uP[26].x != 0.0;\n";
+    s += "    bool turn = uP[26].y != 0.0;\n";
+    s += "    float dx = 0.0;\n";
+    s += "    float dy = 0.0;\n";
+    s += "    if (eye) n = eyeNormal(p, n);\n";
+    s += "    if (uP[26].z != 0.0 && eye && turn) {\n";
+    s += "        vec3 lx = uP[37].xyz;\n";
+    s += "        vec3 ly = uP[38].xyz;\n";
+    s += "        vec3 lz = vec3(lx.y * ly.z - lx.z * ly.y, lx.z * ly.x - lx.x * ly.z, lx.x * ly.y - lx.y * ly.x);\n";
+    s += "        vec3 rx = lx * uP[40].x + lz * uP[40].y;\n";
+    s += "        vec3 rz = lz * uP[40].x - lx * uP[40].y;\n";
+    s += "        vec3 ry = ly * uP[40].z + rz * uP[40].w;\n";
+    s += "        dx = (n.x * rx.x + n.y * rx.y + n.z * rx.z) / 127.0;\n";
+    s += "        dy = (n.x * ry.x + n.y * ry.y + n.z * ry.z) / 127.0;\n";
+    s += "    } else if (uP[26].z != 0.0) {\n";
+    s += "        dx = (n.x * uP[37].x + n.y * uP[37].y + n.z * uP[37].z) / 127.0;\n";
+    s += "        dy = (n.x * uP[38].x + n.y * uP[38].y + n.z * uP[38].z) / 127.0;\n";
+    s += "    } else {\n";
+    s += "        vec3 dir = n / 127.0;\n";
+    s += "        vec3 t = vec3(dot(dir, uP[41].xyz), dot(dir, uP[42].xyz), dot(dir, uP[43].xyz));\n";
+    s += "        t /= length(t);\n";
+    s += "        dx = t.x;\n";
+    s += "        dy = t.y;\n";
+    s += "    }\n";
+    s += "    dx = clamp(dx, -1.0, 1.0);\n";
+    s += "    dy = clamp(dy, -1.0, 1.0);\n";
+    s += "    if (uP[25].w != 0.0) {\n";
+    s += "        dx = acos(-dx) / 4.0;\n";
+    s += "        dy = acos(-dy) / 4.0;\n";
+    s += "    } else {\n";
+    s += "        dx = (dx + 1.0) / 4.0;\n";
+    s += "        dy = (dy + 1.0) / 4.0;\n";
+    s += "    }\n";
+    s += "    if (eye && !turn) {\n";
+    s += "        dx += uP[39].x / 2.0;\n";
+    s += "        dy += uP[39].y / 2.0;\n";
+    s += "    }\n";
+    s += "    return vec2(float(int(dx * uP[12].x)), float(int(dy * uP[12].y)));\n";
+    s += "}\n";
+
+    s += "void main() {\n";
+    s += "    vec3 p = aPos;\n";
+    s += "    if (uP[12].z != 0.0) {\n";
+    s += "        vec4 q = vec4(aPos, 1.0);\n";
+    s += "        p = skinBy(aBones.x, q) * aWeights.x;\n";
+    s += "        if (aBones.w > 1u) p += skinBy(aBones.y, q) * aWeights.y;\n";
+    s += "        if (aBones.w > 2u) p += skinBy(aBones.z, q) * aWeights.z;\n";
+    s += "    }\n";
+    s += "    vec4 pos = p.x * uP[0] + p.y * uP[1] + p.z * uP[2] + uP[3];\n";
+    s += "    if (uP[4].w != 0.0) pos.x = (uP[4].x * pos.w + pos.x) * uP[4].y / uP[4].z;\n";
+    s += "    pos.xy += uP[5].xy * pos.w;\n";
+    // Past the far plane at all three corners is thrown out on the CPU; with
+    // depth clamping on, the GPU would draw it at the far plane instead. A
+    // corner past it is far outside the clip distance's half-space and one
+    // before it far inside, so only a triangle with all three past it loses
+    // more than a sliver at the corner.
+    s += "    gl_ClipDistance[0] = pos.z > pos.w ? -1.0 : 1.0e6;\n";
+    // A room's colour is its entry in the table the draw hands over whole,
+    // where it fits (GFXMESH_ROOM_PALETTE), and the vertex says which
+    s += "    uvec4 col = aCol;\n";
+    s += "    if (uP[12].w != 0.0) col = uvec4(uPal[int(aBones.x) | (int(aBones.y) << 8) | (int(aBones.z) << 16)]);\n";
+    s += "    vec4 shade = vec4(col) / 255.0;\n";
+    s += "    float lodf = floor((0.7 + clamp(pos.w / 1024.0, 0.0, 1.0) * 0.3) * 255.0) / 255.0;\n";
+    s += "    vec4 outPos = vec4(pos.x, pos.y * uP[5].z, uP[5].w != 0.0 ? (pos.z + pos.w) / 2.0 : pos.z, pos.w);\n";
+    // A room dyntex animates: s and t as this frame has them, from the draw
+    s += "    ivec2 st = uP[27].z != 0.0 ? aSTd : aST;\n";
+    s += "    vec2 uv = vec2(toShort((st.x * int(uP[12].x)) >> 16), toShort((st.y * int(uP[12].y)) >> 16));\n";
+    // The normal an RSP light reads: the colour's bytes as signed, or a
+    // skinned mesh's own normal posed, 127 long and rounded as a byte is
+    s += "    vec3 nrm = vec3(col.rgb);\n";
+    s += "    nrm = mix(nrm, nrm - 256.0, step(128.0, nrm));\n";
+    s += "    if (uP[27].y != 0.0) {\n";
+    s += "        vec3 n = vec3(dot(uPal[int(aBones.x) * 3].xyz, aNormal), dot(uPal[int(aBones.x) * 3 + 1].xyz, aNormal), dot(uPal[int(aBones.x) * 3 + 2].xyz, aNormal)) * aWeights.x;\n";
+    s += "        if (aBones.w > 1u) n += vec3(dot(uPal[int(aBones.y) * 3].xyz, aNormal), dot(uPal[int(aBones.y) * 3 + 1].xyz, aNormal), dot(uPal[int(aBones.y) * 3 + 2].xyz, aNormal)) * aWeights.y;\n";
+    s += "        if (aBones.w > 2u) n += vec3(dot(uPal[int(aBones.z) * 3].xyz, aNormal), dot(uPal[int(aBones.z) * 3 + 1].xyz, aNormal), dot(uPal[int(aBones.z) * 3 + 2].xyz, aNormal)) * aWeights.z;\n";
+    s += "        float nl = length(n);\n";
+    s += "        if (nl > 1e-6) n /= nl;\n";
+    s += "        n *= 127.0;\n";
+    s += "        nrm = trunc(n + sign(n) * 0.5);\n";
+    s += "    }\n";
+    // G_LIGHTING: gfx_light_vertex()
+    s += "    if (uP[25].y != 0.0) {\n";
+    s += "        vec3 c = uP[28].rgb;\n";
+    s += "        for (int i = 0; i < 4; i++) {\n";
+    s += "            if (float(i) >= uP[25].x) break;\n";
+    s += "            float k = 0.0;\n";
+    s += "            k += nrm.x * uP[29 + i].x;\n";
+    s += "            k += nrm.y * uP[29 + i].y;\n";
+    s += "            k += nrm.z * uP[29 + i].z;\n";
+    s += "            k /= 127.0;\n";
+    s += "            if (k > 0.0) c = floor(c + k * uP[33 + i].rgb);\n";
+    s += "        }\n";
+    s += "        shade.rgb = min(c, 255.0) / 255.0;\n";
+    s += "        if (uP[27].x != 0.0) shade.a = 1.0;\n";
+    s += "        if (uP[25].z != 0.0) uv = texgen(p, nrm);\n";
+    s += "    }\n";
+
+    for (int i = 0; i < 2; i++) {
+        if (cc.used_textures[i]) {
+            s += gfx_mesh_strf("    vTexCoord%d = uv * uP[%d].xy + uP[%d].zw;\n", i, 8 + i, 8 + i);
+            for (int j = 0; j < 2; j++) {
+                if (cc.clamp[i][j]) {
+                    s += gfx_mesh_strf("    vTexClamp%s%d = uP[10].%c;\n", j == 0 ? "S" : "T", i, "xyzw"[i * 2 + j]);
+                }
+            }
+        }
+    }
+    if (cc.opt_fog) {
+        s += "    vFog = vec4(uP[7].rgb, uP[6].x);\n";
+        s += "    vFogOffset = uP[6].y;\n";
+        s += "    if (uP[6].z != 0.0) {\n";
+        s += "        vFog.a = 0.0;\n";
+        s += "        vFogOffset = clamp(pos.z / pos.w * uP[6].x + uP[6].y, 0.0, 255.0) * pos.w;\n";
+        s += "    }\n";
+        s += "    vFogZW = outPos.zw;\n";
+    }
+    if (cc.opt_grayscale) {
+        s += "    vGrayscaleColor = uP[11];\n";
+    }
+    if (cc.opt_envmap) {
+        // G_ENVMAP_EXT: the normal and the position through the modelview
+        s += "    vEnvNormal = nrm.x * uP[41].xyz + nrm.y * uP[42].xyz + nrm.z * uP[43].xyz;\n";
+        s += "    vEnvPos = p.x * uP[41].xyz + p.y * uP[42].xyz + p.z * uP[43].xyz + uP[44].xyz;\n";
+    }
+    for (int i = 0; i < cc.num_inputs; i++) {
+        const char comp = "xyzw"[i & 3];
+
+        s += gfx_mesh_strf("    { float k = uP[%d].%c;\n", 21 + i / 4, comp);
+        s += gfx_mesh_strf("      vec3 c = k == 1.0 ? shade.rgb : k == 2.0 ? vec3(shade.a) : k == 3.0 ? vec3(lodf) : uP[%d].rgb;\n", 13 + i);
+        if (cc.opt_alpha) {
+            s += gfx_mesh_strf("      float ka = uP[%d].%c;\n", 23 + i / 4, comp);
+            s += gfx_mesh_strf("      float a = ka == 1.0 ? shade.a : ka == 3.0 ? lodf : uP[%d].a;\n", 13 + i);
+            s += gfx_mesh_strf("      vInput%d = vec4(c, a); }\n", i + 1);
+        } else {
+            s += gfx_mesh_strf("      vInput%d = c; }\n", i + 1);
+        }
+    }
+
+    s += "    gl_Position = outPos;\n";
+    if (depth_clamp_hack) {
+        s += "    gl_Position.z *= 0.3f;\n";
+    }
+    s += "}\n";
+    if (vulkan_depth) {
+        s.insert(s.rfind("}"), "    gl_Position.z = (gl_Position.z + gl_Position.w) * 0.5;\n");
+    }
+
+    return s;
 }
 
 static void gfx_sp_geometry_mode(uint32_t clear, uint32_t set) {
@@ -3554,8 +6895,13 @@ static inline void gfx_update_aspect_mode(void) {
 
 static void gfx_sp_extra_geometry_mode(uint32_t clear, uint32_t set) {
     gfx_mark_state_dirty();
+    const uint32_t was = rsp.extra_geometry_mode;
     rsp.extra_geometry_mode &= ~clear;
     rsp.extra_geometry_mode |= set;
+    if ((was ^ rsp.extra_geometry_mode) & G_TEX_OWN_LODS_EXT) {
+        // a texture bound already went up with the other kind of levels
+        rdp.textures_changed[0] = rdp.textures_changed[1] = true;
+    }
     rsp.aspect_mode = (rsp.extra_geometry_mode & G_ASPECT_MODE_EXT);
     gfx_update_aspect_mode();
 }
@@ -3648,6 +6994,7 @@ static void gfx_sp_moveword(uint8_t index, uint16_t offset, uintptr_t data) {
             break;
         case G_MW_SEGMENT:
             segmentPointers[(offset >> 2) & 0xff] = data;
+            gfx_model_note_segment((offset >> 2) & 0xff);
             break;
     }
 }
@@ -3819,6 +7166,7 @@ static void gfx_dp_load_block(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t
     loaded_texture.raw_tex_metadata = rdp.texture_to_load.raw_tex_metadata;
     loaded_texture.addr = rdp.texture_to_load.addr;
     loaded_texture.glyph = rdp.texture_to_load.glyph;
+    loaded_texture.block_bytes = size_bytes;
 
     rdp.textures_changed[0] = rdp.textures_changed[1] = true;
 }
@@ -3861,6 +7209,7 @@ static void gfx_dp_load_tile(uint8_t tile, uint32_t uls, uint32_t ult, uint32_t 
     loaded_texture.raw_tex_metadata = rdp.texture_to_load.raw_tex_metadata;
     loaded_texture.addr = rdp.texture_to_load.addr + start_offset_bytes;
     loaded_texture.glyph = rdp.texture_to_load.glyph;
+    loaded_texture.block_bytes = 0; // rows out of a wider image: no levels lie after it in memory
 
     rdp.texture_tile[tile].uls = uls;
     rdp.texture_tile[tile].ult = ult;
@@ -4511,7 +7860,6 @@ static struct {
 static int gfx_readable_count;
 static int gfx_readable_next;
 static int gfx_dl_depth;         // gfx_run_dl() nesting: 1 is the frame's own list
-static bool gfx_vertices_lost;   // the last vertex load was refused, and so are its triangles
 static uint32_t gfx_bad_vertex_loads;
 
 // Memory is given back between frames, so what was readable last frame is asked again
@@ -4613,6 +7961,49 @@ struct GfxDlDepth {
     ~GfxDlDepth() { gfx_dl_depth--; }
 };
 
+/**
+ * The way down to the list being run: at each depth, the list (or the branch
+ * target it went on in) and the G_DL that called the next one. Only for the
+ * report below - "Unknown GBI opcode" used to name the command and nothing
+ * else, and twice (20260929-170457, 20260930-124918: the same w0/w1, a float
+ * 376 in w1, both on the Carrington Institute after a Community Packs
+ * install) that was not enough to say whose list it was.
+ */
+#define GFX_DL_TRACK 8
+static const Gfx *gfx_dl_lists[GFX_DL_TRACK];
+static const Gfx *gfx_dl_calls[GFX_DL_TRACK];
+
+static void gfx_unknown_opcode(const Gfx *cmd, const Gfx *list, uint32_t opcode) {
+    char text[2048];
+    int len;
+
+    len = snprintf(text, sizeof(text),
+            "Unknown GBI opcode 0x%02x at %p, %lld into list %p at depth %d%s.\n"
+            "w0 %016llx w1 %016llx\nsegments 4 %p 5 %p 6 %p 14 %p 15 %p\nbefore it:",
+            opcode, (const void *)cmd, (long long)(cmd - list), (const void *)list, gfx_dl_depth,
+            gfx_dl_depth == 1 ? " (the frame's own)" : "",
+            (unsigned long long)cmd->words.w0, (unsigned long long)cmd->words.w1,
+            (void *)segmentPointers[4], (void *)segmentPointers[5], (void *)segmentPointers[6],
+            (void *)segmentPointers[14], (void *)segmentPointers[15]);
+
+    for (int k = 6; k >= 1 && len > 0 && len < (int)sizeof(text); k--) {
+        if (cmd - k >= list) {
+            len += snprintf(text + len, sizeof(text) - len, " %016llx:%016llx",
+                    (unsigned long long)cmd[-k].words.w0, (unsigned long long)cmd[-k].words.w1);
+        }
+    }
+
+    for (int d = 0; d < gfx_dl_depth - 1 && d < GFX_DL_TRACK && len > 0 && len < (int)sizeof(text); d++) {
+        const Gfx *call = gfx_dl_calls[d];
+
+        len += snprintf(text + len, sizeof(text) - len, "\ndepth %d: list %p called it at %p (+%lld)",
+                d + 1, (const void *)gfx_dl_lists[d], (const void *)call,
+                call && gfx_dl_lists[d] ? (long long)(call - gfx_dl_lists[d]) : -1LL);
+    }
+
+    sysFatalError("%s", text);
+}
+
 uintptr_t clearMtx;
 
 static void gfx_run_dl(Gfx* cmd) {
@@ -4625,19 +8016,53 @@ static void gfx_run_dl(Gfx* cmd) {
     Gfx* dListStart = cmd;
     uint64_t ourHash = -1;
 
+    if (gfx_dl_depth <= GFX_DL_TRACK) {
+        gfx_dl_lists[gfx_dl_depth - 1] = cmd;
+    }
+
     for (;;) {
         uint32_t opcode = cmd->words.w0 >> 24;
         // gfx_print_cmd(cmd);
+
+        // A run of a mesh's triangles ends at the first command that is not
+        // part of the geometry, which may change the state it is drawn under
+        if (!mesh_run.empty() && opcode != G_VTX && opcode != G_COL && opcode != (uint8_t)G_TRI1 &&
+            opcode != (uint8_t)G_TRI4 && opcode != G_NOOP && opcode != G_DL && opcode != (uint8_t)G_ENDDL) {
+            gfx_mesh_flush();
+        }
+
+        // A mesh's run drawn whole from what was kept of it
+        if (mesh_entry) {
+            if (cmd == mesh_skip_until) {
+                mesh_skip_until = NULL;
+            }
+
+            if (!mesh_skip_until && mesh_run.empty() &&
+                (opcode == G_COL || opcode == G_VTX || opcode == (uint8_t)G_TRI1 || opcode == (uint8_t)G_TRI4 ||
+                 (mesh_model && opcode == G_MTX))) {
+                const Gfx* last = mesh_model ? gfx_model_kept_run(cmd)
+                                  : mesh_room ? gfx_room_kept_run(cmd)
+                                              : gfx_mesh_kept_run(cmd);
+
+                if (last) {
+                    cmd = (Gfx*)last + 1;
+                    continue;
+                }
+            }
+        }
+
         switch (opcode) {
                 // RSP commands:
             case G_NOOP:
                 break;
             case G_MTX: {
                 gfx_sp_matrix(C0(16, 8), (const int32_t*)seg_addr(cmd->words.w1));
+                gfx_model_note_mtx(cmd);
                 break;
             }
             case (uint8_t)G_POPMTX:
                 gfx_sp_pop_matrix(1);
+                model_bone = -1;
                 break;
             case G_MOVEMEM:
                 gfx_sp_movemem(C0(16, 8), 0, seg_addr(cmd->words.w1));
@@ -4652,6 +8077,12 @@ static void gfx_run_dl(Gfx* cmd) {
                 const Vtx* src = (const Vtx*)seg_addr(cmd->words.w1);
                 const size_t count = C0(0, 16) / sizeof(Vtx);
 
+                // a mesh's own vertices, which the mesh vouches for
+                if (mesh_cur && gfx_mesh_load(src, count, C0(16, 4))) {
+                    gfx_vertices_lost = false;
+                    break;
+                }
+
                 if (count && !gfx_readable(src, count * sizeof(Vtx))) {
                     gfx_refuse_vertex_load(cmd, dListStart, src, count);
                     gfx_vertices_lost = true;
@@ -4660,6 +8091,10 @@ static void gfx_run_dl(Gfx* cmd) {
 
                 gfx_vertices_lost = false;
                 gfx_sp_vertex(count, C0(16, 4), src);
+
+                if (mesh_cur) {
+                    gfx_mesh_cpu_slots(C0(16, 4), count);
+                }
                 break;
             }
             case G_DL:
@@ -4668,10 +8103,19 @@ static void gfx_run_dl(Gfx* cmd) {
                     Gfx* subGFX = (Gfx*)seg_addr(cmd->words.w1);
 
                     if (subGFX != nullptr) {
+                        if (gfx_dl_depth <= GFX_DL_TRACK) {
+                            gfx_dl_calls[gfx_dl_depth - 1] = cmd;
+                        }
+
                         gfx_run_dl(subGFX);
                     }
                 } else {
                     cmd = (Gfx*)seg_addr(cmd->words.w1);
+
+                    if (gfx_dl_depth <= GFX_DL_TRACK) {
+                        gfx_dl_lists[gfx_dl_depth - 1] = cmd;
+                    }
+
                     --cmd; // increase after break
                 }
                 break;
@@ -4706,6 +8150,7 @@ static void gfx_run_dl(Gfx* cmd) {
                 break;
             case G_COL:
                 gfx_sp_set_vertex_colors(C0(0, 16) / 4, (NormalColor *)seg_addr(cmd->words.w1));
+                gfx_model_note_col(cmd->words.w1);
                 break;
 
             // RDP Commands:
@@ -4945,13 +8390,20 @@ static void gfx_run_dl(Gfx* cmd) {
                 gfx_flush_for(GFX_FLUSH_OTHER);
                 gfx_rapi->clear_framebuffer(false, true);
                 break;
+            case G_MESH_EXT:
+                if (cmd->words.w0 & G_MESH_MODEL_EXT) {
+                    gfx_model_begin((const Vtx*)cmd->words.w1, C0(0, 16));
+                } else {
+                    gfx_mesh_begin((const struct gfxmeshdraw*)cmd->words.w1);
+                }
+                break;
             case G_RDPPIPESYNC:
             case G_RDPFULLSYNC:
             case G_RDPLOADSYNC:
             case G_RDPTILESYNC:
                 break;
             default:
-                sysFatalError("Unknown GBI opcode 0x%02x at %p.\nw0 %08x\nw1 %08x", opcode, cmd, cmd->words.w0, cmd->words.w1);
+                gfx_unknown_opcode(cmd, gfx_dl_depth <= GFX_DL_TRACK ? gfx_dl_lists[gfx_dl_depth - 1] : dListStart, opcode);
                 break;
         }
         ++cmd;
@@ -5052,6 +8504,23 @@ extern "C" void gfx_start_frame(void) {
             sysLogPrintf(LOG_NOTE,
                     "gfx:   tris clipped %u, culled %u, drawn %u",
                     g_GfxTrisClipped, g_GfxTrisCulled, g_GfxNumTris);
+            if (g_GfxRoomDraws || g_GfxRoomRefused || g_GfxRoomCpuTris || g_GfxRoomSealedTris) {
+                sysLogPrintf(LOG_NOTE, "gfx:   gpu rooms: %u draws, %u tris (%u dyntex, %u tris refused to the cpu); cpu %u tris, %u sealed",
+                        g_GfxRoomDraws, g_GfxRoomTris, g_GfxRoomDyntexTris, g_GfxRoomRefused, g_GfxRoomCpuTris,
+                        g_GfxRoomSealedTris);
+            }
+            if (g_GfxMeshDraws || g_GfxMeshRefused) {
+                sysLogPrintf(LOG_NOTE, "gfx:   gpu meshes: %u draws, %u tris (%u tris refused to the cpu)",
+                        g_GfxMeshDraws, g_GfxMeshTris, g_GfxMeshRefused);
+            }
+            if (g_GfxModelDraws || g_GfxModelRefused || g_GfxModelCpuTris) {
+                sysLogPrintf(LOG_NOTE, "gfx:   gpu models: %u draws, %u tris (%u tris refused to the cpu); cpu %u tris; "
+                        "runs to the cpu: %u new, %u unreadable, %u lit, %u state, %u matrix, %u colours, %u slots; "
+                        "%u stale",
+                        g_GfxModelDraws, g_GfxModelTris, g_GfxModelRefused, g_GfxModelCpuTris, g_GfxModelWhy[0],
+                        g_GfxModelWhy[1], g_GfxModelWhy[2], g_GfxModelWhy[3], g_GfxModelWhy[4], g_GfxModelWhy[5],
+                        g_GfxModelWhy[6], g_GfxStaleSlotTris);
+            }
             sysLogPrintf(LOG_NOTE,
                     "gfx:   tex uploads %u, evictions %u, cache %u/%u (peak %u, grew %u times, %u evicted in all, %u MB)",
                     g_GfxNumTexUploads,
@@ -5085,6 +8554,11 @@ extern "C" void gfx_start_frame(void) {
     g_GfxNumTris = 0;
     g_GfxNumVerts = 0;
     g_GfxTrisClipped = g_GfxTrisCulled = 0;
+    g_GfxMeshDraws = g_GfxMeshTris = g_GfxMeshRefused = 0;
+    g_GfxModelDraws = g_GfxModelTris = g_GfxModelRefused = g_GfxModelCpuTris = 0;
+    memset(g_GfxModelWhy, 0, sizeof(g_GfxModelWhy));
+    g_GfxStaleSlotTris = 0;
+    g_GfxRoomDraws = g_GfxRoomTris = g_GfxRoomDyntexTris = g_GfxRoomRefused = g_GfxRoomCpuTris = g_GfxRoomSealedTris = 0;
     memset(g_GfxFlushReasons, 0, sizeof(g_GfxFlushReasons));
     gfx_frame_textures.clear();
     g_GfxNumDistinctTextures = 0;
@@ -5205,7 +8679,10 @@ extern "C" void gfx_run(Gfx* commands) {
     rendering_state.scissor = {};
     gfx_mark_state_dirty();
     gfx_readable_reset();
+    gfx_mesh_start_frame();
     gfx_run_dl(commands);
+    gfx_mesh_flush();
+    mesh_cur = NULL;
     gfx_flush_for(GFX_FLUSH_OTHER);
     gfxFramebuffer = 0;
 

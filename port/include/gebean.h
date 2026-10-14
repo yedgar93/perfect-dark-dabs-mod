@@ -22,7 +22,7 @@ struct modelnode;
  *
  * GoldenEye X keeps GoldenEye's N64 models under Perfect Dark's file names, so
  * a model is paired with Bean's by a table made offline (gebeantable.h, from
- * .xbla-work/ge-bean/gen_beantable.py): the file's name, and what its list
+ * tools/geconvert/fit/gen_beantable.py): the file's name, and what its list
  * nodes and vertices add up to, so a different mod's file of the same name is
  * left alone. What the pairing gives back is a mesh in 4J's own layout, which
  * xblamesh.c draws like one of the Perfect Dark release's: Bean's vertices
@@ -51,7 +51,7 @@ struct modelnode;
  * g_MpBodies[].bodynum, an s16 - so it is the one that moves up.
  */
 #define GEROM_BODY_FIRST  152
-#define GEROM_BODY_ROWS   24    // GEROM_MAX_ROWS: every row a mission may take
+#define GEROM_BODY_ROWS   24    // every body row a mission may take (gexplus.c GEROM_MAX_ROWS adds the heads)
 #define GEROM_BODY_LAST   (GEROM_BODY_FIRST + GEROM_BODY_ROWS - 1)
 // 4J's Agent 4, whom the release adds and the ROM never had (xblaagent4.c):
 // its head's row and its body's, between the mission's rows and the pool
@@ -81,6 +81,13 @@ const char *gebeanRowName(s32 row);
  * GoldenEye X model is GoldenEye's N64 one already and draws itself.
  */
 s32 gebeanRowIsPool(s32 row);
+
+/**
+ * The file the casing a gun ejects is loaded from: for one of GoldenEye's guns,
+ * an alias of the casing (bondgun.c's g_CartFileNums[casing]) the release's
+ * own spent cartridge is drawn on in the HD look; else `stock`.
+ */
+u16 gebeanCasingFile(s32 weaponnum, s32 casing, u16 stock);
 s32 gebeanRowIsFemale(s32 row);
 
 /**
@@ -124,6 +131,7 @@ s32 gebeanRowKeepsHood(s32 bodyrow, s32 headrow);
  * no muzzle node at all.
  */
 s32 gebeanFirstPersonMuzzleOffset(s32 weaponnum, s32 *outpart, f32 *out);
+s32 gebeanFirstPersonFlashCards(s32 weaponnum, f32 *flash, f32 *star);
 
 /**
  * How far to move a GoldenEye gun a character holds, in the gun's own space,
@@ -313,6 +321,8 @@ struct gebeanlevelvtx {
 	f32 nrm[3]; // the file's own, zero where it has none
 	u8 blend; // its draw is in the release's blended pass (the same on all three)
 	u8 plain; // its draw has no UV and no picture of its own (gebeanLevelTriangles())
+	u8 alphatest; // its draw's alpha test is on (greater than alpharef, of picture times vertex alpha)
+	u8 alpharef;
 };
 
 struct gebeanlevel *gebeanLevelOpen(const char *name);
@@ -439,6 +449,8 @@ u8 *gebeanLevelDecode(struct gebeanlevel *level, s32 tex, s32 *outWidth, s32 *ou
 const char *gebeanLevelTextureName(struct gebeanlevel *level, s32 tex);
 /** Whether a level's picture is drawn by its water buffers (stride 36), once gebeanLevelTriangles() has walked it. */
 s32 gebeanLevelTextureIsWater(struct gebeanlevel *level, s32 tex);
+/** How the file scrolls a level's picture, in repeats a second; 0 when it does not. */
+s32 gebeanLevelTextureScroll(struct gebeanlevel *level, s32 tex, f32 *su, f32 *sv);
 const void *gebeanLevelTexture(struct gebeanlevel *level, s32 tex, u8 *alpha, u8 *soft);
 /** The level file's bytes as read from disk, for keying the HD level cache (gebeanstage.c). */
 const u8 *gebeanLevelFileBytes(const struct gebeanlevel *level, u32 *len);
@@ -452,6 +464,8 @@ s32 gebeanGetCacheDir(char *dst, u32 dstLen);
 #define GEBEAN_OPENRIM_JAW -30.0f
 
 /** The pictures a built mesh's material words index (XBLAMESH_MAT_TABLE). */
+#define GEBEAN_MAXHUBS 4
+
 struct gebeanmats {
 	u16 fileid;  // in: the model file the mesh is built for
 	s32 num;
@@ -485,6 +499,10 @@ struct gebeanmats {
 	// body but the one it was made on; -1 for none
 	s8 neck[64];
 	u8 head;  // the mesh is a head's
+	// Groups drawn both sides though the mesh culls its back faces: a
+	// first-person gun's flash cards (gebean.c's fpBuildCards()), which the
+	// release draws with no culling at all
+	u64 twosided;
 	// A material the release adds a reflection over (gebean.c's
 	// beanReflectPicture()): its sphere map, GEBEAN_ENV_CELL square RGBA,
 	// malloc'd and the caller's to free, and how much of it, out of 255. NULL
@@ -536,6 +554,23 @@ struct gebeanmats {
 	// quad, laid on its plane (beanScreenFace()): the programme is drawn over
 	// it as a decal
 	u8 screenrecess;
+	// A rigid prop's list whose own triangles the release's mesh leaves out -
+	// the Cradle helicopter's pilot (gebean.c's beanUncoveredVertices()) -
+	// drawn in GoldenEye's look inside the HD prop (xblaMeshKeptLists()): a
+	// byte per vertex of list node keeplist, 1 for one the release has not
+	// got. malloc'd and the caller's; NULL for none
+	u8 *keepvtx;
+	s32 numkeepvtx;
+	s8 keeplist;
+	// A rigid prop's part the release turns about a hub of its own rather
+	// than GoldenEye's node point (the same helicopter's rotors): the matrix
+	// it is drawn under, the matrix over it, and the hub less the node's
+	// point in that one's space. xblamesh.c moves the part's matrix by it as
+	// the one over it turns it (xblaMeshPoseMatrices())
+	s32 numhubs;
+	s8 hubmtx[GEBEAN_MAXHUBS];
+	s8 hubparent[GEBEAN_MAXHUBS];
+	f32 hubshift[GEBEAN_MAXHUBS][3];
 };
 
 /**
@@ -548,6 +583,9 @@ struct gebeanmats {
  */
 u8 *gebeanBuild(s32 row, s32 original, struct modeldef *modeldef, struct modelnode **nodes, s32 numnodes,
 		struct gebeanmats *mats, u64 *outAbsent, u32 *outLen);
+
+/** The guns' models in the hand again, after geguns.c swapped their definitions (gegunsStageSet()). */
+void gebeanGunsStageRefresh(void);
 
 #ifdef __cplusplus
 }

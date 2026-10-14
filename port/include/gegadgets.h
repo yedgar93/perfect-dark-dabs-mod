@@ -13,10 +13,20 @@
 struct model;
 struct modelrenderdata;
 
+/**
+ * Where the watch magnet's charges are kept: Perfect Dark's AMMOTYPE_1C, held
+ * by nothing of its own (bondgun.c gives it ten at most, the magnet's
+ * magazine). The conversion writes GoldenEye's AMMO_WATCH_MAGNET as it.
+ */
+#define GEGADGET_MAGNET_AMMO 0x1c
+
 s32 gegadgetsIsGadget(s32 weaponnum);
 // GoldenEye's ITEM_IDS for the weapon on the mission loaded, 0 for none
 s32 gegadgetsItem(s32 weaponnum);
 void gegadgetsStageLoad(s32 stagenum);
+// a mission's rename of one of the gadgets, as the setup inserts it
+struct textoverride;
+void gegadgetsTextOverride(struct textoverride *override);
 // the trigger pulled with one in the hand
 void gegadgetsFire(s32 weaponnum);
 // the watch magnet's running time and hum, every tick of the current player's gun
@@ -44,5 +54,14 @@ void gegadgetsIntroWeapon(s32 weaponnum);
 
 // Whether this weapon number is GoldenEye's watch laser on this stage
 s32 gegadgetsWatchLaserActive(s32 weaponnum);
+
+// A mission's collectables (menu/geslots.bin): the items a pickup carries that
+// are no gun and no gadget, each on one of Perfect Dark's key cards for the
+// mission. Whether the weapon is one on this stage, and GoldenEye's item it
+// stands for (0 for none)
+s32 gegadgetsIsCollectable(s32 weaponnum);
+s32 gegadgetsCollectableItem(s32 weaponnum);
+// setupCreateProps(), as it empties the text overrides: the collectables' names
+void gegadgetsCreateProps(void);
 
 #endif

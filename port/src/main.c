@@ -26,6 +26,8 @@
 #include "audio.h"
 #include "input.h"
 #include "fs.h"
+#include <string.h>
+#include <strings.h>
 #include "modloader.h"
 #include "modborrow.h"
 #include "romdata.h"
@@ -42,6 +44,7 @@
 #include "mod.h"
 #include "gexplusrom.h"
 #include "system.h"
+#include "statehash.h"
 #include "utils.h"
 #include "gebean.h"
 #include "modenhance.h"
@@ -75,6 +78,8 @@ u8 g_VmShowStats = 0;
 s32 g_TickRateDiv = 1;
 s32 g_FixedStep = 0; // --fixed-step, see frametimeCalculate()
 s32 g_ExitFrame = 0; // --exit-frame N: quit when the level reaches frame N, so a measured run covers the same frames whatever its speed (lvTick)
+s32 g_SkipCutscenes = 0; // --skip-cutscenes: every cutscene skipped as soon as it lets itself be, so a headless mission run reaches play (playerTickCutscene)
+s32 g_AlarmAtFrame = 0; // --alarm-at N: raise the alarm at that level frame, so a headless run exercises what the alarm sets off (lvTick)
 s32 g_ShotFrame = 0; // --screenshot-frame N: take one at that level frame, so two runs can be compared at the same moment (lvTick)
 s32 g_TickExtraSleep = true;
 
@@ -338,13 +343,76 @@ int main(int argc, const char **argv)
 	// --run-stage N: the run's first room is on this stage rather than the
 	// seed's, so one map's landing can be tested without finding a seed
 	g_ModRunFirstStage = sysArgGetInt("--run-stage", -1);
+	// --run-room N: and the first landing is in this room when it has a
+	// waypoint there - one room's landing without finding a seed for it
+	g_ModRunFirstRoom = sysArgGetInt("--run-room", -1);
 	g_FixedStep = sysArgCheck("--fixed-step");
 	g_ExitFrame = sysArgGetInt("--exit-frame", 0);
+	g_StateHashEvery = sysArgGetInt("--state-hash", 0);
 	g_ShotFrame = sysArgGetInt("--screenshot-frame", 0);
+	g_AlarmAtFrame = sysArgGetInt("--alarm-at", 0);
+	g_SkipCutscenes = sysArgCheck("--skip-cutscenes");
 	xblaMeshSetVerbose(sysArgCheck("--xbla-mesh-verbose"));
 	xblaStageSetVerbose(sysArgCheck("--xbla-stage-verbose"));
 
 	g_StageNum = sysArgGetInt("--boot-stage", STAGE_TITLE);
+
+	// --boot-map NAME / --boot-ge-mission N: a mod's map or one of GE Plus's
+	// converted missions, found by name or GoldenEye's mission number, since
+	// the ids the mod loader hands out depend on which mods are installed
+	// (tools/ci/replaytest.sh's GE Plus cases)
+	{
+		const char *mapname = sysArgGetString("--boot-map");
+		const s32 gemission = sysArgGetInt("--boot-ge-mission", -1);
+
+		if (mapname) {
+			s32 found = 0;
+
+			for (s32 i = 1; i <= STAGE_MAX_ID && !found; i++) {
+				const char *name = modloaderGetStageMapName(i);
+
+				if (name && strcmp(name, mapname) == 0 && !modloaderStageIsMission(i)) {
+					found = i;
+				}
+			}
+
+			if (found) {
+				g_StageNum = found;
+			} else {
+				sysLogPrintf(LOG_WARNING, "boot map %s: no such map; the maps are:", mapname);
+
+				for (s32 i = 1; i <= STAGE_MAX_ID; i++) {
+					const char *name = modloaderGetStageMapName(i);
+
+					if (name) {
+						sysLogPrintf(LOG_WARNING, "  0x%02x %s%s", i, name, modloaderStageIsMission(i) ? " (mission)" : "");
+					}
+				}
+			}
+		} else if (gemission >= 0) {
+			// --boot-ge-variant NAME: the mission is the ROM hack's (Goldfinger
+			// 64's), in its mode, as its Perfect Menu row would have chosen it
+			const char *variant = sysArgGetString("--boot-ge-variant");
+
+			for (s32 i = 0; variant && gexPlusRomGetVariant(i); i++) {
+				if (strcasecmp(gexPlusRomGetVariant(i), variant) == 0) {
+					g_GexPlusVariant = gexPlusRomGetVariant(i);
+				}
+			}
+
+			if (variant && !g_GexPlusVariant) {
+				sysLogPrintf(LOG_WARNING, "boot GE variant %s: not converted", variant);
+			}
+
+			const s32 stage = modloaderMissionStage(gemission);
+
+			if (stage) {
+				g_StageNum = stage;
+			} else {
+				sysLogPrintf(LOG_WARNING, "boot GE mission %d: not registered (is the GoldenEye ROM converted?)", gemission);
+			}
+		}
+	}
 
 	if (g_StageNum == STAGE_TITLE && (sysArgCheck("--skip-intro") || g_SkipIntro)) {
 		// shorthand for --boot-stage 0x26
@@ -450,6 +518,7 @@ PD_CONSTRUCTOR static void gameConfigInit(void)
 	configRegisterInt("Mod.GlareClip", &g_ModOptions.glareclip, 0, 1);
 	configRegisterInt("Mod.FlashLighting", &g_ModOptions.flashlighting, 0, 2);
 	configRegisterInt("Mod.GeMuzzleFlashLight", &g_ModOptions.muzzleflashlight, 0, 1);
+	configRegisterInt("Mod.GeShotLightsDim", &g_ModOptions.geroomdim, 0, 1);
 	// Enhancements On/Off: the settings put away while off. See optionsmenu.c.
 	configRegisterString("Mod.EnhancementsSaved", g_ModEnhancementsSaved, MODENHANCE_SAVED_LEN);
 	configRegisterString("Mod.EnhancementsKey", g_ModEnhancementsKeyName, sizeof(g_ModEnhancementsKeyName));
@@ -549,7 +618,6 @@ PD_CONSTRUCTOR static void gameConfigInit(void)
 		configRegisterInt(strFmt("Game.Player%d.ExtendedControls", i), &g_PlayerExtCfg[j].extcontrols, 0, 1);
 		configRegisterUInt(strFmt("Game.Player%d.CrosshairColour", i), &g_PlayerExtCfg[j].crosshaircolour, 0, 0xFFFFFFFF);
 		configRegisterUInt(strFmt("Game.Player%d.CrosshairSize", i), &g_PlayerExtCfg[j].crosshairsize, 0, 4);
-		configRegisterInt(strFmt("Game.Player%d.CrosshairOnlyWhileAiming", i), &g_PlayerExtCfg[j].crosshairaimonly, 0, 1);
 		configRegisterInt(strFmt("Game.Player%d.CrosshairHealth", i), &g_PlayerExtCfg[j].crosshairhealth, 0, CROSSHAIR_HEALTH_ON_WHITE);
 		configRegisterInt(strFmt("Game.Player%d.UseKeyReloads", i), &g_PlayerExtCfg[j].usereloads, 0, false);
 	}

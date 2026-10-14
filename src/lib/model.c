@@ -23,6 +23,7 @@
 #ifndef PLATFORM_N64
 #include "game/modoptions.h"
 #include "xblamesh.h"
+#include "modelmesh.h"
 #endif
 
 /**
@@ -2945,6 +2946,24 @@ void modelTickAnim(struct model *model, s32 lvupdate240, bool arg2)
  * surfaces fought.
  */
 s32 g_ModelXluDecal = 0;
+
+/**
+ * Glass See-Through's combiner (G_CC_CUSTOM_GLASS_LERP) for mode 9's second
+ * cycle, in place of G_CC_CUSTOM_20/23: only while the setting is on and only
+ * for something with an opacity of its own to lay over the texel - a tinted
+ * pane or a door's window past its clear look (prim alpha, envcolour's second
+ * byte). The lerp takes its alpha from the texel alone, where G_CC_CUSTOM_20
+ * multiplies it by the vertex alpha, so everything else drawn in mode 9 lost
+ * its own fade to it: Area 51's laser beams (objRender() writes laserfade
+ * into the beam's vertex alpha) stayed lit after they switched off, drawn
+ * where their door had slid to - out of the racks beside them (F3
+ * 20260930-035626, -035943). At nought opacity the stock combiner is the
+ * same picture for a pane, so nothing is lost by keeping it there.
+ */
+static bool modelUseGlassLerp(struct modelrenderdata *renderdata)
+{
+	return modGetGlassSeeThrough() > 0 && ((renderdata->envcolour >> 8) & 0xff) != 0;
+}
 #endif
 
 void modelApplyRenderModeType1(struct modelrenderdata *renderdata)
@@ -3006,7 +3025,7 @@ void modelApplyRenderModeType3(struct modelrenderdata *renderdata, bool arg1)
 				gDPSetEnvColorViaWord(renderdata->gdl++, 0xffffffff);
 				gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
 #ifndef PLATFORM_N64
-				if (modGetGlassSeeThrough() > 0) {
+				if (modelUseGlassLerp(renderdata)) {
 					gDPSetCombineMode(renderdata->gdl++, G_CC_TRILERP, G_CC_CUSTOM_GLASS_LERP);
 				} else
 #endif
@@ -3040,7 +3059,7 @@ void modelApplyRenderModeType3(struct modelrenderdata *renderdata, bool arg1)
 			} else {
 				gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
 #ifndef PLATFORM_N64
-				if (modGetGlassSeeThrough() > 0) {
+				if (modelUseGlassLerp(renderdata)) {
 					gDPSetCombineMode(renderdata->gdl++, G_CC_CUSTOM_22, G_CC_CUSTOM_GLASS_LERP);
 				} else
 #endif
@@ -3178,7 +3197,7 @@ void modelApplyRenderModeType4(struct modelrenderdata *renderdata, bool arg1)
 
 			if (arg1) {
 #ifndef PLATFORM_N64
-				if (modGetGlassSeeThrough() > 0) {
+				if (modelUseGlassLerp(renderdata)) {
 					gDPSetCombineMode(renderdata->gdl++, G_CC_TRILERP, G_CC_CUSTOM_GLASS_LERP);
 				} else
 #endif
@@ -3191,7 +3210,7 @@ void modelApplyRenderModeType4(struct modelrenderdata *renderdata, bool arg1)
 				}
 			} else {
 #ifndef PLATFORM_N64
-				if (modGetGlassSeeThrough() > 0) {
+				if (modelUseGlassLerp(renderdata)) {
 					gDPSetCombineMode(renderdata->gdl++, G_CC_TRILERP, G_CC_CUSTOM_GLASS_LERP);
 				} else
 #endif
@@ -3220,7 +3239,7 @@ void modelApplyRenderModeType4(struct modelrenderdata *renderdata, bool arg1)
 			} else {
 				gDPSetPrimColor(renderdata->gdl++, 0, 0, 0, 0, 0, (renderdata->envcolour >> 8) & 0xff);
 #ifndef PLATFORM_N64
-				if (modGetGlassSeeThrough() > 0) {
+				if (modelUseGlassLerp(renderdata)) {
 					gDPSetCombineMode(renderdata->gdl++, G_CC_CUSTOM_22, G_CC_CUSTOM_GLASS_LERP);
 				} else
 #endif
@@ -3370,6 +3389,10 @@ void modelRenderNodeGundl(struct modelrenderdata *renderdata, struct model *mode
 			break;
 		}
 
+#ifndef PLATFORM_N64
+		renderdata->gdl = modelMeshBegin(renderdata->gdl, rodata->vertices, rodata->numvertices);
+#endif
+
 		gSPDisplayList(renderdata->gdl++, rodata->opagdl);
 
 		if (rodata->unk12 == 3 && rodata->xlugdl) {
@@ -3377,6 +3400,10 @@ void modelRenderNodeGundl(struct modelrenderdata *renderdata, struct model *mode
 
 			gSPDisplayList(renderdata->gdl++, rodata->xlugdl);
 		}
+
+#ifndef PLATFORM_N64
+		renderdata->gdl = modelMeshEnd(renderdata->gdl);
+#endif
 	}
 
 	if ((renderdata->flags & MODELRENDERFLAG_XLU) && rodata->opagdl && rodata->unk12 == 4 && rodata->xlugdl) {
@@ -3388,9 +3415,20 @@ void modelRenderNodeGundl(struct modelrenderdata *renderdata, struct model *mode
 
 		modelApplyRenderModeType4(renderdata, false);
 
+#ifndef PLATFORM_N64
+		renderdata->gdl = modelMeshBegin(renderdata->gdl, rodata->vertices, rodata->numvertices);
+#endif
+
 		gSPDisplayList(renderdata->gdl++, rodata->xlugdl);
+
+#ifndef PLATFORM_N64
+		renderdata->gdl = modelMeshEnd(renderdata->gdl);
+#endif
 	}
 }
+
+static void modelRenderNodeDlLists(struct modelrenderdata *renderdata, struct model *model, struct modelnode *node,
+		Gfx *opagdl, Gfx *xlugdl);
 
 void modelRenderNodeDl(struct modelrenderdata *renderdata, struct model *model, struct modelnode *node)
 {
@@ -3401,16 +3439,37 @@ void modelRenderNodeDl(struct modelrenderdata *renderdata, struct model *model, 
 	}
 
 #ifndef PLATFORM_N64
-	// The XBLA release has its own geometry for some of these
+	// The XBLA release has its own geometry for some of these - and where it
+	// leaves some of the node's out (the Cradle helicopter's pilot), those
+	// are drawn inside it as the node's own
 	if (xblaMeshRenderNode(renderdata, model, node)) {
+		Gfx *keptopa;
+		Gfx *keptxlu;
+
+		if (xblaMeshKeptLists(model, node, &keptopa, &keptxlu)) {
+			modelRenderNodeDlLists(renderdata, model, node, keptopa, keptxlu);
+		}
+
 		return;
 	}
 #endif
 
+	{
+		union modelrwdata *rwdata = modelGetNodeRwData(model, node);
+
+		modelRenderNodeDlLists(renderdata, model, node, rwdata->dl.gdl, rodata->dl.xlugdl);
+	}
+}
+
+static void modelRenderNodeDlLists(struct modelrenderdata *renderdata, struct model *model, struct modelnode *node,
+		Gfx *opagdl, Gfx *xlugdl)
+{
+	union modelrodata *rodata = node->rodata;
+
 	if (renderdata->flags & MODELRENDERFLAG_OPA) {
 		union modelrwdata *rwdata = modelGetNodeRwData(model, node);
 
-		if (rwdata->dl.gdl) {
+		if (opagdl) {
 			gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_COL1, osVirtualToPhysical(rodata->dl.colours));
 
 			if (renderdata->cullmode) {
@@ -3435,20 +3494,28 @@ void modelRenderNodeDl(struct modelrenderdata *renderdata, struct model *model, 
 			gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_VTX, osVirtualToPhysical(rwdata->dl.vertices));
 			gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_COL2, osVirtualToPhysical(rwdata->dl.colours));
 
-			gSPDisplayList(renderdata->gdl++, rwdata->dl.gdl);
+#ifndef PLATFORM_N64
+			renderdata->gdl = modelMeshBegin(renderdata->gdl, rwdata->dl.vertices, rodata->dl.numvertices);
+#endif
 
-			if (rodata->dl.mcount == 3 && rodata->dl.xlugdl) {
+			gSPDisplayList(renderdata->gdl++, opagdl);
+
+			if (rodata->dl.mcount == 3 && xlugdl) {
 				modelApplyRenderModeType3(renderdata, false);
 
-				gSPDisplayList(renderdata->gdl++, rodata->dl.xlugdl);
+				gSPDisplayList(renderdata->gdl++, xlugdl);
 			}
+
+#ifndef PLATFORM_N64
+			renderdata->gdl = modelMeshEnd(renderdata->gdl);
+#endif
 		}
 	}
 
 	if (renderdata->flags & MODELRENDERFLAG_XLU) {
 		union modelrwdata *rwdata = modelGetNodeRwData(model, node);
 
-		if (rwdata->dl.gdl && rodata->dl.mcount == 4 && rodata->dl.xlugdl) {
+		if (opagdl && rodata->dl.mcount == 4 && xlugdl) {
 			gSPSegment(renderdata->gdl++, SPSEGMENT_MODEL_COL1, osVirtualToPhysical(rodata->dl.colours));
 
 			if (renderdata->cullmode) {
@@ -3460,7 +3527,15 @@ void modelRenderNodeDl(struct modelrenderdata *renderdata, struct model *model, 
 
 			modelApplyRenderModeType4(renderdata, false);
 
-			gSPDisplayList(renderdata->gdl++, rodata->dl.xlugdl);
+#ifndef PLATFORM_N64
+			renderdata->gdl = modelMeshBegin(renderdata->gdl, rwdata->dl.vertices, rodata->dl.numvertices);
+#endif
+
+			gSPDisplayList(renderdata->gdl++, xlugdl);
+
+#ifndef PLATFORM_N64
+			renderdata->gdl = modelMeshEnd(renderdata->gdl);
+#endif
 		}
 	}
 }

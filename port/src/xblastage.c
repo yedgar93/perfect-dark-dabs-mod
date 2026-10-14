@@ -23,6 +23,7 @@
 #include <ultra64.h>
 #include <PR/ultratypes.h>
 #include <PR/gbi.h>
+#include "xblaswitch.h"
 #include "constants.h"
 #include "types.h"
 #include "data.h"
@@ -45,6 +46,7 @@
 #include "wallhitclip.h"
 #include "preprocess.h"
 #include "lib/memp.h"
+#include "trace.h"
 #include <zlib.h>
 
 // The bg file's header: primary inflated size, section 1 size, primary stored
@@ -119,16 +121,21 @@ static s32 xblaStageWant(void)
 	// The stage geometry is the models feature applied to the rooms, so it
 	// follows that switch: a player with the meshes off sees the game's own
 	// levels whatever this is set to.
-	return optEnabled && xblaMeshGetEnabled();
+	return xblaStageGetEnabled() && xblaMeshGetEnabled();
 }
 
 s32 xblaStageGetEnabled(void)
 {
-	return optEnabled;
+	// (off on a ROM hack's arena: xblaSwitchStageHeld())
+	return optEnabled && !xblaSwitchStageHeld();
 }
 
 void xblaStageSetEnabled(s32 enabled)
 {
+	if (optEnabled != (enabled ? 1 : 0)) {
+		traceNoteEvent("release rooms %s", enabled ? "on" : "off");
+	}
+
 	optEnabled = enabled ? 1 : 0;
 	xblaStageSwitched();
 }
@@ -682,11 +689,19 @@ Gfx *xblaStageWriteTexture(Gfx *gdl, const Gfx *cmd, u32 record)
 	// strength of it.
 	texResetTiles();
 
-	// Bean's reservoir picture takes GoldenEye's moving water, on its
-	// leaf's own render mode (gewater.c); the two tiles above are the same
-	// picture at the same place already
+	// Bean's water pictures take GoldenEye's moving water, on their leaf's
+	// own render mode (gewater.c), as the N64 look moves them. Dam's
+	// reservoir is one the release's table also scrolls (0.5 repeats a
+	// second each way, its transparency map): slid at that, it raced across
+	// the reservoir at about 1,000 units a second, four times GoldenEye's
+	// water ("water scrolls way too fast after switching from N64 graphics",
+	// F3 20261002-012520, 033705, 20261003-010208), so the water's own motion
+	// wins. Any other picture the release scrolls moves as it does. The two
+	// tiles above are the same picture at the same place already
 	if (gebeanStageRecordIsWater(record)) {
 		gdl = geWaterWriteHd(gdl, tilew, tileh);
+	} else if (gebeanStageScrollSlot(record, tilew, tileh)) {
+		gSPDisplayList(gdl++, gebeanStageScrollSlot(record, tilew, tileh));
 	}
 
 	if (xblaStageVerbose) {
@@ -805,7 +820,7 @@ PD_CONSTRUCTOR static void xblaStageConfigInit(void)
 void xblaStageTrace(FILE *f)
 {
 	fprintf(f, "xblastage: enabled %d want %d, rooms loaded from %s, release file %d: %d rooms, %u bytes, tried %d, current room from release %d\n",
-			optEnabled, xblaStageWant(), roomsWant ? "release" : "ROM",
+			xblaStageGetEnabled(), xblaStageWant(), roomsWant ? "release" : "ROM",
 			relFileNum, relNumRooms, relLen, relTried, curRoomRelease);
 }
 

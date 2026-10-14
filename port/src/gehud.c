@@ -15,7 +15,8 @@
  * - the messages (hudmsgBottomRender() and sub_GAME_7F08AAE8()): Bank Gothic
  *   outlined in grey at the bottom left, Zurich Bold over a dark band across
  *   the top;
- * - the countdown (propobj.c's countdownTimerRender()).
+ * - the countdown (propobj.c's countdownTimerRender()), and Perfect Dark's
+ *   mission timer, which GoldenEye has none of, set in the countdown's figures.
  *
  * All of it is laid out on GoldenEye's in-game 320x240 frame. A window wider
  * than 4:3 has more than 320 of those units across it, and since every one of
@@ -37,13 +38,16 @@
 #include "data.h"
 #include "gbiex.h"
 #include "fs.h"
+#include "config.h"
 #include "mod.h"
 #include "modloader.h"
 #include "system.h"
 #include "video.h"
 #include "gehud.h"
+#include "geguns.h"
 #include "langpack.h"
 #include "gefolder.h"
+#include "gegadgets.h"
 #include "gewatch.h"
 #include "gexfront.h"
 #include "gebean.h"
@@ -52,7 +56,9 @@
 #include "game/botact.h"
 #include "game/camera.h"
 #include "game/gfxmemory.h"
+#include "game/options.h"
 #include "game/game_1531a0.h"
+#include "game/savebuffer.h"
 #include "game/tex.h"
 #include "lib/mtx.h"
 #include "lib/vi.h"
@@ -93,6 +99,16 @@ enum {
 	NUM_ICONS
 };
 
+/**
+ * A ROM hack's own pictures (its conversion's menu/geammo.bin, a row an
+ * AmmoType), numbered from ICON_OWN up by type. GE Editor's hacks redraw them
+ * at other sizes: Goldfinger 64's 9mm round is 4x13 where GoldenEye's is 5x12,
+ * drawn through GoldenEye's box it came out a smear with a stripe of the next
+ * row's colours over it (F3 20261003-050551, 20261003-061317).
+ */
+#define HUD_OWN_TYPES 30
+#define ICON_OWN NUM_ICONS
+
 static const struct {
 	s32 image;
 	u8 width, height, format, depth, wraps;
@@ -119,8 +135,11 @@ static const struct {
  * same boxes GoldenEye's are - which is what the release does: its 9mm round
  * is 80x180 over GoldenEye's 5x12 units. A name with a '#' is one the release
  * has only at GoldenEye's own size, made from another of its pictures
- * (gefolder.c's menuAmmoPicture()); the tank's shell, which it has only at
- * 7x22 as well, is its magnum round, the one grey cartridge of the set.
+ * (gefolder.c's menuAmmoPicture()). The tank's shell is its own
+ * bg/ammoicontankshell, which it has only at GoldenEye's 7x22 but which reads
+ * whole over the box - GoldenEye's dark shell with its band. It had been the
+ * magnum round, a white cartridge nothing like it (F3 20260930-185749, "wrong
+ * tank shell icon").
  */
 static const char *const g_IconHdPictures[NUM_ICONS] = {
 	[ICON_9MM]          = "bg/ammoicon9mm",
@@ -135,7 +154,7 @@ static const char *const g_IconHdPictures[NUM_ICONS] = {
 	[ICON_REMOTEMINE]   = "bg/ammoiconmine",
 	[ICON_TIMEDMINE]    = "bg/ammoiconmine#yellow",
 	[ICON_PROXMINE]     = "bg/ammoiconmine#green",
-	[ICON_TANK]         = "bg/ammoiconmagnum",
+	[ICON_TANK]         = "bg/ammoicontankshell",
 };
 
 // the radar's disc (image_bank.c's mpradarimages): 32x32 RGBA16 with six
@@ -177,6 +196,25 @@ static const char *const g_IconHdPictures[NUM_ICONS] = {
 #define SIGHT_HD_SHADE 0xad
 #define SIGHT_HD_ALPHA 0x99
 
+static struct {
+	s32 stagenum;
+	s32 moddir;
+	s32 on;
+	// texSelect() turns a config's number into a pointer that lasts the stage
+	struct textureconfig icons[NUM_ICONS];
+	struct textureconfig sight;
+	struct textureconfig radar;
+	// a hack's own pictures by AmmoType (hudOwnIconsLoad()); numown 0 is none
+	s32 numown;
+	struct textureconfig own[HUD_OWN_TYPES];
+	s8 ownyoffset[HUD_OWN_TYPES];
+	// the radar's middle on the view's frame, set by geHudRadarBegin()
+	s32 radarx, radary;
+	f32 radarsx, radarsy;
+	// the mission timer is up this frame (geHudSetMissionTimerShown())
+	s32 timershown;
+} g_Hud = { -1, -1, 0 };
+
 /**
  * What each of GoldenEye's weapons shows, from its gunWeaponStat row: the
  * picture of its AmmoType, and WEAPONSTATBITFLAG_NO_CLIP_RELOADS, which is a
@@ -186,8 +224,11 @@ static const char *const g_IconHdPictures[NUM_ICONS] = {
  * weapon with an AmmoType that has no picture shows its count all the same,
  * with nothing beside it (`bare`, the picture's width taken as GoldenEye's 5):
  * the covert modem (ITEM_BUG, AMMO_BUG) and the plastique show "1" (F3
- * 20260929-092325). The watch magnet's AMMO_WATCH_MAGNET is the one more that
- * would, and no count of it is kept here.
+ * 20260929-092325). The watch magnet's AMMO_WATCH_MAGNET is the one more:
+ * its charges are kept since 2026-10-01 (gegadgets.c, GEGADGET_MAGNET_AMMO)
+ * and it shows "5" there on Archives' start, as the cartridge does (ares).
+ * The camera's AmmoType is AMMO_NONE: it shows nothing and never runs out on
+ * the cartridge either.
  */
 #define GE_BARE_WIDTH 5
 
@@ -218,27 +259,61 @@ static const struct { u8 icon, noclip, bare; } g_WeaponRows[NUM_GE_WEAPONS] = {
 	[WEAPON_GE_TANKSHELLS - WEAPON_GE_FIRST]      = { ICON_TANK, 0 },
 	[WEAPON_GE_COVERTMODEM - WEAPON_GE_FIRST]     = { ICON_NONE, 1, 1 },
 	[WEAPON_GE_PLASTIQUE - WEAPON_GE_FIRST]       = { ICON_NONE, 1, 1 },
+	[WEAPON_GE_WATCHMAGNET - WEAPON_GE_FIRST]     = { ICON_NONE, 1, 1 },
 };
+
+/**
+ * A gun's icon is its ammunition's, as GoldenEye's is (ammo_related's), by
+ * its row's AmmoType - the gun set's, so a ROM hack's own guns show what they
+ * load (Goldfinger 64's four pistols past GoldenEye's have no row above). The
+ * table above where the row has no type: the gadgets, the tank.
+ */
+static s32 hudWeaponIcon(s32 weaponnum)
+{
+	static const u8 icons[] = {
+		ICON_NONE, ICON_9MM, ICON_9MM, ICON_RIFLE, ICON_SHOTGUN, ICON_GRENADE, ICON_ROCKET,
+		ICON_REMOTEMINE, ICON_PROXMINE, ICON_TIMEDMINE, ICON_KNIFE, ICON_GRENADEROUND, ICON_MAGNUM,
+		ICON_GOLDENGUN,
+	};
+	const s32 ammotype = gegunsGeAmmoType(weaponnum);
+
+	if (ammotype > 0 && ammotype < g_Hud.numown && g_Hud.own[ammotype].texturenum) {
+		return ICON_OWN + ammotype;
+	}
+
+	if (ammotype > 0 && ammotype < (s32)ARRAYCOUNT(icons)) {
+		return icons[ammotype];
+	}
+
+	return g_WeaponRows[weaponnum - WEAPON_GE_FIRST].icon;
+}
+
+/** A picture's texture config and its box in GoldenEye's units: its size and its row's IconYOffset. */
+static struct textureconfig *hudIconBox(s32 icon, s32 *width, s32 *height, s32 *yoffset)
+{
+	if (icon >= ICON_OWN) {
+		struct textureconfig *tex = &g_Hud.own[icon - ICON_OWN];
+
+		*width = tex->width;
+		*height = tex->height;
+		*yoffset = g_Hud.ownyoffset[icon - ICON_OWN];
+
+		return tex;
+	}
+
+	*width = icon != ICON_NONE ? g_IconRows[icon].width : GE_BARE_WIDTH;
+	*height = g_IconRows[icon].height;
+	*yoffset = g_IconRows[icon].yoffset;
+
+	return &g_Hud.icons[icon];
+}
 
 /** Whether one of GoldenEye's weapons shows no ammunition at all. */
 static s32 hudWeaponShowsNothing(s32 weaponnum)
 {
-	return g_WeaponRows[weaponnum - WEAPON_GE_FIRST].icon == ICON_NONE
+	return hudWeaponIcon(weaponnum) == ICON_NONE
 		&& !g_WeaponRows[weaponnum - WEAPON_GE_FIRST].bare;
 }
-
-static struct {
-	s32 stagenum;
-	s32 moddir;
-	s32 on;
-	// texSelect() turns a config's number into a pointer that lasts the stage
-	struct textureconfig icons[NUM_ICONS];
-	struct textureconfig sight;
-	struct textureconfig radar;
-	// the radar's middle on the view's frame, set by geHudRadarBegin()
-	s32 radarx, radary;
-	f32 radarsx, radarsy;
-} g_Hud = { -1, -1, 0 };
 
 /** The view in GoldenEye's units, and what one of them is worth on the frame buffer. */
 struct hudframe {
@@ -246,15 +321,86 @@ struct hudframe {
 	s32 width, height;
 };
 
+static void geHudMigrateSightAlways(void);
+
+/**
+ * A ROM hack's own ammunition pictures, out of its conversion's
+ * menu/geammo.bin (geconvert.c): gun.c's ammo_related[] with each picture's
+ * row of the global image table. GoldenEye's conversion has none, and its
+ * pictures are g_IconRows; so has a hack's converted before the file was.
+ */
+static void hudOwnIconsLoad(void)
+{
+	char path[1024];
+	u32 len = 0;
+	u8 *file;
+	s32 rows;
+
+	g_Hud.numown = 0;
+	memset(g_Hud.own, 0, sizeof(g_Hud.own));
+	memset(g_Hud.ownyoffset, 0, sizeof(g_Hud.ownyoffset));
+
+	if (g_Hud.moddir < 0 || modloaderDirIndexIsGexPlus(g_Hud.moddir)) {
+		return;
+	}
+
+	snprintf(path, sizeof(path), "%s/menu/geammo.bin", fsGetModDirAt(g_Hud.moddir));
+	file = fsFileSize(path) > 0 ? fsFileLoad(path, &len) : NULL;
+
+	if (!file || len < 8 || memcmp(file, "GEA1", 4) != 0) {
+		sysMemFree(file);
+		return;
+	}
+
+	rows = (file[4] << 8) | file[5];
+
+	if (rows > HUD_OWN_TYPES) {
+		rows = HUD_OWN_TYPES;
+	}
+
+	for (s32 i = 0; i < rows && 8 + 16 * (u32)(i + 1) <= len; i++) {
+		const u8 *row = file + 8 + 16 * i;
+		struct textureconfig *tex = &g_Hud.own[i];
+		const u32 image = (u32)row[0] << 24 | (u32)row[1] << 16 | (u32)row[2] << 8 | row[3];
+		const u32 bits = (u32)row[12] << 24 | (u32)row[13] << 16 | (u32)row[14] << 8 | row[15];
+		f32 yoffset;
+
+		memcpy(&yoffset, &bits, sizeof(yoffset));
+		memset(tex, 0, sizeof(*tex));
+		g_Hud.ownyoffset[i] = (s8)yoffset;
+
+		// width, height, level, format, depth, s, t; a picture with no size
+		// is none
+		if (image == 0 || row[4] == 0 || row[5] == 0) {
+			continue;
+		}
+
+		tex->texturenum = image;
+		tex->width = row[4];
+		tex->height = row[5];
+		tex->level = row[6];
+		tex->format = row[7];
+		tex->depth = row[8];
+		tex->s = row[9];
+		tex->t = row[10];
+	}
+
+	g_Hud.numown = rows;
+	sysMemFree(file);
+}
+
 void geHudStageStart(s32 stagenum)
 {
 	g_Hud.stagenum = stagenum;
 	g_Hud.on = 0;
+	g_Hud.numown = 0;
 	g_Hud.moddir = modloaderGetStageModDirIndex(stagenum);
 
 	if (!modloaderStageIsMission(stagenum) && !(g_GexPlusMode && modloaderStageIsRemake(stagenum))) {
 		return;
 	}
+
+	geHudMigrateSightAlways();
 
 	if (g_Hud.moddir < 0 || !gexFrontLoadText()) {
 		sysLogPrintf(LOG_WARNING, "gehud: the conversion's fonts are not there; this level keeps Perfect Dark's HUD");
@@ -273,6 +419,8 @@ void geHudStageStart(s32 stagenum)
 		tex->s = g_IconRows[i].wraps ? G_TX_WRAP : G_TX_CLAMP;
 		tex->t = G_TX_CLAMP;
 	}
+
+	hudOwnIconsLoad();
 
 	memset(&g_Hud.sight, 0, sizeof(g_Hud.sight));
 	g_Hud.sight.texturenum = SIGHT_IMAGE;
@@ -362,6 +510,38 @@ const char *geHudPropobjString(s32 slot)
 	return langpackNoted((const char *)bank + at);
 }
 
+/**
+ * GoldenEye's sight with the gun lowered is Perfect Dark's Always Show Target
+ * (the user's call, 2026-10-01; F3 20261001-065320): the watch's SIGHT
+ * ON-SCREEN is GoldenEye's own option, which on the cartridge shows the sight
+ * only while aiming (gunsightmode's GUNSIGHTREASON_NOTAIMING, read in ares),
+ * and Always Show Target keeps it up with the gun lowered too (sight.c). The
+ * separate "GE Plus: Crosshair When Not Aiming" toggle (Mod.GePlusSightAlways)
+ * is gone: a pd.ini that still has it on turns Always Show Target on in every
+ * player's options the first time a GE Plus level starts, and the key goes.
+ */
+static s32 g_GeSightAlwaysRetired = 0;
+
+PD_CONSTRUCTOR static void geHudConfigInit(void)
+{
+	configRegisterIntRetired("Mod.GePlusSightAlways", &g_GeSightAlwaysRetired, 0, 1);
+}
+
+static void geHudMigrateSightAlways(void)
+{
+	if (!g_GeSightAlwaysRetired) {
+		return;
+	}
+
+	for (s32 i = 0; i < ARRAYCOUNT(g_PlayerConfigsArray); i++) {
+		optionsSetAlwaysShowTarget(i, true);
+	}
+
+	g_GeSightAlwaysRetired = 0;
+	g_Vars.modifiedfiles |= MODFILE_GAME;
+	sysLogPrintf(LOG_NOTE, "gehud: Mod.GePlusSightAlways carried over to Always Show Target");
+}
+
 s32 geHudOwnsWeapon(void)
 {
 	return geHudActive() && hudWeaponIsGoldenEyes(g_Vars.currentplayer->hands[HAND_RIGHT].gset.weaponnum);
@@ -426,7 +606,7 @@ static Gfx *hudImage(Gfx *gdl, struct textureconfig *tex, s32 mode, s32 point, s
  * outline's colour, a unit out every way, and then itself over them.
  */
 static Gfx *hudStringOutlined(Gfx *gdl, s32 gothic, const char *text, s32 x, s32 halign, s32 y, s32 valign,
-		s32 outline, u32 outlinecolour)
+		s32 outline, u32 outlinecolour, u32 textcolour)
 {
 	s32 w, h;
 
@@ -454,12 +634,12 @@ static Gfx *hudStringOutlined(Gfx *gdl, s32 gothic, const char *text, s32 x, s32
 		}
 	}
 
-	return gexFrontTextPrint(gdl, gothic, x, y, text, COL_TEXT);
+	return gexFrontTextPrint(gdl, gothic, x, y, text, textcolour);
 }
 
 static Gfx *hudString(Gfx *gdl, s32 gothic, const char *text, s32 x, s32 halign, s32 y, s32 valign, s32 outline)
 {
-	return hudStringOutlined(gdl, gothic, text, x, halign, y, valign, outline, COL_OUTLINE);
+	return hudStringOutlined(gdl, gothic, text, x, halign, y, valign, outline, COL_OUTLINE, COL_TEXT);
 }
 
 static Gfx *hudInteger(Gfx *gdl, s32 value, s32 x, s32 halign, s32 y, s32 valign)
@@ -490,7 +670,7 @@ static Gfx *hudReleaseInteger(Gfx *gdl, const struct hudframe *f, s32 value, s32
 			viGetViewLeft(), viGetViewTop(), viGetViewWidth(), viGetViewHeight());
 	gexFrontTextNaturalWidth(1);
 
-	gdl = hudStringOutlined(gdl, 1, buffer, (s32)lroundf(x / k), halign, (s32)lroundf(y / k), 2, 1, COL_RELEASE_OUTLINE);
+	gdl = hudStringOutlined(gdl, 1, buffer, (s32)lroundf(x / k), halign, (s32)lroundf(y / k), 2, 1, COL_RELEASE_OUTLINE, COL_TEXT);
 
 	gexFrontTextNaturalWidth(0);
 	gexFrontTextFrame(viGetViewWidth() / f->sx, viGetViewHeight() / f->sy,
@@ -511,6 +691,46 @@ static Gfx *hudEnd(Gfx *gdl)
 	gDPSetTextureFilter(gdl++, G_TF_BILERP);
 
 	return gdl;
+}
+
+/**
+ * Text of Perfect Dark's own screens drawn in GoldenEye's font on its levels:
+ * the weapon wheel (activemenu.c's amRenderText()), whose labels were Perfect
+ * Dark's Handel Gothic over GoldenEye's HUD (F3 20260930-011230, "text still
+ * uses PD's font"). GoldenEye's Bank Gothic, the watch's, whose small letters
+ * are small capitals as they are on the watch's inventory.
+ *
+ * Positions and sizes are Perfect Dark's: x in columns of g_ScaleX pixels and
+ * y in rows of the frame buffer, as the wheel lays its slots out, turned into
+ * the HUD's own frame (hudFrame()).
+ */
+void geHudTextMeasure(const char *text, s32 *width, s32 *height)
+{
+	struct hudframe f;
+	s32 w, h;
+
+	hudFrame(&f);
+	gexFrontTextFrameDefault();
+	gexFrontTextMeasure(1, text, &w, &h);
+
+	*width = (s32)(w * f.sx / (g_ScaleX > 0 ? g_ScaleX : 1) + 0.5f);
+	*height = (s32)(h * f.sy + 0.5f);
+}
+
+Gfx *geHudText(Gfx *gdl, const char *text, s32 x, s32 y, u32 colour)
+{
+	struct hudframe f;
+	s32 gx, gy;
+
+	hudFrame(&f);
+
+	gx = (s32)((x * (g_ScaleX > 0 ? g_ScaleX : 1) - viGetViewLeft()) / f.sx + 0.5f);
+	gy = (s32)((y - viGetViewTop()) / f.sy + 0.5f);
+
+	gdl = gexFrontTextSetup(gdl);
+	gdl = gexFrontTextPrint(gdl, 1, gx, gy, text, colour);
+
+	return hudEnd(gdl);
 }
 
 /**
@@ -545,7 +765,7 @@ static s32 hudHandAmmo(s32 handnum, s32 *icon, s32 *mag, s32 *reserve, s32 *nocl
 		return 0;
 	}
 
-	*icon = g_WeaponRows[weaponnum - WEAPON_GE_FIRST].icon;
+	*icon = hudWeaponIcon(weaponnum);
 	*noclip = g_WeaponRows[weaponnum - WEAPON_GE_FIRST].noclip;
 
 	if (hudWeaponShowsNothing(weaponnum)) {
@@ -557,6 +777,14 @@ static s32 hudHandAmmo(s32 handnum, s32 *icon, s32 *mag, s32 *reserve, s32 *nocl
 
 		*mag = shells > 0 ? 1 : 0;
 		*reserve = shells - *mag;
+
+		return 1;
+	}
+
+	// the watch magnet's charges, one number (NO_CLIP_RELOADS)
+	if (weaponnum == WEAPON_GE_WATCHMAGNET) {
+		*mag = 0;
+		*reserve = player->ammoheldarr[GEGADGET_MAGNET_AMMO];
 
 		return 1;
 	}
@@ -679,7 +907,7 @@ Gfx *geHudRenderAmmo(Gfx *gdl)
 		// the picture's middle, and each number from its own side of it
 		const s32 cx = left ? leftx : f.width - rightx;
 		s32 icon, mag, reserve, noclip;
-		s32 width;
+		s32 width, height, yoffset;
 		s32 x0, y0;
 		struct textureconfig *tex;
 		struct textureconfig hd;
@@ -691,17 +919,18 @@ Gfx *geHudRenderAmmo(Gfx *gdl)
 		// microcode_generation_ammo_related(): an odd picture sits half a unit
 		// right of its middle and half a unit up, which is what keeps its
 		// edges on whole units
-		tex = release && icon != ICON_NONE ? hudReleaseIcon(icon, &hd) : NULL;
-		width = icon != ICON_NONE ? g_IconRows[icon].width : GE_BARE_WIDTH;
+		struct textureconfig *own = hudIconBox(icon, &width, &height, &yoffset);
+
+		tex = release && icon != ICON_NONE && icon < ICON_OWN ? hudReleaseIcon(icon, &hd) : NULL;
 		x0 = cx - width / 2;
-		y0 = bottom - 20 + g_IconRows[icon].yoffset - (g_IconRows[icon].height + 1) / 2;
+		y0 = bottom - 20 + yoffset - (height + 1) / 2;
 
 		// GoldenEye's own a texel a pixel, the release's filtered down
 		if (icon != ICON_NONE) {
-			gdl = hudImage(gdl, tex ? tex : &g_Hud.icons[icon], 2, tex == NULL, 1,
+			gdl = hudImage(gdl, tex ? tex : own, 2, tex == NULL, 1,
 					viGetViewLeft() + x0 * f.sx, viGetViewTop() + y0 * f.sy,
-					viGetViewLeft() + (x0 + width) * f.sx, viGetViewTop() + (y0 + g_IconRows[icon].height) * f.sy,
-					tex ? tex->width : width, tex ? tex->height : g_IconRows[icon].height, 255, 255);
+					viGetViewLeft() + (x0 + width) * f.sx, viGetViewTop() + (y0 + height) * f.sy,
+					tex ? tex->width : width, tex ? tex->height : height, 255, 255);
 		}
 
 		gdl = gexFrontTextSetup(gdl);
@@ -799,7 +1028,8 @@ s32 geHudWatchAmmo(s32 weaponnum, s32 *mag, s32 *reserve)
  */
 Gfx *geHudRenderWatchAmmo(Gfx *gdl, s32 weaponnum, s32 mag, s32 reserve, f32 ox, f32 oy, f32 sx, f32 sy)
 {
-	s32 icon, noclip, width, height;
+	s32 icon, noclip, width, height, yoffset;
+	struct textureconfig *own;
 	f32 cx, cy;
 	char buffer[12];
 	s32 w, h;
@@ -808,20 +1038,19 @@ Gfx *geHudRenderWatchAmmo(Gfx *gdl, s32 weaponnum, s32 mag, s32 reserve, f32 ox,
 		return gdl;
 	}
 
-	icon = g_WeaponRows[weaponnum - WEAPON_GE_FIRST].icon;
+	icon = hudWeaponIcon(weaponnum);
 	noclip = g_WeaponRows[weaponnum - WEAPON_GE_FIRST].noclip;
 
 	if (hudWeaponShowsNothing(weaponnum)) {
 		return gdl;
 	}
 
-	width = icon != ICON_NONE ? g_IconRows[icon].width : GE_BARE_WIDTH;
-	height = g_IconRows[icon].height;
+	own = hudIconBox(icon, &width, &height, &yoffset);
 	cx = 200.0f + (width * 0.5f - (f32)(width / 2));
 	cy = 180.0f - height * 0.5f;
 
 	if (icon != ICON_NONE) {
-		gdl = hudImage(gdl, &g_Hud.icons[icon], 2, 1, 1,
+		gdl = hudImage(gdl, own, 2, 1, 1,
 				ox + (cx - width * 0.5f) * sx, oy + (cy - height * 0.5f) * sy,
 				ox + (cx + width * 0.5f) * sx, oy + (cy + height * 0.5f) * sy,
 				width, height, 255, 255);
@@ -832,7 +1061,7 @@ Gfx *geHudRenderWatchAmmo(Gfx *gdl, s32 weaponnum, s32 mag, s32 reserve, f32 ox,
 	if (!noclip) {
 		snprintf(buffer, sizeof(buffer), "%d\n", mag);
 		gexFrontTextMeasure(1, buffer, &w, &h);
-		gdl = gexFrontTextPrint(gdl, 1, 196 - width / 2 - w, 177 + h / 2 - h, buffer, 0x00ff00b0);
+		gdl = gexFrontTextPrint(gdl, 1, 196 - width / 2 - w, 177 + h / 2 - h, buffer, geWatchTint(0x00ff00b0));
 	} else {
 		reserve += mag;
 	}
@@ -840,7 +1069,7 @@ Gfx *geHudRenderWatchAmmo(Gfx *gdl, s32 weaponnum, s32 mag, s32 reserve, f32 ox,
 	if (reserve > 0 || noclip) {
 		snprintf(buffer, sizeof(buffer), "%d\n", reserve);
 		gexFrontTextMeasure(1, buffer, &w, &h);
-		gdl = gexFrontTextPrint(gdl, 1, 203 + (width + 1) / 2, 177 + h / 2 - h, buffer, 0x00ff00b0);
+		gdl = gexFrontTextPrint(gdl, 1, 203 + (width + 1) / 2, 177 + h / 2 - h, buffer, geWatchTint(0x00ff00b0));
 	}
 
 	return gdl;
@@ -1057,6 +1286,196 @@ Gfx *geHudRadarEnd(Gfx *gdl)
 	return hudEnd(gdl);
 }
 
+/**
+ * Perfect Dark's mission timer on GoldenEye's HUD. GoldenEye has no clock of
+ * its own up while playing, so this is set in its countdown's figures: Bank
+ * Gothic outlined in grey, a digit to eight units and nine either side of a
+ * colon (geHudRenderCountdown()), at the bottom messages' left margin.
+ *
+ * It stands in the lower left corner, under the bottom messages' own line
+ * (BONDVIEW_VIEW_TOP_OFFSET_1, 0x0c over the bottom), where GoldenEye draws
+ * nothing, so the messages and the opening's lines stay where GoldenEye puts
+ * them (F3 20261001-121337: the timer stood on the raised line, "far above
+ * the lower-left corner", and pushed "weapon pickup text and starting
+ * cutscene subtitles" up over it). With a gun in the left hand that corner is
+ * its ammunition's, which Perfect Dark's green timer sat over (F3
+ * 20260930-211848), so the timer goes up to the raised line the messages
+ * take over the left hand's ammunition (BONDVIEW_VIEW_TOP_OFFSET_2), and only
+ * then do the messages stack over it.
+ */
+static s32 hudTimerRaised(void)
+{
+	return g_Vars.currentplayer->hands[HAND_LEFT].inuse;
+}
+
+static s32 hudTimerBottom(const struct hudframe *f)
+{
+	s32 y;
+
+	if (hudTimerRaised()) {
+		y = f->height - 0x28;
+
+		// the release's ammunition stands higher, and the line with it
+		if (hudReleaseLook()) {
+			y -= HUD_RELEASE_RAISE;
+		}
+	} else {
+		y = f->height - 2;
+	}
+
+	if (PLAYERCOUNT() < 3 && g_Vars.currentplayernum == 1) {
+		y -= 8;
+	}
+
+	return y;
+}
+
+static s32 hudTimerHeight(void)
+{
+	s32 w, h;
+
+	gexFrontTextMeasure(1, "0\n", &w, &h);
+
+	return hudReleaseLook() ? (s32)lroundf(h * HUD_RELEASE_TEXT) : h;
+}
+
+void geHudSetMissionTimerShown(s32 shown)
+{
+	g_Hud.timershown = shown;
+}
+
+/**
+ * The timer's columns: a digit's pitch and a colon's distance from the digit
+ * either side of it. GoldenEye's own figures keep its countdown's, eight and
+ * nine. The release's font is drawn at its natural widths, which the
+ * countdown's columns are too narrow for - each digit ran into the next
+ * (F3 20261001-121337, "digits are misaligned") - so its columns come from
+ * the widest digit, still the same for every digit, so the figures do not
+ * shift as they change.
+ */
+static void hudTimerPitch(s32 release, s32 *digit, s32 *colon)
+{
+	char glyph[3] = { '0', '\n', '\0' };
+	s32 widest = 0;
+	s32 w, h;
+
+	if (!release) {
+		*digit = 8;
+		*colon = 9;
+		return;
+	}
+
+	for (char c = '0'; c <= '9'; c++) {
+		glyph[0] = c;
+		gexFrontTextMeasure(1, glyph, &w, &h);
+
+		if (w > widest) {
+			widest = w;
+		}
+	}
+
+	glyph[0] = ':';
+	gexFrontTextMeasure(1, glyph, &w, &h);
+
+	// a unit of outline either side of each, and a unit between
+	*digit = widest + 3;
+	*colon = (widest + w + 1) / 2 + 3;
+}
+
+/**
+ * One of the timer's strings, a character to a column (left to right from x,
+ * on the frame the text is set to), ending at y. Returns the x past it.
+ */
+static s32 hudTimerColumns(const char *text, s32 x, s32 digit, s32 colon, s32 *centres, s32 max)
+{
+	s32 n = 0;
+
+	for (s32 i = 0; text[i] && n < max; i++) {
+		const s32 iscolon = text[i] == ':';
+
+		if (i == 0) {
+			x += iscolon ? (colon + 1) / 2 : digit / 2;
+		} else {
+			x += iscolon || text[i - 1] == ':' ? colon : digit;
+		}
+
+		centres[n++] = x;
+	}
+
+	return x + digit / 2;
+}
+
+static Gfx *hudTimerString(Gfx *gdl, const char *text, s32 x, s32 y, s32 digit, s32 colon, u32 outline, u32 colour,
+		s32 *endx)
+{
+	s32 centres[24];
+	const s32 n = (s32)strlen(text);
+
+	*endx = hudTimerColumns(text, x, digit, colon, centres, 24);
+
+	for (s32 i = 0; i < n && i < 24; i++) {
+		char glyph[3] = { text[i], '\n', '\0' };
+
+		gdl = hudStringOutlined(gdl, 1, glyph, centres[i], 2, y, 0, 1, outline, colour);
+	}
+
+	return gdl;
+}
+
+Gfx *geHudRenderMissionTimer(Gfx *gdl, s32 time60, s32 hassplit, s32 split60)
+{
+	struct hudframe f;
+	const s32 release = hudReleaseLook();
+	const f32 k = release ? HUD_RELEASE_TEXT : 1.0f;
+	const u32 outline = release ? COL_RELEASE_OUTLINE : COL_OUTLINE;
+	char buffer[24];
+	s32 x = 0x1e;
+	s32 y;
+	s32 endx;
+	s32 digit;
+	s32 colon;
+
+	hudFrame(&f);
+
+	if (PLAYERCOUNT() >= 3 && (g_Vars.currentplayernum & 1)) {
+		x = 0xa;
+	}
+
+	y = hudTimerBottom(&f);
+
+	formatTime(buffer, time60, TIMEPRECISION_HUNDREDTHS);
+
+	if (release) {
+		gexFrontTextFrame(viGetViewWidth() / f.sx / k, viGetViewHeight() / f.sy / k,
+				viGetViewLeft(), viGetViewTop(), viGetViewWidth(), viGetViewHeight());
+		gexFrontTextNaturalWidth(1);
+	}
+
+	hudTimerPitch(release, &digit, &colon);
+
+	x = (s32)lroundf(x / k);
+	y = (s32)lroundf(y / k);
+
+	gdl = gexFrontTextSetup(gdl);
+	gdl = hudTimerString(gdl, buffer, x, y, digit, colon, outline, COL_TEXT, &endx);
+
+	// the ghost's split beside it, green ahead of the ghost and red behind
+	// (hudmsgRenderMissionTimer()'s colours)
+	if (hassplit) {
+		buffer[0] = split60 < 0 ? '-' : '+';
+		formatTime(buffer + 1, split60 < 0 ? -split60 : split60, TIMEPRECISION_HUNDREDTHS);
+
+		gdl = hudTimerString(gdl, buffer, endx + 6, y, digit, colon, outline,
+				split60 < 0 ? 0x40ff40ff : 0xff6040ff, &endx);
+	}
+
+	if (release) {
+		gexFrontTextNaturalWidth(0);
+	}
+
+	return hudEnd(gdl);
+}
+
 s32 geHudMessageDuration(s32 top)
 {
 	// BONDVIEW_UPPER_TEXT_TIMER_C and BONDVIEW_INTRO_CAMERA_BONDMESSCNT_C
@@ -1121,6 +1540,16 @@ Gfx *geHudRenderMessage(Gfx *gdl, const char *text, s32 top, s32 intro, s32 *row
 
 		if (g_Vars.currentplayernum == 1) {
 			y -= 8;
+		}
+
+		// and over the mission timer when the left hand's ammunition has put
+		// it on that raised line itself
+		if (g_Hud.timershown && hudTimerRaised()) {
+			const s32 over = hudTimerBottom(&f) - hudTimerHeight() - 2;
+
+			if (y > over) {
+				y = over;
+			}
 		}
 	} else {
 		y = 0x10 + h;

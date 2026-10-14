@@ -75,6 +75,7 @@
 #include "game/propsnd.h"
 #include "gesfx.h"
 #include "getank.h"
+#include "gedeathcam.h"
 #include "gexplusveh.h"
 #include "modloader.h"
 #include "romdata.h"
@@ -106,6 +107,9 @@
 // as a wall but as something that blocks sight and shots
 #define TANK_RECT_GEOFLAGS (GEOFLAG_WALL | GEOFLAG_BLOCK_SIGHT | GEOFLAG_BLOCK_SHOOT)
 
+// how far the turret is turned between tests of the barrel: 5 degrees
+#define TANK_TURRET_STEP (5.0f * M_BADTAU / 360.0f)
+
 #define TANK_PART_TURRET 1
 #define TANK_PART_SEAT   2
 #define TANK_PART_BARREL 3
@@ -133,6 +137,12 @@ static struct {
 	f32 entertheta;
 	f32 enterverta;
 	f32 enterclimb;   // how far up the tank he stood as he got in
+	s32 enginevol;    // g_TankEngineSfxVolume, GoldenEye's 0 to 32767
+	struct prop *fadeprop; // the tank whose engine dies away after he left it
+	u32 engineuuid;   // the engine's and the treads' channels, and the
+	s32 enginebase;   // volume each was started at, which GoldenEye's
+	u32 treaduuid;    // volume is a share of
+	s32 treadbase;
 } g_Tank[MAX_PLAYERS];
 
 // A probe's hands on the sticks (gdb sets all three; build/gexrom/tankdrive.py):
@@ -238,6 +248,21 @@ void geTankReset(void)
 s32 geTankIsDriving(void)
 {
 	return g_Tank[g_Vars.currentplayernum].state != TANK_OUT && tankDriven() != NULL;
+}
+
+/**
+ * The cannon in hand: its sight stays in the middle of the view. The shell
+ * leaves along the turret, which is the view (tankFire()), wherever the
+ * crosshair is - GoldenEye's gunFireTankShell() takes the turret's direction
+ * whenever the tank is running and never the sight's - and GoldenEye itself
+ * holds the sight across in aim mode with the shells (bondview2.c:
+ * controlStickXRaw = 0, the stick turning the tank). Perfect Dark's sight
+ * swung with the turn and the mouse and pointed where no shell went (F3
+ * 20260930-185749, "the crosshair should be locked in the middle").
+ */
+s32 geTankHoldsSight(void)
+{
+	return geTankIsDriving() && bgunGetWeaponNum(HAND_RIGHT) == WEAPON_GE_TANKSHELLS;
 }
 
 s32 geTankPlayerDriving(struct player *player)
@@ -674,8 +699,23 @@ static void tankEnter(struct prop *prop)
 {
 	const s32 p = g_Vars.currentplayernum;
 	struct tankobj *tank = (struct tankobj *)prop->obj;
+	struct prop *fadeprop = g_Tank[p].fadeprop;
+	const u32 engineuuid = g_Tank[p].engineuuid;
+	const s32 enginebase = g_Tank[p].enginebase;
+
+	// back in while the last tank's engine was still dying away: GoldenEye
+	// keeps that sound and raises it again (g_TankSfxState[0] is not NULL,
+	// so TRUCK_START is not played afresh). Another tank's is let go.
+	if (fadeprop && fadeprop != prop) {
+		psStopSound(fadeprop, PSTYPE_CHOPPERHUM1, 0xffff);
+	}
 
 	memset(&g_Tank[p], 0, sizeof(g_Tank[p]));
+
+	// the dying engine's own volume is what it is raised again from
+	g_Tank[p].engineuuid = fadeprop == prop ? engineuuid : 0;
+	g_Tank[p].enginebase = fadeprop == prop ? enginebase : -1;
+	g_Tank[p].treadbase = -1;
 
 	g_Vars.currentplayer->unk1af0 = prop;
 	g_Tank[p].state = TANK_ENTERING;
@@ -805,10 +845,75 @@ static void tankGiveBackHands(void)
 	invRemoveItemByNum(WEAPON_GE_TANKSHELLS);
 }
 
+/**
+ * A tank sound's volume as GoldenEye sets it (sndCreatePostEvent(.., 8, vol)),
+ * as a share of the volume its channel was started at. False if it is not
+ * playing.
+ */
+static s32 tankSoundVolume(struct prop *prop, s32 type, s32 vol, u32 *uuid, s32 *base)
+{
+	for (s32 i = 0; i < 40; i++) {
+		struct pschannel *channel = &g_PsChannels[i];
+
+		if ((channel->flags & PSFLAG_FREE) == 0 && (channel->flags2 & PSFLAG2_STOPPED) == 0
+				&& channel->prop == prop && channel->type == type) {
+			if (channel->uuid != *uuid || *base < 0) {
+				*uuid = channel->uuid;
+				*base = channel->vol10;
+			}
+
+			if (vol < 0) {
+				vol = 0;
+			} else if (vol > AL_VOL_FULL) {
+				vol = AL_VOL_FULL;
+			}
+
+			channel->vol10 = *base * vol / AL_VOL_FULL;
+			return true;
+		}
+	}
+
+	return false;
+}
+
+/**
+ * Out of the tank: bondview2.c's not-in-tank branch stops the treads (TANK)
+ * at once and lets the engine die away, 1000 off its volume a tick
+ * (geTankTick() carries it on). The engine had been TRUCK_START played once
+ * at a volume worked out where the player stood, so it ran on everywhere
+ * at that volume (F3 20260930-235603).
+ */
 static void tankStopSounds(struct prop *prop)
 {
-	psStopSound(prop, PSTYPE_CHOPPERHUM1, 0xffff);
+	const s32 p = g_Vars.currentplayernum;
+
 	psStopSound(prop, PSTYPE_CHOPPERHUM2, 0xffff);
+
+	if (g_Tank[p].enginevol > 0 && g_Tank[p].enginebase >= 0) {
+		g_Tank[p].fadeprop = prop;
+	} else {
+		psStopSound(prop, PSTYPE_CHOPPERHUM1, 0xffff);
+	}
+}
+
+/** The engine dying away after he climbed out (tankStopSounds()). */
+static void tankFadeEngine(void)
+{
+	const s32 p = g_Vars.currentplayernum;
+	struct prop *prop = g_Tank[p].fadeprop;
+
+	if (!prop) {
+		return;
+	}
+
+	g_Tank[p].enginevol -= 1000 * g_Vars.lvupdate60;
+
+	if (g_Tank[p].enginevol <= 0
+			|| !tankSoundVolume(prop, PSTYPE_CHOPPERHUM1, g_Tank[p].enginevol, &g_Tank[p].engineuuid, &g_Tank[p].enginebase)) {
+		psStopSound(prop, PSTYPE_CHOPPERHUM1, 0xffff);
+		g_Tank[p].fadeprop = NULL;
+		g_Tank[p].enginevol = 0;
+	}
 }
 
 static s32 tankExit(s32 force)
@@ -850,7 +955,7 @@ static s32 tankExit(s32 force)
 		return 0;
 	}
 
-	if (found) {
+	if (found && !g_Vars.currentplayer->isdead) {
 		playerprop->pos.x = pos.x;
 		playerprop->pos.z = pos.z;
 		propDeregisterRooms(playerprop);
@@ -883,6 +988,39 @@ static s32 tankExit(s32 force)
 	g_Vars.currentplayer->speedsideways = 0;
 
 	return 1;
+}
+
+/**
+ * The player died, from playerDieByShooter() - the walk that ticks the tank
+ * (geTankTick()) is not run for a dead player, so a death in the tank left him
+ * in it and blew nothing up (F3 20261002-233320, "the tank should be
+ * exploding"). bondview2.c: a tank explodes with Bond in it - on a mission
+ * played alone as each death replay starts, watched instead of his body
+ * (gedeathcam.c), and anywhere else there and then. He is let out of it where
+ * he is (tankExit() leaves a dead player where he fell), so a respawn does not
+ * carry the tank with him.
+ */
+void geTankPlayerDied(void)
+{
+	const s32 p = g_Vars.currentplayernum;
+	struct tankobj *tank;
+	struct prop *prop;
+
+	if (g_Tank[p].state == TANK_OUT) {
+		return;
+	}
+
+	tank = tankDriven();
+
+	if (tank && objIsHealthy(&tank->base)) {
+		prop = tank->base.prop;
+
+		if (!geDeathCamTankDeath(prop)) {
+			explosionCreateSimple(prop, &prop->pos, prop->rooms, EXPLOSIONTYPE_ROCKET, p);
+		}
+	}
+
+	tankExit(1);
 }
 
 /**
@@ -952,6 +1090,57 @@ s32 geTankActivate(void)
  */
 static struct prop *g_TankObstacle;
 
+static s32 tankMuzzle(struct tankobj *tank, struct coord *out);
+
+/**
+ * Whether the barrel is in something with the hull at `hullyaw` and the
+ * turret at `turretyaw`: the end of bondviewTankCollisionStatus(), a line
+ * from where Bond sits out to the barrel's tip (the muzzle's offset from the
+ * seat, level, turned by hull and turret), through what stops the hull and
+ * at the hull's own height, as GoldenEye's stan line is flat. `step` moves
+ * him first, as it moves the hull.
+ */
+static s32 tankBarrelBlocked(struct tankobj *tank, f32 hullyaw, f32 turretyaw, struct coord *step)
+{
+	const s32 types = CDTYPE_BG | CDTYPE_OBJS | CDTYPE_DOORS | CDTYPE_PATHBLOCKER | CDTYPE_OBJSIMMUNETOEXPLOSIONS;
+	struct prop *playerprop = g_Vars.currentplayer->prop;
+	const f32 savedhull = tank->hullyaw;
+	const f32 savedturret = tank->turretyaw;
+	const f32 savedpitch = tank->turretpitch;
+	struct coord seat;
+	struct coord tip;
+	struct coord from;
+	struct coord to;
+	RoomNum fromrooms[8];
+	s32 ok;
+
+	tank->hullyaw = hullyaw;
+	tank->turretyaw = turretyaw;
+	tank->turretpitch = 0;
+	tankSeat(tank, &seat);
+	ok = tankMuzzle(tank, &tip);
+	tank->hullyaw = savedhull;
+	tank->turretyaw = savedturret;
+	tank->turretpitch = savedpitch;
+
+	if (!ok) {
+		return false;
+	}
+
+	from.x = playerprop->pos.x + (step ? step->x : 0.0f);
+	from.y = g_Vars.currentplayer->vv_manground + TANK_RECT_HEIGHT;
+	from.z = playerprop->pos.z + (step ? step->z : 0.0f);
+
+	to.x = from.x + tip.x - seat.x;
+	to.y = from.y;
+	to.z = from.z + tip.z - seat.z;
+
+	propSetPerimEnabled(tank->base.prop, false);
+	func0f065e74(&playerprop->pos, playerprop->rooms, &from, fromrooms);
+
+	return cdExamLos08(&from, fromrooms, &to, types, TANK_RECT_GEOFLAGS) == CDRESULT_COLLISION;
+}
+
 static s32 tankRectBlocked(struct tankobj *tank, struct coord *step, f32 yaw, struct coord *edgea, struct coord *edgeb)
 {
 	const s32 types = CDTYPE_BG | CDTYPE_OBJS | CDTYPE_DOORS | CDTYPE_PATHBLOCKER | CDTYPE_OBJSIMMUNETOEXPLOSIONS;
@@ -1007,6 +1196,11 @@ static s32 tankRectBlocked(struct tankobj *tank, struct coord *step, f32 yaw, st
 		if (cdExamLos08(&corners[i], cornerrooms[i], &corners[(i + 1) % 4], types, TANK_RECT_GEOFLAGS) == CDRESULT_COLLISION) {
 			goto blocked;
 		}
+	}
+
+	// and the barrel, which GoldenEye tests with the hull
+	if (tankBarrelBlocked(tank, yaw, tank->turretyaw, step)) {
+		goto blocked;
 	}
 
 	goto done;
@@ -1484,18 +1678,28 @@ static void tankFire(struct tankobj *tank)
 	// through: this one goes off at what it hits
 	shell->base.flags2 |= OBJFLAG2_IMMUNETOEXPLOSIONS;
 
+	// GoldenEye's shell is not a rocket: gunFireTankShell() sets only
+	// PROJECTILEFLAG_LAUNCHING, never the rocket's powered flight (flag 0x20,
+	// then POWERED) nor its thrust (unk10), so it flies as a thrown thing does
+	// and falls under the same gravity, 0.2778 a tick squared (propobj.c,
+	// PROP_PROJECTILE_GRAVITY_MODIFIER, Perfect Dark's 1 / 3.6). It had been
+	// launched powered, pushed along its line and never falling, "unnaturally
+	// linear" (F3 20260929-221354). A rocket that hits anything still goes off
+	// there (the rocket's CDRESULT_COLLISION, powered or not).
 	if (shell->base.hidden & OBJHFLAG_PROJECTILE) {
 		shell->timer240 = -1;
-		shell->base.projectile->flags |= PROJECTILEFLAG_POWERED;
-		shell->base.projectile->unk010 = dir.x * 0.27777776f;
-		shell->base.projectile->unk014 = dir.y * 0.27777776f;
-		shell->base.projectile->unk018 = dir.z * 0.27777776f;
+		shell->base.projectile->flags &= ~(PROJECTILEFLAG_POWERED | PROJECTILEFLAG_00000020);
+		shell->base.projectile->unk010 = 0.0f;
+		shell->base.projectile->unk014 = 0.0f;
+		shell->base.projectile->unk018 = 0.0f;
+		shell->base.projectile->unk01c = 0.0f;
 	}
 
-	// GoldenEye's GUN_TANK2BIGBIG_1, the grenade launcher's thump, is the
-	// tank shells' Sound in its weapon table
+	// The tank's row in GoldenEye's weapon table (tank_stats) has Sound 0xB,
+	// GUN_TANK2BIG_1; 12, GUN_TANK2BIGBIG_1, is the grenade launcher's (F3
+	// 20260930-004826, "tank firing uses grenade sound")
 	if (geSfxStage()) {
-		geSfxPlay(12, GESFX_VOLUME);
+		geSfxPlay(11, GESFX_VOLUME);
 	}
 
 	tank->firing = TICKS(8);
@@ -1578,7 +1782,13 @@ static void tankCrush(struct tankobj *tank, f32 halfwidth, f32 halflength)
 	}
 }
 
-/** The engine under load: TRUCK_RUN always, the TANK tread loop while it moves or turns. */
+/**
+ * The engine under load, as bondview2.c sounds it: TRUCK_START, whose sound
+ * runs on as the engine's note (GoldenEye plays TRUCK_RUN only once that
+ * slot is empty, and TRUCK_START never ends), from 25000 at idle to full at
+ * nine tenths of its speed or turn; and the TANK tread loop while it moves or
+ * turns, from nothing to 20000 by 0.15 and full by 0.9.
+ */
 static void tankSounds(struct tankobj *tank)
 {
 	const s32 p = g_Vars.currentplayernum;
@@ -1590,18 +1800,35 @@ static void tankSounds(struct tankobj *tank)
 		util = turnutil;
 	}
 
+	if (util > 1.0f) {
+		util = 1.0f;
+	}
+
 	if (!geSfxStage() || lvIsPaused() || g_Vars.in_cutscene) {
 		return;
 	}
 
-	if (geSfxNum(65)) {
-		psCreateIfNotDupe(prop, geSfxNum(65), PSTYPE_CHOPPERHUM1);
+	if (geSfxNum(66)) {
+		psCreateIfNotDupe(prop, geSfxNum(66), PSTYPE_CHOPPERHUM1);
 	}
 
+	g_Tank[p].enginevol = util < 0.9f ? (s32)(util * 7767.0f / 0.9f + 25000.0f) : AL_VOL_FULL;
+	tankSoundVolume(prop, PSTYPE_CHOPPERHUM1, g_Tank[p].enginevol, &g_Tank[p].engineuuid, &g_Tank[p].enginebase);
+
 	if (util > 0.02f) {
+		s32 vol = AL_VOL_FULL;
+
 		if (geSfxNum(62)) {
 			psCreateIfNotDupe(prop, geSfxNum(62), PSTYPE_CHOPPERHUM2);
 		}
+
+		if (util < 0.15f) {
+			vol = (s32)(util * 20000.0f / 0.15f);
+		} else if (util < 0.9f) {
+			vol = (s32)((util - 0.15f) * 12767.0f / 0.75f + 20000.0f);
+		}
+
+		tankSoundVolume(prop, PSTYPE_CHOPPERHUM2, vol, &g_Tank[p].treaduuid, &g_Tank[p].treadbase);
 	} else {
 		psStopSound(prop, PSTYPE_CHOPPERHUM2, 0xffff);
 	}
@@ -1616,6 +1843,7 @@ void geTankTick(void)
 	f32 halfwidth, halflength, height, bottom;
 
 	if (g_Tank[p].state == TANK_OUT) {
+		tankFadeEngine();
 		return;
 	}
 
@@ -1626,6 +1854,12 @@ void geTankTick(void)
 		// his own again as they are when he climbs out
 		bgunSetAmmoQuantity(TANK_AMMOTYPE, 0);
 		tankGiveBackHands();
+
+		if (g_Vars.currentplayer->unk1af0) {
+			psStopSound(g_Vars.currentplayer->unk1af0, PSTYPE_CHOPPERHUM1, 0xffff);
+			psStopSound(g_Vars.currentplayer->unk1af0, PSTYPE_CHOPPERHUM2, 0xffff);
+		}
+
 		g_Tank[p].state = TANK_OUT;
 		g_Vars.currentplayer->unk1af0 = NULL;
 		return;
@@ -1634,18 +1868,20 @@ void geTankTick(void)
 	prop = tank->base.prop;
 
 	if (g_Vars.currentplayer->isdead) {
-		// bondview2.c: a tank explodes with Bond in it
-		explosionCreateSimple(prop, &prop->pos, prop->rooms, EXPLOSIONTYPE_ROCKET, g_Vars.currentplayernum);
-		tankExit(1);
+		geTankPlayerDied();
 		return;
 	}
 
 	tankSize(tank, &halfwidth, &halflength, &height, &bottom);
 
 	if (g_Tank[p].state == TANK_ENTERING) {
-		if (g_Tank[p].entert == 0.0f && geSfxStage()) {
-			// TRUCK_START as the engine catches
-			geSfxPlayAt(66, prop, NULL, NULL, PSTYPE_NONE, PSFLAG_0400);
+		if (g_Tank[p].entert == 0.0f && geSfxStage() && geSfxNum(66)) {
+			// TRUCK_START as the engine catches, at 25000 (0x61a8), from
+			// the tank and as the tank's engine - tankSounds() keeps it
+			// and tankStopSounds() lets it go
+			psCreateIfNotDupe(prop, geSfxNum(66), PSTYPE_CHOPPERHUM1);
+			g_Tank[p].enginevol = 25000;
+			tankSoundVolume(prop, PSTYPE_CHOPPERHUM1, g_Tank[p].enginevol, &g_Tank[p].engineuuid, &g_Tank[p].enginebase);
 		}
 
 		g_Tank[p].entert += g_Vars.lvupdate60freal / TANK_ENTER_FRAMES;
@@ -1663,9 +1899,53 @@ void geTankTick(void)
 		g_Vars.currentplayer->vv_verta = -20.0f;
 	}
 
-	// the turret is where he looks
-	tank->turretyaw = tankWrap(tankViewYaw() - tank->hullyaw);
+	// the turret is where he looks, unless the barrel would swing into
+	// something: bondview2.c puts the turret's angle back when
+	// bondviewCallTankCollisionStatus() fails after it turned (F3
+	// 20260930-235538). Here the turret is the view, so the view is held
+	// with it. It is walked round in small steps, so a flick of the mouse
+	// does not carry the barrel through a post, and one already in
+	// something is let out of it.
+	{
+		const f32 oldyaw = tank->turretyaw;
+		const f32 wantyaw = tankWrap(tankViewYaw() - tank->hullyaw);
+		f32 diff = wantyaw - oldyaw;
+		f32 gotyaw = wantyaw;
+
+		while (diff > M_PI) diff -= M_BADTAU;
+		while (diff < -M_PI) diff += M_BADTAU;
+
+		if (diff != 0.0f && !tankBarrelBlocked(tank, tank->hullyaw, oldyaw, NULL)) {
+			const s32 steps = (s32)ceilf(fabsf(diff) / TANK_TURRET_STEP);
+
+			gotyaw = oldyaw;
+
+			for (s32 k = 1; k <= steps; k++) {
+				const f32 yaw = tankWrap(oldyaw + diff * k / steps);
+
+				if (tankBarrelBlocked(tank, tank->hullyaw, yaw, NULL)) {
+					break;
+				}
+
+				gotyaw = yaw;
+			}
+
+			if (gotyaw != wantyaw) {
+				g_Vars.currentplayer->vv_theta = tankWrap(M_BADTAU - tankWrap(tank->hullyaw + gotyaw)) * 360.0f / M_BADTAU;
+			}
+		}
+
+		tank->turretyaw = gotyaw;
+	}
+	// bondview2.c: the barrel is lifted 10 degrees over the view while the
+	// shells are in hand, so a shell from the muzzle, which is under the eye,
+	// comes down on what the sight is on. Without it every shell landed short
+	// of the sight (F3 20261002-155025, "the tank shells shoot a little low")
 	tank->turretpitch = g_Vars.currentplayer->vv_verta * M_BADTAU / 360.0f;
+
+	if (bgunGetWeaponNum(HAND_RIGHT) == WEAPON_GE_TANKSHELLS) {
+		tank->turretpitch += 0.17453294f;
+	}
 
 	if (tank->turretpitch < -0.087266468f) {
 		tank->turretpitch = -0.087266468f;

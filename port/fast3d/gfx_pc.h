@@ -29,6 +29,12 @@ struct TextureCacheKey {
     // the outline of a glyph are uploaded from the same pixeldata, so without
     // this they would share one entry and whichever drew first would win.
     uint32_t glyph;
+    // An animated picture's frame plus one, 0 for anything else: a frame is
+    // an entry of its own, uploaded once (xblaTexAnimFrame()).
+    uint16_t anim_frame;
+    // Uploaded with the levels of detail its data holds (G_TEX_OWN_LODS_EXT),
+    // not ones made from the first
+    uint8_t own_lods;
 
     bool operator==(const TextureCacheKey&) const noexcept = default;
 
@@ -64,6 +70,14 @@ struct TextureCacheValue {
     // what it holds on the GPU, for the cache's byte budget.
     uint32_t last_frame = 0;
     uint32_t bytes = 0;
+    // For the F3 trace (gfx_trace_texture_entries()): the frame it was
+    // uploaded in, the size that went up, and where the texels came from -
+    // 'g' the game's own, 'p' a texture pack, 'X' the release's picture for
+    // the number, 'x' a stand-in or a picture bound at the address
+    // (xblatex.c), 'f' a font glyph's, 'm' a menu image.
+    uint32_t upload_frame = 0;
+    uint16_t width = 0, height = 0;
+    char source = 'g';
 
     std::list<struct TextureCacheMapIter>::iterator lru_location;
 };

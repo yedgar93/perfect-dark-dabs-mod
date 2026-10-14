@@ -124,6 +124,19 @@ void xblaMeshRegisterModel(struct modeldef *modeldef, u16 fileid);
 s32 xblaMeshPrebuildBean(struct modeldef *modeldef);
 
 /**
+ * Building a GoldenEye stage's HD meshes while it loads (hdpreload.c): on, a
+ * model that registers has its mesh built there and then (xblaMeshPrebuildBean()).
+ * xblaMeshPreloadModelFile() loads a model the stage has not - a gun's
+ * first-person model - into memory of its own, builds its mesh and lets the
+ * model go again: 1 when a mesh was built. Stats: meshes built and time spent
+ * since it was switched on.
+ */
+void xblaMeshPreloadSet(s32 on);
+s32 xblaMeshPreloading(void);
+void xblaMeshPreloadStats(s32 *built, u64 *us);
+s32 xblaMeshPreloadModelFile(u16 fileid);
+
+/**
  * Draws a node from the release's mesh instead of its own display list.
  *
  * Returns 0 when there is nothing to draw it from, and the caller carries on
@@ -131,6 +144,13 @@ s32 xblaMeshPrebuildBean(struct modeldef *modeldef);
  */
 s32 xblaMeshRenderNode(struct modelrenderdata *renderdata, struct model *model,
 		struct modelnode *node);
+
+/**
+ * After xblaMeshRenderNode() has drawn a node: the node's own lists cut down to
+ * the triangles its mesh leaves out (the Cradle helicopter's pilot), for
+ * model.c to draw as the node's own, or 0 for none.
+ */
+s32 xblaMeshKeptLists(struct model *model, struct modelnode *node, Gfx **opa, Gfx **xlu);
 
 /**
  * A frame is starting: the vertices posed for the last one are two frames old
@@ -304,6 +324,10 @@ s32 xblaMeshHitTest(struct model *model, struct coord *pos, struct coord *far, s
  */
 s32 xblaMeshTakeFineModel(struct model *model);
 s32 xblaMeshSurfaceAlong(struct model *model, const struct coord *from, const struct coord *to, struct coord *hit);
+s32 xblaMeshObjShotTest(struct model *model, struct coord *pos, struct coord *dir, f32 range,
+		struct hitthing *hitthing, s32 *mtxindex, struct modelnode **bboxnode, s32 *hitpart,
+		struct modelnode **dlnode);
+void xblaMeshObjShotTestEnd(void);
 
 /** --xbla-mesh-verbose: log each replaced node's box against its mesh's. */
 void xblaMeshSetVerbose(s32 verbose);
@@ -361,6 +385,13 @@ s32 xblaMeshEnumListNodes(struct modeldef *modeldef, struct modelnode **out, s32
 // A model drawn as one of the release's GoldenEye meshes, measured round the
 // neck: a head's rim (and whether it ends at its jaw) or a body's collar
 s32 xblaMeshBeanSeat(struct modeldef *def, s32 head, f32 *out, s32 *outneckless);
+s32 xblaMeshBeanSeatAt(struct modeldef *def, s32 head, f32 *out, s32 *outneckless, f32 frac);
+// A GoldenEye hat on a head drawn as the release's HD mesh: 1 when both are
+// drawn so, with the offset in the hat's own space that lifts it clear of the
+// hair (`measure`; zero otherwise) - chrRender() uses it in place of the table
+s32 xblaMeshHatSeat(struct model *chrmodel, struct modeldef *headdef, struct model *hatmodel, s32 measure, f32 out[3]);
+// Each vertex of the release's mesh for a model at rest: its main matrix and its place in that joint's frame
+s32 xblaMeshReleaseRestVertices(struct modeldef *def, s32 rigid, void (*fn)(s32 mtx, const f32 local[3], void *arg), void *arg);
 void xblaMeshNodeRestOffset(const struct modelnode *node, f32 out[3]);
 
 /**

@@ -1244,9 +1244,23 @@ void bgun0f098df8(s32 weaponfunc, struct handweaponinfo *info, struct hand *hand
 			hand->loadedammo[ammoindex] += amount;
 			g_Vars.currentplayer->ammoheldarr[hand->ammotypes[ammoindex]] -= amount;
 
+#ifndef PLATFORM_N64
+			// The hand's function is the gset's gun, the definition is the
+			// hand's weapon number's: a hand out of use answers WEAPON_NONE,
+			// whose definition has no ammo (crashes 20261002-062819 and
+			// 20261002-142059, a gun raised on GoldenEye's levels)
+			if (info->definition && info->definition->ammos[ammoindex]
+					&& (info->definition->ammos[ammoindex]->flags & AMMOFLAG_NORESERVE)) {
+#else
 			if (info->definition->ammos[ammoindex]->flags & AMMOFLAG_NORESERVE) {
+#endif
 				g_Vars.currentplayer->ammoheldarr[hand->ammotypes[ammoindex]] = 0;
 			}
+
+#ifndef PLATFORM_N64
+			// GoldenEye's shotguns show what is left in reserve (geguns.c)
+			gegunsShellsLoaded(hand);
+#endif
 
 			if (func);
 		}
@@ -1449,7 +1463,13 @@ s32 bgunTickIncIdle(struct handweaponinfo *info, s32 handnum, struct hand *hand,
 			}
 		} else if (sp34 == 0) {
 			// Clip is empty
-			if (hand->triggeron && info->weaponnum != WEAPON_NONE) {
+			if (hand->triggeron && info->weaponnum != WEAPON_NONE
+#ifndef PLATFORM_N64
+					// GoldenEye's grenade and mines reload with the trigger
+					// held: only a CLICKY row dry-fires (gegunsClicksEmpty())
+					&& gegunsClicksEmpty(info->weaponnum) != 0
+#endif
+					) {
 				hand->unk0cc8_01 = false;
 
 				if (bgunSetState(handnum, HANDSTATE_ATTACKEMPTY)) {
@@ -1670,7 +1690,16 @@ s32 bgunTickIncReload(struct handweaponinfo *info, s32 handnum, struct hand *han
 	u32 stack;
 	struct weaponfunc *func = gsetGetWeaponFunction(&hand->gset);
 
-	if (g_Vars.currentplayer->isdead) {
+	if (g_Vars.currentplayer->isdead
+#ifndef PLATFORM_N64
+			// A hand emptied in the middle of a reload (a GE Plus cinema's
+			// hide, chraicommands.c) answers WEAPON_NONE, whose definition
+			// has no ammo, while its gset still names the gun's function
+			// (crash 20261001-203800)
+			|| info->definition == NULL
+			|| (func && func->ammoindex >= 0 && info->definition->ammos[func->ammoindex] == NULL)
+#endif
+			) {
 		hand->animmode = HANDANIMMODE_IDLE;
 		hand->animload = -1;
 
@@ -1782,9 +1811,26 @@ s32 bgunTickIncReload(struct handweaponinfo *info, s32 handnum, struct hand *han
 	}
 
 	if (hand->stateminor == HANDSTATEMINOR_RELOAD_LOWER) {
-		if (hand->count60 > TICKS(15) || !hand->visible
+		s32 lowered60 = hand->count60;
+
+#ifndef PLATFORM_N64
+		// GoldenEye's gun lets go of an empty trigger in two of its frames
+		// before it starts down: DRY_FIRE ends the frame after the release,
+		// IDLE takes the next and only then RELOAD_START (gunfire.c) - four
+		// ticks at the two a frame gegunsRpm() takes. On the cartridge the
+		// clip is full 38 ticks after the release and the gun ready at 62
+		// (its frames run long on the Phantom and the RC-P90: 42 and 66),
+		// ours 33 and 56 (FINDINGS rows 7 and 21). The thrown knife's wait
+		// is in its recovery already (gegunsOwnTrigger())
+		if (WEAPON_IS_GE(info->weaponnum) && !gegunsReloadSkipsLower(info->weaponnum)) {
+			lowered60 = hand->count60 > TICKS(4) ? hand->count60 - TICKS(4) : 0;
+		}
+#endif
+
+		if (lowered60 > TICKS(15) || !hand->visible
 #ifndef PLATFORM_N64
 				|| gegunsReloadSkipsLower(info->weaponnum)
+				|| gegunsHidesHand(info->weaponnum)
 #endif
 				) {
 			hand->mode = HANDMODE_11;
@@ -1792,8 +1838,18 @@ s32 bgunTickIncReload(struct handweaponinfo *info, s32 handnum, struct hand *han
 			hand->pausetime60 = TICKS(17);
 			hand->count60 = 0;
 			hand->count = 0;
+
+#ifndef PLATFORM_N64
+			// What GoldenEye draws nothing of is ready again 18 into
+			// RELOAD_SWAP on its frames, and a held trigger is read a frame
+			// after: the next mine placed 54 ticks after the last on the
+			// cartridge (FINDINGS row 10)
+			if (gegunsHidesHand(info->weaponnum)) {
+				hand->pausetime60 = TICKS(19);
+			}
+#endif
 		} else {
-			bgunSetArmPitch(hand, hand->count60 * MAX_PITCH / TICKS(16));
+			bgunSetArmPitch(hand, lowered60 * MAX_PITCH / TICKS(16));
 		}
 	}
 
@@ -1806,7 +1862,11 @@ s32 bgunTickIncReload(struct handweaponinfo *info, s32 handnum, struct hand *han
 				hand->unk0cc8_02 = true;
 			}
 
-			if ((hand->stateflags & HANDSTATEFLAG_00000010) == 0) {
+			if ((hand->stateflags & HANDSTATEFLAG_00000010) == 0
+#ifndef PLATFORM_N64
+					&& !WEAPON_IS_GE(info->weaponnum)
+#endif
+					) {
 				bgun0f098df8(hand->gset.weaponfunc, info, hand, 0, 0);
 			}
 
@@ -1842,9 +1902,22 @@ s32 bgunTickIncReload(struct handweaponinfo *info, s32 handnum, struct hand *han
 
 		if (hand->count == 0) {
 			g_Vars.currentplayer->doautoselect = false;
+
+#ifndef PLATFORM_N64
+			// GoldenEye fills the clip as the gun starts back up, at the
+			// start of RELOAD_RAISE (gunfire.c), not as it reaches the
+			// bottom: on the cartridge the clip is full 37-43 ticks after
+			// the release, ours was at 16 (FINDINGS row 7)
+			if (WEAPON_IS_GE(info->weaponnum) && (hand->stateflags & HANDSTATEFLAG_00000010) == 0) {
+				bgun0f098df8(hand->gset.weaponfunc, info, hand, 0, 0);
+			}
+#endif
 		}
 
 		if (hand->count60 >= TICKS(23)
+#ifndef PLATFORM_N64
+				|| gegunsHidesHand(info->weaponnum)
+#endif
 				|| !weaponGetFileNum2(info->weaponnum)
 				|| !weaponHasFlag(info->weaponnum, WEAPONFLAG_00000040)
 				|| weaponHasFlag(info->weaponnum, WEAPONFLAG_00000080)) {
@@ -2061,6 +2134,14 @@ void bgun0f09a6f8(struct handweaponinfo *info, s32 handnum, struct hand *hand, s
 
 	if (func->flags & FUNCFLAG_NOMUZZLEFLASH) {
 		hand->flashon = false;
+#ifndef PLATFORM_N64
+		// the release's own flash cards on a silenced GoldenEye gun, in the
+		// HD look (geguns.c's gegunsCardsLit())
+		if (WEAPON_IS_GE(hand->gset.weaponnum)
+				&& (func->type == INVENTORYFUNCTYPE_SHOOT_SINGLE || hand->shotstotake > 0)) {
+			gegunsCardsLit(handnum, 1);
+		}
+#endif
 	} else {
 #ifdef PLATFORM_N64
 		hand->flashon = true;
@@ -2137,6 +2218,22 @@ void bgun0f09a6f8(struct handweaponinfo *info, s32 handnum, struct hand *hand, s
 			osSetThreadPri(0, osGetThreadPri(&g_AudioManager.thread) + 1);
 #endif
 
+#ifndef PLATFORM_N64
+			// GoldenEye's watch laser plays RICO_LASER2/3 with every shot
+			// and keeps none of them (gunfire.c: sndPlaySfx(.., NULL)), so
+			// they ring over each other; through the two handles below each
+			// shot cut the last off and, both handles still held while the
+			// cut sounds wound down, most shots started nothing - heard for
+			// a moment, then silent (F3 20261002-233053, Train)
+			if (gegunsWatchLaserShot(hand->gset.weaponnum)) {
+				if (gsetGetSingleShootSound(&hand->gset)) {
+					sndStart(var80095200, gsetGetSingleShootSound(&hand->gset), NULL, -1, -1, -1, -1, -1);
+				}
+
+				hand->lastshootframe60 = g_Vars.lvframe60;
+			} else
+#endif
+			{
 			if (hand->audiohandle2 && sndGetState(hand->audiohandle2) != AL_STOPPED) {
 				audioStop(hand->audiohandle2);
 			}
@@ -2170,6 +2267,7 @@ void bgun0f09a6f8(struct handweaponinfo *info, s32 handnum, struct hand *hand, s
 					audioPostEvent(handle, AL_SNDP_PITCH_EVT, *(s32 *) &tmp);
 				}
 
+			}
 			}
 
 #if VERSION >= VERSION_NTSC_1_0
@@ -2325,6 +2423,19 @@ bool bgun0f09aba4(struct hand *hand, struct handweaponinfo *info, s32 handnum, s
 		}
 	}
 
+#ifndef PLATFORM_N64
+	// GoldenEye's gun is ready after its two recoil speeds alone once the
+	// trigger has been let go, whatever the fourth speed and whether or not
+	// it is pressed again yet (gegunsReleasedReady())
+	if (hand->triggerreleased && (hand->stateflags & HANDSTATEFLAG_00000040) == 0) {
+		const s32 ready = gegunsReleasedReady(hand->gset.weaponnum, unk24 + unk25, func->base.fire_animation != NULL);
+
+		if (ready >= 0 && frames >= ready) {
+			return true;
+		}
+	}
+#endif
+
 	if (sum <= frames) {
 		if (unk27 >= 0 && hand->triggerreleased && hand->triggeron) {
 			return true;
@@ -2445,6 +2556,88 @@ bool bgunTickIncAttackingShoot(struct handweaponinfo *info, s32 handnum, struct 
 	return false;
 }
 
+#ifndef PLATFORM_N64
+/**
+ * GoldenEye's grenade and mines, thrown by GoldenEye's rule (gunfire.c), not
+ * by their hosts' throw animations (FINDINGS rows 9 and 10):
+ *
+ * - The grenade is held from the press, its fuse already burning, until the
+ *   trigger lets go or it has been held 240 ticks (TRIGGER_PRESS,
+ *   WHEN_1_CASE_GRENADE_FLD890); GRENADE_THROW then takes 8 more and it
+ *   leaves the hand with 240 less the time held (gun.c's
+ *   generate_player_thrown_grenade(), last_z_trigger_timer) - nothing at all
+ *   once cooked, and it goes off in the hand. GRENADE_RECOVER is 20. Perfect
+ *   Dark's grenade threw 49 ticks after a tap (its pin-and-throw animation),
+ *   its fuse counted that too, and a cooked one held the hand four seconds:
+ *   two throws in a held trigger where the cartridge makes three.
+ * - A mine goes the moment it is asked for: MINE_PLACE 8, MINE_RECOVER 24,
+ *   and with the trigger still held the next one is placed as soon as it is
+ *   up (one every 54-56 ticks on the cartridge). Perfect Dark's mines wait
+ *   in the hand for the trigger to let go.
+ *
+ * The keyframe tables' lengths (gun.c's grenadeThrowKeyframes,
+ * timedMineThrowKeyframes - the grenade's recovery -, proxMineThrowKeyframes
+ * and remoteMineThrowKeyframes) are those times, as gunSample1PTransform()
+ * reads them. Nothing of either is drawn in GoldenEye's own look
+ * (gegunsOwnModelHidden()), and there it plays no animation and no pin; the
+ * release's look still moves the hand by the host's animation.
+ */
+static bool bgunTickIncAttackingGeThrow(s32 handnum, struct hand *hand, struct weaponfunc_throw *func)
+{
+	const bool grenade = hand->gset.weaponnum == WEAPON_GE_GRENADE;
+	const s32 throw60 = 8;
+	// and a frame of IDLE before RELOAD_START (two ticks, gegunsRpm()'s frame)
+	const s32 recover60 = (grenade ? 20 : 24) + 2;
+	const s32 cook60 = 240;
+
+	if (hand->stateminor == HANDSTATEMINOR_ATTACK_THROW_0) {
+		if (hand->statecycles == 0) {
+			// the tick the throw itself began, -1 while it is held
+			hand->gs_int1 = -1;
+			hand->primetimer60 = 0;
+
+			if (func->base.fire_animation && !gegunsOwnModelHidden(hand->gset.weaponnum)) {
+				bgunStartAnimation(func->base.fire_animation, handnum, hand);
+				hand->unk0cc8_01 = grenade;
+			}
+		}
+
+		if (hand->gs_int1 < 0) {
+			if (grenade && hand->triggeron && hand->stateframes < TICKS(cook60)) {
+				hand->primetimer60 = hand->stateframes;
+				return false;
+			}
+
+			// the time held is the fuse it has already burnt; a mine has none
+			hand->primetimer60 = grenade ? MIN(hand->stateframes, TICKS(cook60)) : 0;
+			hand->gs_int1 = hand->stateframes;
+			hand->unk0cc8_01 = false;
+		}
+
+		if (hand->stateframes - hand->gs_int1 < TICKS(throw60)) {
+			return false;
+		}
+
+		hand->stateminor = HANDSTATEMINOR_ATTACK_THROW_1;
+	}
+
+	if (hand->stateminor == HANDSTATEMINOR_ATTACK_THROW_1) {
+		hand->firing = true;
+		hand->attacktype = HANDATTACKTYPE_THROWPROJECTILE;
+		hand->loadedammo[func->base.ammoindex]--;
+		hand->stateminor = HANDSTATEMINOR_ATTACK_THROW_2;
+		hand->gs_int1 = hand->stateframes;
+		return false;
+	}
+
+	if (hand->stateminor == HANDSTATEMINOR_ATTACK_THROW_2) {
+		return hand->stateframes - hand->gs_int1 > TICKS(recover60);
+	}
+
+	return true;
+}
+#endif
+
 bool bgunTickIncAttackingThrow(s32 handnum, struct hand *hand)
 {
 	struct weaponfunc_throw *func = (struct weaponfunc_throw *) gsetGetWeaponFunction(&hand->gset);
@@ -2452,6 +2645,12 @@ bool bgunTickIncAttackingThrow(s32 handnum, struct hand *hand)
 	if (func == NULL) {
 		return true;
 	}
+
+#ifndef PLATFORM_N64
+	if (hand->gset.weaponfunc == FUNC_PRIMARY && gegunsThrowsAsGoldenEye(hand->gset.weaponnum)) {
+		return bgunTickIncAttackingGeThrow(handnum, hand, func);
+	}
+#endif
 
 	if (hand->stateminor == HANDSTATEMINOR_ATTACK_THROW_0) {
 		if (hand->statecycles == 0) {
@@ -2621,6 +2820,14 @@ bool bgunTickIncAttackingMelee(s32 handnum, struct hand *hand)
 
 		return !geslappersSwinging(handnum) || hand->stateframes > TICKS(120);
 	}
+
+	// GoldenEye's knife whooshes as each slash comes across, 16 ticks in
+	// (gunfire.c's KNIFE_SLASH*_BEGIN: KNIFE_THROW1-3 at random); the combat
+	// knife's slash it stands on is silent (FINDINGS row 14)
+	if (hand->gset.weaponnum == WEAPON_GE_HUNTINGKNIFE
+			&& hand->stateframes >= TICKS(16) && hand->stateframes - g_Vars.lvupdate60 < TICKS(16)) {
+		sndStart(var80095200, geSfxGunSound(hand->gset.weaponnum, 95 + rngRandom() % 3), NULL, -1, -1, -1, -1, -1);
+	}
 #endif
 
 	if (hand->stateminor == HANDSTATEMINOR_ATTACK_MELEE_0) {
@@ -2744,8 +2951,45 @@ s32 bgunTickIncAttackEmpty(struct handweaponinfo *info, s32 handnum, struct hand
 {
 	u32 stack;
 	bool playsound = false;
+	s32 clickhost = weaponHost(info->weaponnum);
 
-	switch (weaponHost(info->weaponnum)) {
+#ifndef PLATFORM_N64
+	const s32 geinterval60 = gegunsDryFireInterval60(info->weaponnum);
+
+	// GoldenEye's dry fire (gunfire.c): a trigger on an empty gun clicks at
+	// once and holds GUN_ANIM_STATE_DRY_FIRE for 20 ticks, IDLE takes a
+	// frame and TRIGGER_PRESS starts it over - 22 ticks a click on the
+	// cartridge, 30 on the Cougar, whose press waits 6 first. The cases
+	// below click 25 ticks in and every 25, or, the magnums' and pistols'
+	// case, from the gun's trigger animation - which the Cougar and the
+	// Golden Gun have none of (gegunsOwnTrigger()), so held empty they never
+	// clicked at all (FINDINGS row 12)
+	if (geinterval60 > 0) {
+		// and only while the trigger is held: TRIGGER_PRESS is what clicks
+		if (hand->triggeron && (hand->statecycles == 0 || hand->stateframes >= TICKS(geinterval60))) {
+			struct weaponfunc *func = info->definition ? gsetGetWeaponFunction(&hand->gset) : NULL;
+
+			hand->stateframes = hand->statecycles == 0 ? 0 : hand->stateframes - TICKS(geinterval60);
+			hand->stateflags = 0;
+
+			bgunResetAnim(hand);
+
+			if (func && func->fire_animation) {
+				bgunStartAnimation(func->fire_animation, handnum, hand);
+			}
+
+			playsound = true;
+		}
+
+		clickhost = -1;
+	}
+#endif
+
+	switch (clickhost) {
+#ifndef PLATFORM_N64
+	case -1:
+		break;
+#endif
 	case WEAPON_FALCON2:
 	case WEAPON_FALCON2_SILENCER:
 	case WEAPON_FALCON2_SCOPE:
@@ -3174,7 +3418,25 @@ s32 bgunTickIncChangeGun(struct handweaponinfo *info, s32 handnum, struct hand *
 	// Quick Weapon Swap (modIsQuickWeaponSwapOn()): no put-away, no dip, the
 	// new gun loaded at once, no draw - the same steps in the same order,
 	// each taken the tick it is reached
-	const bool quick = modIsQuickWeaponSwapOn();
+	bool quick = modIsQuickWeaponSwapOn();
+
+	// GoldenEye has no draw nor put-away for what it shows nothing of in the
+	// hand (gunfire.c: SWITCH_RAISE, RELOAD_RAISE and WATCH_RAISE go straight
+	// to idle for an item with WEAPONSTATBITFLAG_HIDE_FIRST_PERSON_HAND or no
+	// model) - the grenade, the mines and the gadgets are thrown the moment
+	// they are chosen. Their hosts' draw (the ECM mine's, 90 ticks), after
+	// the watch's stand-in unarmed went down, kept the first throw back two
+	// seconds (F3 20260930-003456 and 004143, Silo)
+	if (hand->stateminor == HANDSTATEMINOR_CHANGEGUN_UNEQUIP || hand->stateminor == HANDSTATEMINOR_CHANGEGUN_LOWER) {
+		const s32 next = g_Vars.currentplayer->gunctrl.switchtoweaponnum;
+
+		if (gegunsSwitchAtOnce(info->weaponnum)
+				|| (info->weaponnum <= WEAPON_UNARMED && next > WEAPON_UNARMED && gegunsSwitchAtOnce(next))) {
+			quick = true;
+		}
+	} else if (gegunsSwitchAtOnce(info->weaponnum)) {
+		quick = true;
+	}
 #else
 	const bool quick = false;
 #endif
@@ -3294,12 +3556,18 @@ s32 bgunTickIncChangeGun(struct handweaponinfo *info, s32 handnum, struct hand *
 		hand->animmode = HANDANIMMODE_IDLE;
 
 		if (hand->pausechange == 0 || hand->pausetime60 <= hand->count60) {
+#ifndef PLATFORM_N64
+			// GoldenEye's own gun, once bgunTickSwitch2() has handed it over
+			const bool gehold = !quick && g_Vars.currentplayer->gunctrl.switchtoweaponnum < 0
+				&& WEAPON_IS_GE(hand->gset.weaponnum);
+#endif
+
 			raisenow = hand->mode != HANDMODE_6;
 
 			if (hand->mode == HANDMODE_6) {
 #ifndef PLATFORM_N64
 				// once bgunTickSwitch2() has handed over the new weapon
-				if (quick && g_Vars.currentplayer->gunctrl.switchtoweaponnum < 0) {
+				if ((quick || gehold) && g_Vars.currentplayer->gunctrl.switchtoweaponnum < 0) {
 					bgunQuickSwapLoad();
 				}
 #endif
@@ -3315,6 +3583,22 @@ s32 bgunTickIncChangeGun(struct handweaponinfo *info, s32 handnum, struct hand *
 					raisenow = quick;
 				}
 			}
+
+#ifndef PLATFORM_N64
+			// GoldenEye takes the new gun up a fixed few frames after the
+			// swap: gun.c's hand_invisible counts -1, -2, -3 a frame each,
+			// loads the model whole on the third and SWITCH_HOLD raises on
+			// the next - four of its frames, eight ticks at the two a frame
+			// gegunsRpm() takes. Perfect Dark loads a gun a piece a tick
+			// (bgunTickGunLoad()), 13-20 ticks, so the new gun came up 39-44
+			// ticks after the hand took it where the cartridge's takes 30-33
+			// (FINDINGS row 8). So it is loaded at once, as Quick Weapon Swap
+			// loads it, and raised GoldenEye's four frames after the handover
+			// (bgunCanFreeWeapon(): the third tick of this state)
+			if (gehold && raisenow && hand->count < 3 + 8) {
+				raisenow = false;
+			}
+#endif
 
 			if (raisenow) {
 				if (bgunIsLoaded()) {
@@ -3574,6 +3858,9 @@ s32 bgunTickInc(struct handweaponinfo *info, s32 handnum, s32 lvupdate)
 
 	hand->firing = false;
 	hand->flashon = false;
+#ifndef PLATFORM_N64
+	gegunsCardsLit(handnum, 0);
+#endif
 	hand->stateframes += lvupdate;
 
 	if (g_Vars.lvupdate240 > 0) {
@@ -4794,7 +5081,13 @@ void bgunTickMasterLoad(void)
 
 									if (casingindex >= 0) {
 										if (player->gunctrl.cartmodeldef == NULL) {
+#ifndef PLATFORM_N64
+											// a GoldenEye gun's from an alias the release's
+											// own cartridge is drawn on in the HD look
+											filenum = gebeanCasingFile(player->gunctrl.weaponnum, casingindex, g_CartFileNums[casingindex]);
+#else
 											filenum = g_CartFileNums[casingindex];
+#endif
 											player->gunctrl.loadfilenum = filenum;
 											player->gunctrl.gunloadstate = GUNLOADSTATE_MODEL;
 											player->gunctrl.loadtomodeldef = &player->gunctrl.cartmodeldef;
@@ -4827,8 +5120,13 @@ void bgunTickMasterLoad(void)
 								s32 leftcasing = bgunGetCasingIndexForHand(HAND_LEFT);
 								s32 rightcasing = bgunGetCasingIndexForHand(HAND_RIGHT);
 
-								if (leftcasing >= 0 && leftcasing != rightcasing) {
-									player->gunctrl.loadfilenum = g_CartFileNums[leftcasing];
+								const u16 leftfile = leftcasing >= 0
+									? gebeanCasingFile(player->gunctrl.leftweaponnum, leftcasing, g_CartFileNums[leftcasing]) : 0;
+								const u16 rightfile = rightcasing >= 0
+									? gebeanCasingFile(player->gunctrl.weaponnum, rightcasing, g_CartFileNums[rightcasing]) : 0;
+
+								if (leftcasing >= 0 && leftfile != rightfile) {
+									player->gunctrl.loadfilenum = leftfile;
 									player->gunctrl.gunloadstate = GUNLOADSTATE_MODEL;
 									player->gunctrl.loadtomodeldef = &player->gunctrl.leftcartmodeldef;
 									player->gunctrl.loadmemptr = (uintptr_t *) &player->gunctrl.memloadptr;
@@ -5231,6 +5529,21 @@ struct defaultobj *bgunCreateThrownProjectile2(struct chrdata *chr, struct gset 
 			obj->projectile->unk08c = 0.1f;
 			obj->projectile->pickuptimer240 = TICKS(240);
 
+#ifndef PLATFORM_N64
+			// GoldenEye's throws on a converted level: a grenade, a mine or a
+			// gadget leaves the hand with GRENADE_THROW_SFX (gun.c's
+			// generate_player_thrown_grenade() and _object()), a throwing
+			// knife with nothing - it only whooshes as it flies
+			// (generate_player_thrown_knife(), objUpdateThrowKnifeSound(),
+			// knifePlayWooshSound()); Perfect Dark's SFX_THROW is neither
+			// (F3 20260930-190108, "knives use the wrong throwing sound")
+			if (WEAPON_IS_GE(gset->weaponnum) && geSfxStage()) {
+				if (gset->weaponnum != WEAPON_GE_THROWINGKNIFE) {
+					psCreate(NULL, obj->prop, geSfxOr(GESFX_GRENADE_THROW, SFX_THROW), -1,
+							-1, 0, 0, PSTYPE_NONE, NULL, -1, NULL, -1, -1, -1, -1);
+				}
+			} else
+#endif
 			psCreate(NULL, obj->prop, SFX_THROW, -1,
 					-1, 0, 0, PSTYPE_NONE, NULL, -1, NULL, -1, -1, -1, -1);
 		}
@@ -5371,6 +5684,22 @@ void bgunCreateThrownProjectile(s32 handnum, struct gset *gset)
 	muzzlepos.y = g_Vars.currentplayer->hands[handnum].muzzlepos.y;
 	muzzlepos.z = g_Vars.currentplayer->hands[handnum].muzzlepos.z;
 
+#ifndef PLATFORM_N64
+	// GoldenEye's grenade and mines leave from where it holds them in front
+	// of the eye, not the host's muzzle (gegunsThrowOrigin())
+	{
+		struct coord campos;
+
+		if (!droppinggrenade && gegunsThrowOrigin(gset->weaponnum, &campos)) {
+			if (handnum == HAND_LEFT) {
+				campos.x = -campos.x;
+			}
+
+			mtx4TransformVec(camGetProjectionMtxF(), &campos, &muzzlepos);
+		}
+	}
+#endif
+
 	mtx4LoadIdentity(&sp1f4);
 
 	if (weaponHasFlag3(gset->weaponnum, WEAPONFLAG3_THROWNBLADE)) {
@@ -5492,7 +5821,12 @@ void bgunCreateThrownProjectile(s32 handnum, struct gset *gset)
 		velocity.z = gundir.z * 16.666666f;
 #endif
 
-		if (weaponHasFlag3(gset->weaponnum, WEAPONFLAG3_GRENADEARC)) {
+		if (weaponHasFlag3(gset->weaponnum, WEAPONFLAG3_GRENADEARC)
+#ifndef PLATFORM_N64
+				// GoldenEye's grenade goes up 5 as anything it throws
+				&& !gegunsThrowsAsGoldenEye(gset->weaponnum)
+#endif
+				) {
 			velocity.y += 1.6666666f;
 		} else {
 			velocity.y += 5.0f;
@@ -5693,6 +6027,27 @@ void bgunCreateFiredProjectile(s32 handnum)
 			sp260 = funcdef->speed * 1.6666666f / 60.0f;
 			sp25c = funcdef->traveldist * 1.6666666f;
 
+#ifndef PLATFORM_N64
+			// GoldenEye's rocket starts at and gains 1.111 a tick along the
+			// aim (gun.c's gunFireTankShell, D_80053DDC); the host's speed 60
+			// is 1.667 a tick, and its rocket reached Dam's floor in 12 ticks
+			// to the cartridge's 16
+			if (hand->gset.weaponnum == WEAPON_GE_ROCKETLAUNCHER) {
+				sp260 = 1.111111f;
+				sp25c = 0.0f;
+			}
+
+			// and its grenade launcher's round leaves at 33.3 a tick along the
+			// aim (gun.c's gunSpawnGLGrenade) to fall as every projectile does
+			// (0.278 a tick, the same in both, as its bounce and spin are);
+			// the host's traveldist 40 is 66.7 a tick, and its round reached
+			// Dam's floor 3 ticks out to the cartridge's 6 to 9
+			if (hand->gset.weaponnum == WEAPON_GE_GRENADELAUNCHER) {
+				sp260 = 0.0f;
+				sp25c = 33.333332f;
+			}
+#endif
+
 			if (gsetHasFunctionFlags(&hand->gset, FUNCFLAG_CALCULATETRAJECTORY)) {
 				propFindAimingAt(HAND_RIGHT, false, FINDPROPCONTEXT_QUERY);
 
@@ -5826,6 +6181,15 @@ void bgunCreateFiredProjectile(s32 handnum)
 						} else if (funcdef->base.base.flags & FUNCFLAG_PROJECTILE_POWERED) {
 							weapon->base.projectile->flags |= PROJECTILEFLAG_POWERED;
 						}
+
+#ifndef PLATFORM_N64
+						// the round is its host's (WEAPON_GRENADEROUND,
+						// WEAPON_ROCKET); GoldenEye's own lands and is hurt as
+						// GoldenEye's (propobj.c, explosions.c)
+						if (WEAPON_IS_GE(hand->gset.weaponnum)) {
+							weapon->base.projectile->flags |= PROJECTILEFLAG_GEROUND;
+						}
+#endif
 
 						weapon->base.projectile->targetprop = g_Vars.currentplayer->trackedprops[0].prop;
 
@@ -6520,6 +6884,19 @@ void bgunTickSwitch2(void)
 				}
 
 				ctrl->dualwielding = newleftweaponnum != WEAPON_NONE;
+			} else if (ctrl->leftwant > WEAPON_NONE
+					&& ctrl->leftwant != ctrl->switchtoweaponnum
+					&& ctrl->gunmemmixed
+					&& WEAPON_IS_GE(ctrl->switchtoweaponnum) && WEAPON_IS_GE(ctrl->leftwant)
+					&& invHasDoubleWeaponIncAllGuns(ctrl->switchtoweaponnum, ctrl->leftwant)) {
+				// GoldenEye's own pair of two different guns, as its
+				// inventory holds it (a link record: Jungle's RC-P90 and
+				// grenade launcher, taken from Xenia), which GoldenEye
+				// draws in both hands with no house rule. Without Akimbo
+				// it was dropped to the right hand's alone, and the cycle
+				// stuck there for good (F3 20261001-000913)
+				newleftweaponnum = ctrl->leftwant;
+				ctrl->dualwielding = true;
 			}
 
 			if (geTankIsDriving()) {
@@ -6793,6 +7170,51 @@ static bool bgunIsCycleItem(s32 weaponnum)
 	return weaponHost(weaponnum) > WEAPON_PSYCHOSISGUN;
 }
 
+#ifndef PLATFORM_N64
+/**
+ * The left hand's gun as the inventory cycle places the hands. Perfect
+ * Dark's pairs are two of one gun, and the cycle takes the left hand to hold
+ * the right's when dual wielding (bgunGetSwitchToWeapon()). GoldenEye's pair
+ * of two different guns (an inventory pair from a link record, Jungle's
+ * RC-P90 and grenade launcher) is placed by its own left gun, or the cycle
+ * came back to that pair for ever (F3 20261001-000913).
+ */
+static s32 bgunCycleLeftWeapon(s32 right, s32 left)
+{
+	struct gunctrl *ctrl = &g_Vars.currentplayer->gunctrl;
+	s32 own;
+
+	if (left != right || left <= WEAPON_NONE) {
+		return left;
+	}
+
+	own = ctrl->switchtoweaponnum >= 0 ? ctrl->leftwant : ctrl->leftweaponnum;
+
+	if (own > WEAPON_NONE && own != right && WEAPON_IS_GE(right) && WEAPON_IS_GE(own)
+			&& invHasDoubleWeaponIncAllGuns(right, own)) {
+		return own;
+	}
+
+	return left;
+}
+
+/**
+ * Equips the pair of two different guns the cycle chose (GoldenEye's), in
+ * both hands; false for anything else, which the cycle equips as it did.
+ */
+static bool bgunCycleEquipsPair(s32 right, s32 left)
+{
+	if (left <= WEAPON_NONE || left == right || !WEAPON_IS_GE(right) || !WEAPON_IS_GE(left)
+			|| !invHasDoubleWeaponIncAllGuns(right, left)) {
+		return false;
+	}
+
+	bgunEquipHands(right, left);
+
+	return true;
+}
+#endif
+
 void bgunCycleForward(void)
 {
 	s32 weaponnum1;
@@ -6814,8 +7236,17 @@ void bgunCycleForward(void)
 			weaponnum1 = player->gunctrl.prevweaponnum;
 			weaponnum2 = player->gunctrl.prevweaponnum * player->gunctrl.prevwasdualwielding;
 		} else {
+#ifndef PLATFORM_N64
+			weaponnum2 = bgunCycleLeftWeapon(weaponnum1, weaponnum2);
+#endif
 			invChooseCycleForwardWeapon(&weaponnum1, &weaponnum2, false);
 		}
+
+#ifndef PLATFORM_N64
+		if (bgunCycleEquipsPair(weaponnum1, weaponnum2)) {
+			return;
+		}
+#endif
 
 		if (weaponnum2 != weaponnum1) {
 			player->gunctrl.dualwielding = false;
@@ -6852,8 +7283,17 @@ void bgunCycleBack(void)
 			weaponnum1 = player->gunctrl.prevweaponnum;
 			weaponnum2 = player->gunctrl.prevweaponnum * player->gunctrl.prevwasdualwielding;
 		} else {
+#ifndef PLATFORM_N64
+			weaponnum2 = bgunCycleLeftWeapon(weaponnum1, weaponnum2);
+#endif
 			invChooseCycleBackWeapon(&weaponnum1, &weaponnum2, false);
 		}
+
+#ifndef PLATFORM_N64
+		if (bgunCycleEquipsPair(weaponnum1, weaponnum2)) {
+			return;
+		}
+#endif
 
 		if (weaponnum2 == WEAPON_NONE) {
 			player->gunctrl.dualwielding = false;
@@ -9039,7 +9479,7 @@ void bgun0f0a5550(s32 handnum)
 		// the gun off to one side and turned its flank to the eye (F3
 		// 20260929-042906, "cod aim. bonds hand looks wrong with the pp7")
 		sp274.f[0] += (inx - func0f0b131c(handnum) - hand->codaimmuzzlex) * player->codaimfrac;
-		sp274.f[1] += 3.5f * player->codaimfrac;
+		sp274.f[1] += (3.5f + gegunsCodAimLift(weaponnum)) * player->codaimfrac;
 		sp274.f[2] += 3.0f * player->codaimfrac;
 	}
 #endif
@@ -12655,6 +13095,14 @@ void bgunRender(Gfx **gdlptr)
 		if (hand->visible) {
 			gdl = beamRender(gdl, &hand->beam, 0, 0);
 
+#ifndef PLATFORM_N64
+			// One of GoldenEye's guns on its own model, under the lights and
+			// LookAt GoldenEye gives it (geguns.c), not what Perfect Dark's
+			// world happened to load last
+			if (gegunsOwnModelInUse(hand->gset.weaponnum) && hand->gset.weaponnum != WEAPON_UNARMED) {
+				gdl = gegunsLightsAndLookAt(gdl, hand->gset.weaponnum);
+			} else
+#endif
 			if (weaponHasFlag(hand->gset.weaponnum, WEAPONFLAG_00008000)) {
 				gSPSetLights1(gdl++, var80070090);
 				gSPLookAt(gdl++, camGetLookAt());
@@ -13000,6 +13448,13 @@ static void bgunPlayPropHitSoundAs(struct gset *gset, struct prop *prop, s32 tex
  */
 void bgunPlayPropHitSound(struct gset *gset, struct prop *prop, s32 texturenum)
 {
+	// GoldenEye's watch laser hits a body or an object in silence
+	// (gunfire.c's recall_joy2_hits_edit_detail_edit_flag() returns first
+	// for ITEM_WATCHLASER); the Moonraker's host sounded its laser hits
+	if (gegadgetsWatchLaserActive(gset->weaponnum)) {
+		return;
+	}
+
 	geSfxGunHitBegin(gset->weaponnum);
 	bgunPlayPropHitSoundAs(gset, prop, texturenum);
 	geSfxGunHitEnd();
@@ -13325,6 +13780,13 @@ void bgunPlayBgHitSound(struct gset *gset, struct coord *hitpos, s32 texturenum,
 		soundnum = -1;
 		overridden = false;
 
+#ifndef PLATFORM_N64
+		// a wall only sounds its surface under GoldenEye's watch laser
+		// (recall_joy2_hits_edit_flag(): no ricochet for ITEM_WATCHLASER)
+		if (gegadgetsWatchLaserActive(gset->weaponnum)) {
+			// nothing but the default below
+		} else
+#endif
 		if (weaponHasFlag2(gset->weaponnum, WEAPONFLAG2_LASERHIT)) {
 			playdefault = false;
 
@@ -13335,6 +13797,14 @@ void bgunPlayBgHitSound(struct gset *gset, struct coord *hitpos, s32 texturenum,
 				sndStart(var80095200, soundnum, handle, -1, -1, -1, -1, -1);
 				overridden = true;
 			}
+
+#ifndef PLATFORM_N64
+			// and the surface it hit, as any gun's (gegunsMoonrakerMarks())
+			if (gegunsMoonrakerMarks(gset->weaponnum)) {
+				playdefault = true;
+				overridden = false;
+			}
+#endif
 		} else if (weaponHasFlag2(gset->weaponnum, WEAPONFLAG2_BLADEHIT)) {
 			// Knives and bolts make a metal sound
 			soundnum = SFX_HIT_METAL_8079;
@@ -14154,7 +14624,19 @@ void bgunSetAmmoQuantity(s32 ammotype, s32 quantity)
 
 	// For throwable items, the capacity applies to reserve + loaded
 	if (funcnum != -1 && weaponHasAmmoFlag(weaponnum, funcnum, AMMOFLAG_EQUIPPEDISRESERVE)) {
+#ifndef PLATFORM_N64
+		// only what a hand holds of this ammunition: with a mixed Akimbo
+		// pair the other hand's gun is loaded with its own, and a D5K's
+		// thirty rounds beside a throwing knife took the knives' ten down to
+		// -21 held, shown as -20 (F3 20260929-212418)
+		for (s32 h = 0; h < 2; h++) {
+			if (player->hands[h].ammotypes[funcnum] == ammotype) {
+				magamount += player->hands[h].loadedammo[funcnum];
+			}
+		}
+#else
 		magamount = player->hands[0].loadedammo[funcnum] + player->hands[1].loadedammo[funcnum];
+#endif
 	}
 
 	if (quantity > bgunGetCapacityByAmmotype(ammotype) - magamount) {

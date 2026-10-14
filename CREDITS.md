@@ -385,8 +385,14 @@ arrangement, and it works as long as the ledger is kept honestly.
 
 ## Ragdoll and dismemberment add-on integration (October 14, 2026)
 
-- **DabDavis and all Dab's Mod contributors**: the unmodified v3.11.0 base
-  (`ad4d887ba753dbff05c1f3bc44974291f3cb8535`) and all existing features.
+Published build name: **Dab's Mod + Chesluk Physics — Yedgar Repack**.
+
+- **Jon (yedgar93)**: requested and directed this integration, selected the
+  added features and provides hands-on gameplay testing.
+
+
+- **DabDavis and all Dab's Mod contributors**: the v3.14.0 release base
+  (`90c8622e74b35be669d60d177effc6d7d2d7621c`) and all existing features.
 - **Chesluk-Industries and Perfect-Dark-CE contributors**: the ragdoll and
   dismemberment implementation from commit
   `250ebb618433731ff102a812ee827d8344aa9fdd`; the related MinGW alignment fix
@@ -419,10 +425,12 @@ Local build and runtime check results are recorded in RAGDOLL-ADDON.md.
 Successful checks are not a claim that every mission, mod, model pack or
 multiplayer configuration has been exhaustively tested.
 
-### Revision 2 maintenance
+### Integration maintenance
 
 The converted-stage physics check and restored enemy firing were addressed
-following the user's testing. The user also requested the optional per-player
-Crosshair Only While Aiming setting. OpenAI Codex performed these changes
-and local verification with AI assistance. Original feature authors retain
-credit for their work. No game assets are published with this source.
+following the user's testing. OpenAI Codex performed these changes and local
+verification with AI assistance. Original feature authors retain credit for
+their work. No game assets are published with this source.
+
+Body dragging uses Chesluk-Industries's original CE pulling implementation.
+OpenAI Codex connected its settings and Use handling to the v3.14.0 base.

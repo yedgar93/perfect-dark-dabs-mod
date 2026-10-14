@@ -81,6 +81,7 @@
 #include "data.h"
 #include "textures.h"
 #include "geimpact.h"
+#include "gehitpuff.h"
 #include "types.h"
 #include "string.h"
 #ifdef PD_PHYSICS
@@ -112,6 +113,7 @@
 #include "gexplus.h"
 #include "modloader.h"
 #include "gebean.h"
+#include "gebeanstage.h"
 #include "gbiex.h"
 #include "geguns.h"
 #include "romdata.h"
@@ -1108,6 +1110,44 @@ struct defaultobj *objFindByPos(struct coord *pos, RoomNum *rooms)
 	return NULL;
 }
 
+#ifndef PLATFORM_N64
+/**
+ * objFindByPos() in GoldenEye's order (chrprop.c's sub_GAME_7F03FAB0()), for
+ * setting an object down on a converted GoldenEye level. GoldenEye appends
+ * every object it places to the end of its prop list and asks the list from
+ * the end, so the object a new one may stand on is the one placed last;
+ * Perfect Dark puts an object at the head of its list unless it stood on
+ * another (then at the tail) and asks from the head, so its first answer is
+ * the last object placed on a floor. Where three crates share one place - two
+ * stacked, a third in the bottom one's space - GoldenEye tests the top one,
+ * which the third does not reach, and sets it on the floor; Perfect Dark
+ * tested the bottom one and stood the third on it, 96 units up (Archives
+ * prop 152, Frigate's armour 131; FINDINGS row 16). The setup's objects lie
+ * in it in the order they are placed, so the last placed is the furthest on.
+ */
+static struct defaultobj *objFindByPosGe(struct coord *pos, RoomNum *rooms)
+{
+	struct prop *prop = g_Vars.activeprops;
+	struct defaultobj *found = NULL;
+	u8 *start;
+	u8 *end;
+
+	while (prop) {
+		if (prop->type == PROPTYPE_OBJ
+				&& arrayIntersects(prop->rooms, rooms)
+				&& propUpdateGeometry(prop, &start, &end)
+				&& cd000266a4(pos->x, pos->z, (struct geo *)start)
+				&& (found == NULL || (uintptr_t)prop->obj > (uintptr_t)found)) {
+			found = prop->obj;
+		}
+
+		prop = prop->next;
+	}
+
+	return found;
+}
+#endif
+
 void projectileFree(struct projectile *projectile)
 {
 	if (projectile) {
@@ -1678,6 +1718,35 @@ s32 func0f068fc8(struct prop *prop, bool arg1)
 	return 255;
 }
 
+#ifndef PLATFORM_N64
+/**
+ * How lit a converted level's prop is against its rooms with every light
+ * whole: 1 as the level made them, less once a light is shot out or put out.
+ *
+ * GoldenEye shades a prop by its floor tile alone, which is what the remake
+ * branch below does, and GoldenEye's rooms never darken as a whole when a
+ * light goes. Perfect Dark's do (roomHighlight()), so a room with its lamp
+ * shot out went dark round barrels, guards and guns still at their tile's
+ * shade (F3 20260929-213203). The room's brightness now - settled, from its
+ * neighbours too, and any flash - is taken against its own brightness with
+ * every light on (its base plus each light's share, as the settled local
+ * brightness is summed in dlights.c), for each of the prop's rooms, and the
+ * share averaged. It is capped at 1, so a room as the level made it gives 1
+ * and the prop is shaded exactly as before.
+ */
+static f32 propRemakeRoomLightFrac(struct prop *prop)
+{
+	f32 sum = 0;
+	s32 i;
+
+	for (i = 0; prop->rooms[i] != -1; i++) {
+		sum += roomRemakeLightFrac(prop->rooms[i]);
+	}
+
+	return i ? sum / i : 1.0f;
+}
+#endif
+
 void propCalculateShadeColour(struct prop *prop, u8 *nextcol, u16 floorcol)
 {
 	struct defaultobj *obj;
@@ -1732,9 +1801,21 @@ void propCalculateShadeColour(struct prop *prop, u8 *nextcol, u16 floorcol)
 	// drew a converted level's props half again as dark as GoldenEye's.
 	if (modloaderStageIsRemake(g_Vars.stagenum) && !cheatIsActive(CHEAT_PERFECTDARKNESS)
 			&& !USINGDEVICE(DEVICE_NIGHTVISION) && !USINGDEVICE(DEVICE_IRSCANNER)) {
+		f32 frac = propRemakeRoomLightFrac(prop);
+
 		tmp = nextcol[0] * 79 + nextcol[1] * 156 + nextcol[2] * 21;
 		tmp >>= 8;
 		nextcol[3] = (0xff - tmp) * 0.75f;
+
+		// The room's lights shot out: what light the tile's shade leaves on
+		// the prop (255 less the fog's share, see xblaMeshSetMaterial()) goes
+		// down with the room's, and so does the tint the fog blends towards
+		if (frac < 1.0f) {
+			nextcol[0] *= frac;
+			nextcol[1] *= frac;
+			nextcol[2] *= frac;
+			nextcol[3] = 0xff - (0xff - nextcol[3]) * frac;
+		}
 	} else
 #endif
 #if VERSION >= VERSION_NTSC_1_0
@@ -2338,7 +2419,13 @@ void func0f06a650(struct defaultobj *obj, struct coord *pos, Mtxf *arg2, RoomNum
 	struct coord newpos;
 	RoomNum newrooms[2];
 
+#ifdef PLATFORM_N64
 	bbox = modelFindBboxRodata(obj->model);
+#else
+	// GoldenEye's vehicles stand on the box GoldenEye takes for them
+	// (objFindBboxRodata(), gexPlusVehicleBboxNode()), not a wheel's
+	bbox = objFindBboxRodata(obj);
+#endif
 
 #if VERSION >= VERSION_NTSC_1_0
 	room = cdFindFloorRoomYColourFlagsAtPos(pos, rooms, &sp3c, &obj->floorcol, NULL);
@@ -2362,7 +2449,21 @@ void func0f06a650(struct defaultobj *obj, struct coord *pos, Mtxf *arg2, RoomNum
 
 void func0f06a730(struct defaultobj *obj, struct coord *arg1, Mtxf *mtx, RoomNum *rooms, struct coord *centre)
 {
+#ifdef PLATFORM_N64
 	struct modelrodata_bbox *bbox = modelFindBboxRodata(obj->model);
+#else
+	// A GoldenEye vehicle is set on the floor by the box GoldenEye's
+	// sub_GAME_7F04088C() takes (chrobjGetBboxFromObjFile(): the root's
+	// children, then its first child's), as objFindBboxRodata() finds it. The
+	// first box anywhere in Goldfinger 64's cars is a wheel's, under the
+	// wheel's position node (Pgx309Z's at y -500, Pgx297Z's at +1300), the
+	// body's being the root's last child: its 26 Mercedes stood 53.7 into the
+	// road and its covered cars 136 over it, where the cartridge stands them on
+	// their wheels from the first frame. Nothing re-seats a parked one:
+	// GoldenEye's first-tick height (gexplusveh.c) is only for a vehicle whose
+	// record says it moves.
+	struct modelrodata_bbox *bbox = objFindBboxRodata(obj);
+#endif
 	f32 min = objGetLocalYMin(bbox);
 	f32 max = objGetLocalYMax(bbox);
 	struct coord pos2;
@@ -2482,7 +2583,14 @@ void func0f06a730(struct defaultobj *obj, struct coord *arg1, Mtxf *mtx, RoomNum
 
 		if (foundfloor) {
 			bool updated;
+#ifndef PLATFORM_N64
+			bool stoodon = false;
+#endif
+#ifndef PLATFORM_N64
+			struct defaultobj *obj2 = geRoomActive() ? objFindByPosGe(&pos2, rooms2) : objFindByPos(&pos2, rooms2);
+#else
 			struct defaultobj *obj2 = objFindByPos(&pos2, rooms2);
+#endif
 			u8 *start;
 			u8 *end;
 			struct geoblock *block;
@@ -2513,12 +2621,27 @@ void func0f06a730(struct defaultobj *obj, struct coord *arg1, Mtxf *mtx, RoomNum
 						&& block->ymin < y + (max - min) * sp70.m[row][1] + slack) {
 					pos2.y = block->ymax - sp70.m[row][1] * min;
 					obj->hidden |= OBJHFLAG_00008000;
+#ifndef PLATFORM_N64
+					stoodon = true;
+#endif
 				} else {
 					pos2.y = y - min * sp70.m[row][1] + func0f06a620(obj);
 				}
 			} else {
 				pos2.y = y - min * sp70.m[row][1] + func0f06a620(obj);
 			}
+
+#ifndef PLATFORM_N64
+			// GoldenEye sets everything it does not stand on another object
+			// four units over its floor, a weapon too (sub_GAME_7F04088C());
+			// Perfect Dark gives a weapon none. Depot's rocket launcher, on
+			// the floor beside the rockets' desk in both games, lay four
+			// units lower than GoldenEye's (oracle, F3 20261001-000059).
+			if (obj->type == OBJTYPE_WEAPON && modloaderStageIsRemake(g_Vars.stagenum)
+					&& !stoodon) {
+				pos2.y += 4;
+			}
+#endif
 		}
 	}
 
@@ -2892,6 +3015,68 @@ bool func0f06b488(struct prop *prop, struct coord *arg1, struct coord *arg2, str
 	return false;
 }
 
+#ifndef PLATFORM_N64
+/**
+ * GoldenEye's own case for Caverns' eye and iris doors (propobj.c,
+ * sub_GAME_7F04E720() for a shot and projectileLineTestModel() for a thrown
+ * object): their models carry the hit box beside the leaves rather than over
+ * them, so the stock walk - a bbox, then the lists under it - found no
+ * triangle and shots and mines went straight through a shut door (F3
+ * 20261002-151329, 20261003-001221). GoldenEye tests the door's own box (its
+ * DoorRecord bbox: the model's, clipped to the open fraction with
+ * DOORFLAG_CLIP_TO_BBOX, as doorGetBbox() does) and then every list of the
+ * model. Perfect Dark has no door of either type.
+ * Returns the box's hitpart, or 0.
+ */
+static s32 doorGeTestWholeModel(struct defaultobj *obj, struct coord *pos, struct coord *dir,
+		struct hitthing *hitthing, s32 *mtxindex, struct modelnode **bboxnode, struct modelnode **dlnode)
+{
+	struct doorobj *door = (struct doorobj *)obj;
+	struct model *model = obj->model;
+	struct modelnode *node;
+	struct modelrodata_bbox bbox;
+
+	node = modelFindBboxNode(model);
+
+	if (!node) {
+		return 0;
+	}
+
+	doorGetBbox(door, &bbox);
+
+	if (!modelTestBboxNodeForHit(&bbox, &model->matrices[0], pos, dir)) {
+		return 0;
+	}
+
+	if (!func0f0849dc(model, model->definition->rootnode, pos, dir, hitthing, mtxindex, dlnode)) {
+		return 0;
+	}
+
+	*bboxnode = node;
+
+	return bbox.hitpart > 0 ? bbox.hitpart : 1;
+}
+
+static bool doorIsGeWholeModel(struct defaultobj *obj, bool thrown)
+{
+	struct doorobj *door = (struct doorobj *)obj;
+
+	if (obj->type != OBJTYPE_DOOR) {
+		return false;
+	}
+
+	if (door->doortype == DOORTYPE_EYE || door->doortype == DOORTYPE_IRIS) {
+		return true;
+	}
+
+	// A shot's case (sub_GAME_7F04E720()) also takes a door clipped to its
+	// box as it slides (DOORFLAG_CLIP_TO_BBOX, Perfect Dark's DOORFLAG_0004);
+	// a thrown object's (projectileLineTestModel()) takes every door. Only on
+	// a converted level: Perfect Dark's own doors keep its walk.
+	return geRoomActive() && (thrown || (door->doorflags & DOORFLAG_0004));
+}
+#endif
+
 bool func0f06b610(struct defaultobj *obj, struct coord *arg1, struct coord *arg2, struct coord *arg3, f32 arg4, struct coord *arg5, struct coord *arg6, struct coord *arg7, struct coord *arg8, f32 *arg9)
 {
 	struct model *model = obj->model;
@@ -2969,6 +3154,11 @@ bool func0f06b610(struct defaultobj *obj, struct coord *arg1, struct coord *arg2
 					hitpart = modelTestForHit(model, arg5, arg6, &spe4);
 				}
 			} else {
+#ifndef PLATFORM_N64
+				if (doorIsGeWholeModel(obj, true)) {
+					hitpart = doorGeTestWholeModel(obj, arg5, arg6, &thing1, &mtxindex1, &spe4, &node1);
+				} else
+#endif
 				do {
 					hitpart = modelTestForHit(model, arg5, arg6, &spe4);
 
@@ -3182,9 +3372,13 @@ bool func0f06bea0(struct model *model, struct modelnode *endnode, struct modelno
 				rwdata = modelGetNodeRwData(model, node);
 
 				if (rwdata->gdl != NULL) {
-					if (rwdata->gdl == rodata->dl.opagdl) {
+					// A monitor's screen drawn into a past frame's list:
+					// test the model's own quad (see gfxIsFrameMemory())
+					const bool framegdl = rwdata->gdl != rodata->dl.opagdl && rodata->dl.opagdl != NULL && gfxIsFrameMemory(rwdata->gdl);
+
+					if (rwdata->gdl == rodata->dl.opagdl || framegdl) {
 						s4 = (Gfx *)((uintptr_t)rodata->dl.colours + ((uintptr_t)UNSEGADDR(rodata->dl.opagdl) & 0xffffff));
-					} else {
+					} else if (!gfxIsFrameMemory(rwdata->gdl)) {
 						s4 = rwdata->gdl;
 					}
 
@@ -3192,7 +3386,7 @@ bool func0f06bea0(struct model *model, struct modelnode *endnode, struct modelno
 						s6 = (Gfx *)((uintptr_t)rodata->dl.colours + ((uintptr_t)UNSEGADDR(rodata->dl.xlugdl) & 0xffffff));
 					}
 
-					vertices = rwdata->vertices;
+					vertices = framegdl ? rodata->dl.vertices : rwdata->vertices;
 				}
 			}
 			break;
@@ -4478,6 +4672,9 @@ void objLand(struct prop *prop, struct coord *arg1, struct coord *arg2, bool *em
 {
 	struct defaultobj *obj = prop->obj;
 	struct prop *ownerprop = NULL;
+#ifndef PLATFORM_N64
+	bool geminesilent = false;
+#endif
 
 	if (obj->hidden & OBJHFLAG_PROJECTILE) {
 		ownerprop = obj->projectile->ownerprop;
@@ -4516,10 +4713,40 @@ void objLand(struct prop *prop, struct coord *arg1, struct coord *arg2, bool *em
 		autogun->yrot = autogun->yzero;
 	}
 
+#ifndef PLATFORM_N64
+	// GoldenEye's mine sticks with ATTACH_MINE_SFX and nothing of the surface
+	// (propobj.c's thrown weapon tick); Perfect Dark's sounded the surface
+	// it hit, and no mine of GoldenEye's attached audibly (FINDINGS row 10)
+	if (obj->type == OBJTYPE_WEAPON && geSfxStage()) {
+		struct weaponobj *weapon = (struct weaponobj *)obj;
+
+		if (weapon->weaponnum == WEAPON_GE_TIMEDMINE || weapon->weaponnum == WEAPON_GE_PROXIMITYMINE
+				|| weapon->weaponnum == WEAPON_GE_REMOTEMINE) {
+			const s32 num = geSfxNum(GESFX_ATTACH_MINE);
+			// coming down on a floor it lands with DROP_GUN_SFX as well, as
+			// anything thrown does (on the cartridge a first mine on Dam's
+			// floor is heard with it every time, ATTACH_MINE only some)
+			const s32 drop = g_EmbedProp == NULL && arg2->y > 0.7f ? geSfxNum(GESFX_DROP_GUN) : 0;
+
+			if (num) {
+				psCreate(0, prop, num, -1, -1, 0, 0, PSTYPE_NONE, 0, -1.0f, 0, -1, -1.0f, -1.0f, -1.0f);
+				geminesilent = true;
+			}
+
+			if (drop) {
+				psCreate(0, prop, drop, -1, -1, 0, 0, PSTYPE_NONE, 0, -1.0f, 0, -1, -1.0f, -1.0f, -1.0f);
+			}
+		}
+	}
+#endif
+
 	if (g_EmbedProp) {
 		if (obj->type == OBJTYPE_WEAPON) {
 			struct weaponobj *weapon = (struct weaponobj *)obj;
 
+#ifndef PLATFORM_N64
+			if (!geminesilent)
+#endif
 			bgunPlayPropHitSound(&weapon->gset, g_EmbedProp, -1);
 
 			if (weaponHasFlag2(weapon->weaponnum, WEAPONFLAG2_POISONS)
@@ -4545,6 +4772,9 @@ void objLand(struct prop *prop, struct coord *arg1, struct coord *arg2, bool *em
 	} else if (obj->type == OBJTYPE_WEAPON) {
 		struct weaponobj *weapon = (struct weaponobj *)obj;
 
+#ifndef PLATFORM_N64
+		if (!geminesilent)
+#endif
 		bgunPlayBgHitSound(&weapon->gset, arg1, -1, prop->rooms);
 	}
 }
@@ -4869,6 +5099,20 @@ void weaponTick(struct prop *prop)
 			if (obj->flags2 & OBJFLAG2_WEAPON_HUGEEXP) {
 				exptype = EXPLOSIONTYPE_HUGE17;
 			}
+#ifndef PLATFORM_N64
+			// GoldenEye's remote mine goes off bigger on Facility
+			// (propobj.c: EXPLOSION_DEF_FACILITY_REMOTE when the stage is
+			// LEVELID_FACILITY, mission and arena alike), the row Perfect
+			// Dark kept as 19: 250 out and hurting to 600 where the
+			// standard is 200 and 400 - the one mine that takes the three
+			// guards in the room with the console there (F3
+			// 20261002-154524). GoldenEye's own Facility only, by its file
+			// (bg_gxark.seg), not a ROM hack's mission in the same place
+			else if (weapon->weaponnum == WEAPON_GE_REMOTEMINE
+					&& modloaderStageIsGeLevel(g_Vars.stagenum, "ark")) {
+				exptype = EXPLOSIONTYPE_GEFACILITYREMOTE;
+			}
+#endif
 
 			if (propExplode(prop, exptype)) {
 				weapon->timer240 = -1;
@@ -6636,8 +6880,113 @@ s32 projectileLaunch(struct defaultobj *obj, struct projectile *projectile, stru
 	return cdresult;
 }
 
+#ifndef PLATFORM_N64
+/**
+ * GoldenEye's mines stack. Its thrown weapon tick embeds a mine in the first
+ * prop it meets, and a mine thrown where another lies meets that one: on the
+ * cartridge (n64twin traces of objEmbed on Dam, ten timed mines thrown at one
+ * spot) mines 3 to 6 each went into the one before, the stack rising a unit
+ * or two a mine. A child is ticked with its parent, its timer running, but
+ * when the bottom one goes off objFree() frees its children unexploded: that
+ * throw made four explosions, ours made ten, every mine a lone one on the
+ * floor beside the others, which the first explosion then set off one by one
+ * (FINDINGS row 10). Perfect Dark frees an exploded object's children the
+ * same way (objFree()); what was missing was the meeting, which its lying
+ * weapons do not stop a projectile for. So a mine coming down within reach of
+ * one already lying is put on top of it, in the topmost of its stack.
+ */
+#define GEMINE_STACK_REACH 20.0f
+#define GEMINE_STACK_RISE  2.0f
+
+// the first node down from the root that carries a matrix, for objEmbed()
+static struct modelnode *geMineNodeWithMtx(struct modelnode *node)
+{
+	while (node) {
+		u32 type = node->type & 0xff;
+
+		if (type == MODELNODETYPE_POSITION || type == MODELNODETYPE_POSITIONHELD || type == MODELNODETYPE_CHRINFO) {
+			return node;
+		}
+
+		if (node->child) {
+			node = node->child;
+		} else {
+			while (node && node->next == NULL) {
+				node = node->parent;
+			}
+
+			if (node) {
+				node = node->next;
+			}
+		}
+	}
+
+	return NULL;
+}
+
+static struct prop *geMineUnder(struct prop *prop, struct coord *at)
+{
+	struct prop *best = NULL;
+	f32 bestsq = GEMINE_STACK_REACH * GEMINE_STACK_REACH;
+	struct prop *p;
+
+	for (p = g_Vars.activeprops; p; p = p->next) {
+		struct weaponobj *weapon;
+		f32 dx;
+		f32 dz;
+
+		if (p == prop || p->type != PROPTYPE_WEAPON || p->obj == NULL || p->obj->type != OBJTYPE_WEAPON
+				|| (p->obj->hidden & (OBJHFLAG_PROJECTILE | OBJHFLAG_DELETING))) {
+			continue;
+		}
+
+		weapon = (struct weaponobj *) p->obj;
+
+		if (!gegunsMineAttaches(weapon->weaponnum) || weapon->timer240 < 0) {
+			continue;
+		}
+
+		dx = p->pos.x - at->x;
+		dz = p->pos.z - at->z;
+
+		if (dx * dx + dz * dz < bestsq && p->pos.y - at->y < 30.0f && at->y - p->pos.y < 30.0f) {
+			bestsq = dx * dx + dz * dz;
+			best = p;
+		}
+	}
+
+	// the topmost of its stack
+	while (best && best->child) {
+		struct prop *child = best->child;
+
+		while (child && !(child->type == PROPTYPE_WEAPON && child->obj && child->obj->type == OBJTYPE_WEAPON
+					&& gegunsMineAttaches(((struct weaponobj *) child->obj)->weaponnum))) {
+			child = child->next;
+		}
+
+		if (child == NULL) {
+			break;
+		}
+
+		best = child;
+	}
+
+	// objEmbed() takes the matrices it was drawn with this tick, from a
+	// node that has one
+	if (best && ((best->flags & PROPFLAG_ONTHISSCREENTHISTICK) == 0
+				|| geMineNodeWithMtx(best->obj->model->definition->rootnode) == NULL)) {
+		return NULL;
+	}
+
+	return best;
+}
+#endif
+
 s32 projectileTick(struct defaultobj *obj, bool *embedded)
 {
+#ifndef PLATFORM_N64
+	bool gemineland = false;
+#endif
 	struct projectile *projectile = obj->projectile;
 	s32 cdresult;
 	struct coord sp5f4;
@@ -7424,7 +7773,29 @@ s32 projectileTick(struct defaultobj *obj, bool *embedded)
 										func0f0341dc(hitchr, gsetGetDamage(&weapon->gset), &var8009ce78, &weapon->gset, ownerprop,
 												g_EmbedHitPart, g_EmbedProp, g_EmbedNode, g_EmbedModel, g_EmbedSide, var8006993c);
 
+#ifndef PLATFORM_N64
+										// GoldenEye's thrown knife in a body: HIT_BULLET_FLESH
+										// (recall_joy2_hits_edit_detail_edit_flag()), no puff
+										// (only a shot makes chrCreateHitPuffs()'s) and, the
+										// knife stopped, not KNIFE_HIT_WALL, which is for a
+										// wall or the floor (F3 20261002-225649)
+										const bool geknife = WEAPON_IS_GE(weapon->weaponnum) && geSfxStage();
+
+										if (geknife) {
+											const s32 num = geSfxNum(GESFX_HIT_BULLET_FLESH);
+
+											if (num) {
+												psCreate(0, hitprop, num, -1, -1, 0, 0, PSTYPE_NONE, 0, -1.0f, 0, -1, -1.0f, -1.0f, -1.0f);
+											}
+
+											obj->projectile->unk0a4 = g_Vars.lvframenum;
+										}
+#endif
+
 										if (ownershield <= 0.0f) {
+#ifndef PLATFORM_N64
+											if (!geknife)
+#endif
 											chrEmitSparks(hitchr, g_EmbedProp, g_EmbedHitPart, &sp5e8, &sp5f4, ownerprop ? ownerprop->chr : NULL);
 
 											if (g_EmbedProp->flags & PROPFLAG_ONTHISSCREENTHISTICK) {
@@ -7759,6 +8130,33 @@ s32 projectileTick(struct defaultobj *obj, bool *embedded)
 
 						if (sp350) {
 #ifndef PLATFORM_N64
+							// GoldenEye's mine attaches where it first comes
+							// down (its thrown weapon tick embeds a mine on
+							// contact and frees its projectile, with
+							// ATTACH_MINE_SFX, objLand()); Perfect Dark's
+							// hopped on along the floor and lay there still
+							// a projectile - near an armed proximity mine,
+							// moving enough to set it off (FINDINGS row 10)
+							if (sp354 && obj->type == OBJTYPE_WEAPON
+									&& gegunsMineAttaches(((struct weaponobj *) obj)->weaponnum)) {
+								struct prop *under = geMineUnder(prop, &sp5e8);
+
+								if (under) {
+									struct coord top = under->pos;
+									struct coord up = {0, 1, 0};
+
+									top.y += GEMINE_STACK_RISE;
+									g_EmbedProp = under;
+									g_EmbedModel = under->obj->model;
+									g_EmbedNode = geMineNodeWithMtx(under->obj->model->definition->rootnode);
+
+									objLand(prop, &top, &up, embedded);
+								} else {
+									objLand(prop, &sp5e8, &sp5f4, embedded);
+								}
+
+								gemineland = true;
+							} else
 							// GoldenEye's thrown knife is launched sticky as
 							// every thrown thing is, but it has no reason to
 							// stick (it is not STICKSTOWALL, as GoldenEye's
@@ -7802,7 +8200,17 @@ s32 projectileTick(struct defaultobj *obj, bool *embedded)
 					if (obj->type == OBJTYPE_WEAPON) {
 						struct weaponobj *weapon = (struct weaponobj *) obj;
 
-						if (weaponHost(weapon->weaponnum) == WEAPON_COMBATKNIFE && weapon->gunfunc == FUNC_SECONDARY) {
+						if ((weaponHost(weapon->weaponnum) == WEAPON_COMBATKNIFE && weapon->gunfunc == FUNC_SECONDARY)
+#ifndef PLATFORM_N64
+								// GoldenEye's throwing knife throws with its
+								// first and only function (gegunsOwnTrigger()),
+								// and whooshes as it flies (propobj.c's
+								// objUpdateThrowKnifeSound()): with the
+								// combat knife's test it flew in silence
+								// (F3 20260930-190108)
+								|| weapon->weaponnum == WEAPON_GE_THROWINGKNIFE
+#endif
+								) {
 							knifePlayWooshSound(obj);
 						} else if (weaponHost(weapon->weaponnum) == WEAPON_ROCKET) {
 							if (cdresult == CDRESULT_COLLISION) {
@@ -7861,8 +8269,32 @@ s32 projectileTick(struct defaultobj *obj, bool *embedded)
 							}
 						}
 
-						if (cdresult == CDRESULT_COLLISION) {
+						if (cdresult == CDRESULT_COLLISION
+#ifndef PLATFORM_N64
+								// a mine landed above (objLand()) has no projectile now,
+								// and objLand() has sounded it
+								&& !gemineland
+#endif
+								) {
 							if (projectile->unk0a4 < g_Vars.lvframenum - 2) {
+#ifndef PLATFORM_N64
+								// GoldenEye's own: a knife strikes with
+								// KNIFE_HIT_WALL_SFX, anything else thrown lands
+								// with DROP_GUN_SFX (propobj.c's thrown weapon
+								// tick), on a converted level - its grenade
+								// launcher's rounds and its rockets too, which
+								// are their hosts' rounds here
+								if ((WEAPON_IS_GE(weapon->weaponnum) || (projectile->flags & PROJECTILEFLAG_GEROUND))
+										&& geSfxStage()) {
+									const bool knife = weapon->weaponnum == WEAPON_GE_THROWINGKNIFE
+										|| weapon->weaponnum == WEAPON_GE_HUNTINGKNIFE;
+									const s32 num = geSfxNum(knife ? GESFX_KNIFE_HIT_WALL : GESFX_DROP_GUN);
+
+									if (num) {
+										psCreate(0, prop, num, -1, -1, 0, 0, PSTYPE_NONE, 0, -1.0f, 0, -1, -1.0f, -1.0f, -1.0f);
+									}
+								} else
+#endif
 								if (weaponHost(weapon->weaponnum) == WEAPON_COMBATKNIFE || weaponHost(weapon->weaponnum) == WEAPON_COMBATKNIFE) {
 									psCreate(0, prop, SFX_808B, -1, -1, 0, 0, PSTYPE_NONE, 0, -1.0f, 0, -1, -1.0f, -1.0f, -1.0f);
 								} else if (weaponHost(weapon->weaponnum) == WEAPON_GRENADE && weapon->gunfunc == FUNC_SECONDARY) {
@@ -7879,6 +8311,12 @@ s32 projectileTick(struct defaultobj *obj, bool *embedded)
 						}
 					}
 
+#ifndef PLATFORM_N64
+					// a mine put on another above is its child now: its
+					// rooms are its parent's, and registered again here they
+					// had a room unpause it into the prop list it had left
+					if (!(gemineland && (obj->hidden & OBJHFLAG_EMBEDDED)))
+#endif
 					func0f069c70(obj, true, true);
 				}
 
@@ -7905,7 +8343,11 @@ s32 projectileTick(struct defaultobj *obj, bool *embedded)
 						pos.y = prop->pos.y - 1800.0f;
 						pos.z = prop->pos.z + ((burst & 1) ? -400.0f : 400.0f);
 
+						// GoldenEye's flames go where they are made, however
+						// far over the silo the shuttle has climbed
+						g_ExplosionUnbounded = true;
 						explosionCreate(NULL, &pos, prop->rooms, 20, 0, false, NULL, 0, NULL);
+						g_ExplosionUnbounded = false;
 
 						if (burst % 5 == 0) {
 							smokeCreateSimple(&pos, prop->rooms, 10);
@@ -8971,6 +9413,19 @@ void fanUpdateModel(struct prop *prop)
 
 #ifndef PLATFORM_N64
 /**
+ * Whether the autogun stands on one of the setup's pads: a converted
+ * level's autogun does. A deployed Laptop Gun is OBJTYPE_AUTOGUN with pad 1
+ * written by laptopDeploy() - no pad of its own - and asking pad 1 for its
+ * sight walked GoldenEye's tile graph from wherever pad 1 is, so on a
+ * converted level the thrown sentry never saw anybody (F3 20261002-040631,
+ * 20261002-041856).
+ */
+static bool autogunOnPad(struct defaultobj *obj)
+{
+	return obj->pad >= 0 && (obj->flags & OBJFLAG_THROWNLAPTOP) == 0;
+}
+
+/**
  * Where an autogun on a converted GoldenEye level sees and shoots from.
  *
  * GoldenEye stands an object whose second flags carry 0x1 - its "activate"
@@ -8990,7 +9445,7 @@ static bool autogunGeEye(struct prop *prop, struct coord *pos, RoomNum *rooms)
 	struct defaultobj *obj = prop->obj;
 	struct pad pad;
 
-	if (!modloaderStageIsRemake(g_Vars.stagenum) || (obj->flags2 & 0x00000001) == 0 || obj->pad < 0) {
+	if (!modloaderStageIsRemake(g_Vars.stagenum) || (obj->flags2 & 0x00000001) == 0 || !autogunOnPad(obj)) {
 		return false;
 	}
 
@@ -9019,7 +9474,7 @@ static s32 autogunGeSees(struct prop *prop, struct prop *target)
 	struct pad pad;
 	f32 ground;
 
-	if (!modloaderStageIsRemake(g_Vars.stagenum) || obj->pad < 0 || target->chr == NULL) {
+	if (!modloaderStageIsRemake(g_Vars.stagenum) || !autogunOnPad(obj) || target->chr == NULL) {
 		return -1;
 	}
 
@@ -9030,6 +9485,31 @@ static s32 autogunGeSees(struct prop *prop, struct prop *target)
 		: target->chr->ground;
 
 	return geStanAutogunSees(&pad.pos, pad.room, &target->pos, ground);
+}
+#endif
+
+#ifndef PLATFORM_N64
+/**
+ * Whether the player's thrown Laptop Gun takes this chr for an enemy on a
+ * converted GoldenEye mission. The sentry aims at the teams its owner is not
+ * on (targetteam, a mask), and the converter leaves every one of GoldenEye's
+ * guards on team 0, which no mask names: the sentry never chose anybody (F3
+ * 20260929-215224, Aztec, "laptop gun sentry function doesn't seem to work").
+ * The armed chrs that are no civilian count, as for the psychosis gun
+ * (gexPlusPsychosis()): GoldenEye's guards fought Bond, and its unarmed and
+ * its civilians - Natalya, Boris, the scientists - never did.
+ */
+static bool autogunTargetsGeGuard(struct autogunobj *autogun, struct chrdata *chr)
+{
+	return !g_Vars.normmplayerisrunning
+		&& modloaderStageIsMission(g_Vars.stagenum)
+		&& g_ThrownLaptops != NULL
+		&& autogun >= g_ThrownLaptops && autogun < g_ThrownLaptops + g_MaxThrownLaptops
+		&& chr->team == TEAM_00
+		&& chr->prop && chr->prop->type == PROPTYPE_CHR
+		&& chr->aibot == NULL
+		&& (chr->chrflags & CHRCFLAG_KILLCOUNTABLE) == 0
+		&& (chrGetHeldProp(chr, HAND_RIGHT) || chrGetHeldProp(chr, HAND_LEFT));
 }
 #endif
 
@@ -9200,7 +9680,11 @@ void autogunTick(struct prop *prop)
 						continue;
 					}
 
-					if ((chr->team & autogun->targetteam) == 0) {
+					if ((chr->team & autogun->targetteam) == 0
+#ifndef PLATFORM_N64
+							&& !autogunTargetsGeGuard(autogun, chr)
+#endif
+							) {
 						continue;
 					}
 
@@ -9647,6 +10131,24 @@ void autogunTickShoot(struct prop *autogunprop)
 					shootfrom = &gepos;
 					shootrooms = gerooms;
 				}
+
+				// and what its rounds sound like where they land is
+				// GoldenEye's: a Perfect Dark gun's impacts keep Perfect
+				// Dark's samples on a converted level (geSfxGunHitBegin()),
+				// and this gun's rounds are the RC-P45's. A converted
+				// autogun (one on a pad; a deployed laptop gun has none, autogunOnPad())
+				// names a GoldenEye gun for its sounds instead (F3
+				// 20260930-005915, "ceiling autocannon bullets make perfect
+				// dark ricochet sounds")
+				struct gset gesoundgset = { WEAPON_RCP45, 0, 0, FUNC_PRIMARY };
+				struct gset *soundgset = &gset;
+
+				if (modloaderStageIsRemake(g_Vars.stagenum) && autogunOnPad(obj)) {
+					gesoundgset.weaponnum = WEAPON_GE_RCP90;
+					soundgset = &gesoundgset;
+				}
+#else
+				struct gset *soundgset = &gset;
 #endif
 
 				if (g_Vars.normmplayerisrunning) {
@@ -9879,7 +10381,7 @@ void autogunTickShoot(struct prop *autogunprop)
 									hitpos.y -= 2 + (rngRandom() % 10);
 								}
 
-								bgunPlayPropHitSound(&gset, targetprop, -1);
+								bgunPlayPropHitSound(soundgset, targetprop, -1);
 
 								damage = 0.5f * g_AutogunDamageTxScale;
 
@@ -9904,11 +10406,16 @@ void autogunTickShoot(struct prop *autogunprop)
 
 					if (chrIsUsingPaintball(ownerchr)) {
 						sparksCreate(hitrooms[0], NULL, &hitpos, 0, 0, SPARKTYPE_PAINT);
+#ifndef PLATFORM_N64
+					} else if (geHitPuffActive() && autogun->base.modelnum != MODEL_CETROOFGUN) {
+						// GoldenEye's autoguns leave its puff (propobj.c)
+						geHitPuffBg(&hitpos, NULL, 0);
+#endif
 					} else {
 						sparksCreate(hitrooms[0], NULL, &hitpos, 0, 0, autogun->base.modelnum == MODEL_CETROOFGUN ? SPARKTYPE_BGHIT_GREEN : SPARKTYPE_DEFAULT);
 					}
 
-					bgunPlayBgHitSound(&gset, &hitpos, -1, hitrooms);
+					bgunPlayBgHitSound(soundgset, &hitpos, -1, hitrooms);
 				}
 
 				if (makebeam) {
@@ -14202,6 +14709,14 @@ Gfx *tvscreenRender(struct model *model, struct modelnode *node, struct tvscreen
 
 void objRenderProp(struct prop *prop, struct modelrenderdata *renderdata, bool xlupass)
 {
+#ifndef PLATFORM_N64
+	// a prop of the HD level kept out of the room the camera is in
+	// (gebeanstage.c's keptOutOf[], Aztec's armour closet)
+	if (gebeanStageHidesProp(prop)) {
+		return;
+	}
+#endif
+
 	if (prop->flags & PROPFLAG_ONTHISSCREENTHISTICK) {
 		struct defaultobj *obj = prop->obj;
 		struct model *model = obj->model;
@@ -14329,8 +14844,12 @@ void objRenderProp(struct prop *prop, struct modelrenderdata *renderdata, bool x
 		// consoles were a shade under opaque from across the room, and from
 		// behind them the desks and screens on their far side were drawn over
 		// their backs (F3 20260929-182904); up close they were solid.
+		// Not a laser door: its beam is one thin surface with nothing of its
+		// own behind it, and faded out by its laserfade it would still lay
+		// down the depth of a beam nobody can see.
 		const bool solidfade = renderdata->unk30 == 5 && renderdata->zbufferenabled
-			&& (renderdata->envcolour & 0xff) < 0xff;
+			&& (renderdata->envcolour & 0xff) < 0xff
+			&& !(obj->type == OBJTYPE_DOOR && ((struct doorobj *)obj)->doortype == DOORTYPE_LASER);
 
 		if (solidfade) {
 			gSPSetExtraGeometryModeEXT(renderdata->gdl++, G_DEPTH_PREPASS_EXT);
@@ -14732,8 +15251,14 @@ Gfx *objRender(struct prop *prop, Gfx *gdl, bool xlupass)
 	renderdata.fogcolour = colour[0] << 24 | colour[1] << 16 | colour[2] << 8 | colour[3];
 #ifndef PLATFORM_N64
 	// A prop's own reflective spans (Defection's lift and windows) turn with
-	// the player's walk as the rooms' do
-	renderdata.gdl = roomSheenStockBegin(renderdata.gdl);
+	// the player's walk as the rooms' do. Not on a converted GoldenEye level,
+	// whose props reflect where the cartridge has them, as its rooms do
+	// (bgRenderRoomOpaque()): the walk's eye-ray lookup streaked Goldfinger
+	// 64's copper doors on Crab Key, where the cartridge reads the plain
+	// texgen's flat sweep (texsample_ares.py GF_CI)
+	if (!geRoomActive()) {
+		renderdata.gdl = roomSheenStockBegin(renderdata.gdl);
+	}
 #endif
 	objRenderProp(prop, &renderdata, xlupass);
 #ifndef PLATFORM_N64
@@ -16087,9 +16612,13 @@ bool func0f0849dc(struct model *model, struct modelnode *nodearg, struct coord *
 				struct modelrwdata_dl *rwdata = modelGetNodeRwData(model, node);
 
 				if (rwdata->gdl != NULL) {
-					if (rwdata->gdl == rodata->opagdl) {
+					// A monitor's screen drawn into a past frame's list:
+					// test the model's own quad (see gfxIsFrameMemory())
+					const bool framegdl = rwdata->gdl != rodata->opagdl && rodata->opagdl != NULL && gfxIsFrameMemory(rwdata->gdl);
+
+					if (rwdata->gdl == rodata->opagdl || framegdl) {
 						s3 = (Gfx *)((uintptr_t)rodata->colours + ((uintptr_t)UNSEGADDR(rodata->opagdl) & 0xffffff));
-					} else {
+					} else if (!gfxIsFrameMemory(rwdata->gdl)) {
 						s3 = rwdata->gdl;
 					}
 
@@ -16097,7 +16626,7 @@ bool func0f0849dc(struct model *model, struct modelnode *nodearg, struct coord *
 						s5 = (void *)((uintptr_t)rodata->colours + ((uintptr_t)UNSEGADDR(rodata->xlugdl) & 0xffffff));
 					}
 
-					vertices = rwdata->vertices;
+					vertices = framegdl ? rodata->vertices : rwdata->vertices;
 				}
 			}
 			break;
@@ -16688,6 +17217,20 @@ void func0f0859a0(struct prop *prop, struct shotdata *shotdata)
 			hitpart = modelTestForHit(model, &shotdata->gunpos2d, &shotdata->gundir2d, &node1);
 		}
 	} else {
+#ifndef PLATFORM_N64
+		// The HD look's GoldenEye props are shot where they are drawn: the
+		// release's mesh, not the ROM model's triangles (xblaMeshObjShotTest())
+		s32 meshhit = xblaMeshObjShotTest(model, &shotdata->gunpos2d, &shotdata->gundir2d, shotdata->distance,
+				&hitthing1, &spe4, &node1, &hitpart, &node2);
+
+		if (meshhit >= 0) {
+			if (meshhit == 0) {
+				hitpart = 0;
+			}
+		} else if (doorIsGeWholeModel(obj, false)) {
+			hitpart = doorGeTestWholeModel(obj, &shotdata->gunpos2d, &shotdata->gundir2d, &hitthing1, &spe4, &node1, &node2);
+		} else
+#endif
 		do {
 			hitpart = modelTestForHit(model, &shotdata->gunpos2d, &shotdata->gundir2d, &node1);
 
@@ -16695,6 +17238,10 @@ void func0f0859a0(struct prop *prop, struct shotdata *shotdata)
 				break;
 			}
 		} while (hitpart > 0);
+
+#ifndef PLATFORM_N64
+		xblaMeshObjShotTestEnd();
+#endif
 	}
 
 	if (obj->flags3 & OBJFLAG3_HOVERBEDSHIELD) {
@@ -16853,6 +17400,11 @@ void objHit(struct shotdata *shotdata, struct hit *hit)
 	if (!ismeleefunc) {
 		if (chrIsUsingPaintball(g_Vars.currentplayer->prop->chr)) {
 			sparksCreate(prop->rooms[0], prop, &sp110, 0, 0, SPARKTYPE_PAINT);
+#ifndef PLATFORM_N64
+		} else if (geHitPuffActive()) {
+			// GoldenEye's puff, 26 back towards the shooter (propobj.c)
+			geHitPuffBg(&sp110, &shotdata->gundir3d, 26.0f);
+#endif
 		} else {
 			sparksCreate(prop->rooms[0], prop, &sp110, 0, 0, SPARKTYPE_DEFAULT);
 		}
@@ -16882,7 +17434,11 @@ void objHit(struct shotdata *shotdata, struct hit *hit)
 	// Create wall hit (bullet hole)
 	if (!ismeleefunc
 			&& hit->hitthing.texturenum != 10000
-			&& !weaponHasFlag2(shotdata->gset.weaponnum, WEAPONFLAG2_NOWALLHIT)) {
+			&& (!weaponHasFlag2(shotdata->gset.weaponnum, WEAPONFLAG2_NOWALLHIT)
+#ifndef PLATFORM_N64
+				|| gegunsMoonrakerMarks(shotdata->gset.weaponnum)
+#endif
+				)) {
 		if (!hit->slowsbullet) {
 			struct prop *hitprop = hit->prop;
 			s8 iswindoweddoor = obj->model->definition->skel == &g_SkelWindowedDoor ? true : false;
@@ -17860,6 +18416,16 @@ void ammotypeGetPickupName(char *dst, s32 ammotype2, s32 qty)
 	if (ammotype == AMMOTYPE_PISTOL || ammotype == AMMOTYPE_SMG || ammotype == AMMOTYPE_RIFLE) {
 		strcat(dst, langGet(L_PROPOBJ_010)); // "ammo"
 	} else if (ammotype == AMMOTYPE_KNIFE) {
+#ifndef PLATFORM_N64
+		// GoldenEye's knives are its throwing knives (propobj.c's
+		// apped_text_ammotype(): "throwing" before "knife"/"knives"); on its
+		// levels they hand over WEAPON_GE_THROWINGKNIFE (ammotypeGeWeapon()),
+		// unless Perfect Dark's combat knife is already held (F3
+		// 20261002-225759: "picked up combat knife")
+		if (ammotypeGetWeapon(AMMOTYPE_KNIFE) == WEAPON_GE_THROWINGKNIFE) {
+			strcat(dst, langTr("throwing "));
+		} else
+#endif
 		strcat(dst, langGet(L_PROPOBJ_021)); // "combat"
 
 		if (qty == 1) {
@@ -18823,7 +19389,7 @@ s32 objTestForPickup(struct prop *prop)
 			}
 
 			if (maybe) {
-				if (weapon->dualweapon || weapon->dualweaponnum >= 0) {
+				if (weapon->dualweapon || weapon->dualweaponnum != 0xff) {
 					if (weapon->dualweapon) {
 						leftweaponnum = rightweaponnum = weapon->dualweapon->weaponnum;
 					} else {
@@ -18960,7 +19526,24 @@ s32 objTestForPickup(struct prop *prop)
 			pickup = xdiff * xdiff + zdiff * zdiff <= range && ydiff >= -200 && ydiff <= 200;
 		}
 
+#ifndef PLATFORM_N64
+		// a converted level asks GoldenEye's own question, its tile graph in
+		// plan, and not a line through the level's floors and grates
+		s32 gesees = -1;
+
+		if (pickup && (obj->flags2 & OBJFLAG2_PICKUPWITHOUTLOS) == 0 && !usebigrange) {
+			gesees = geStanPickupReaches(&playerprop->pos, g_Vars.currentplayer->vv_manground, &prop->pos);
+		}
+
+		if (gesees == 0) {
+			pickup = false;
+		}
+#else
+		const s32 gesees = -1;
+#endif
+
 		if (pickup
+				&& gesees < 0
 				&& (obj->flags2 & OBJFLAG2_PICKUPWITHOUTLOS) == 0
 				&& !usebigrange
 				&& cdTestLos05(&playerprop->pos, playerprop->rooms, &prop->pos, prop->rooms,
@@ -19677,6 +20260,16 @@ bool chrEquipWeapon(struct weaponobj *weapon, struct chrdata *chr)
 		}
 
 		if ((weapon->base.flags & OBJFLAG_WEAPON_AICANNOTUSE) == 0) {
+#ifndef PLATFORM_N64
+			// A chr whose model has gone (a body taken away) has no hand to
+			// put it in: a mod's cutscene gave a gun to one (crash
+			// 20261002-161001, GE-X); the caller frees the weapon.
+			// Asked before an aibot's old gun is dropped, which it keeps
+			if (!chr->model || !chr->model->definition) {
+				return false;
+			}
+#endif
+
 			if (chr->weapons_held[handnum]) {
 				if (chr->aibot) {
 					chr->weapons_held[handnum]->weapon->base.hidden |= OBJHFLAG_DELETING;
@@ -19988,7 +20581,7 @@ struct weaponobj *weaponCreateProjectileFromGset(s32 modelnum, struct gset *gset
 			0,                      // unk5e
 			0,                      // gunfunc
 			0,                      // fadeouttimer60
-			-1,                     // dualweaponnum
+			0xff,                   // dualweaponnum
 			-1,                     // timer240
 			NULL,                   // dualweapon
 		};
@@ -20121,7 +20714,7 @@ struct prop *weaponCreateForChr(struct chrdata *chr, s32 modelnum, s32 weaponnum
 			0,                      // unk5e
 			0,                      // gunfunc
 			0,                      // fadeouttimer60
-			-1,                     // dualweaponnum
+			0xff,                   // dualweaponnum
 			-1,                     // timer240
 			NULL,                   // dualweapon
 		};
@@ -21410,8 +22003,13 @@ bool func0f08e8ac(struct prop *prop, struct coord *pos, f32 arg2, bool arg3)
 	while (roomnum != -1) {
 #ifndef PLATFORM_N64
 		// On an HD level every room is drawn, but a chr counts as on screen
-		// only in a room the portal walk reached - see bgTickPortalsEveryRoom()
-		if ((prop->type == PROPTYPE_CHR || prop->type == PROPTYPE_PLAYER)
+		// only in a room the portal walk reached - see bgTickPortalsEveryRoom().
+		// So does a door: GoldenEye files six of Frigate's upper-deck doors in
+		// the lower deck's rooms, where the cartridge never draws them from
+		// their own deck and nothing there meets them (guards see and shoot
+		// across, Bond walks through); drawn in the HD look they stood shut in
+		// doorways that are open on the cartridge (F3 20261002-155916)
+		if ((prop->type == PROPTYPE_CHR || prop->type == PROPTYPE_PLAYER || prop->type == PROPTYPE_DOOR)
 				? bgRoomIsPortalVisible(roomnum)
 				: (g_Rooms[roomnum].flags & ROOMFLAG_ONSCREEN) != 0) {
 #else

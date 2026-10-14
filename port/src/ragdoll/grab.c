@@ -113,6 +113,7 @@ void rdObjGrabReset(void)
 {
 	s32 i;
 
+	memset(g_RdGrabs, 0, sizeof(g_RdGrabs));
 	for (i = 0; i < MAX_PLAYERS; i++) {
 		g_RdObjGrabs[i].active = false;
 		g_RdObjGrabs[i].prop = NULL;
@@ -437,8 +438,8 @@ static void ragdollGrabTickPlayer(s32 pn)
 	bool held;
 	s32 i;
 
-	if (!g_RagdollGrab || g_Vars.normmplayerisrunning || player == NULL || player->prop == NULL
-			|| player->isdead || player->bondmovemode == MOVEMODE_CUTSCENE || g_Vars.tickmode == TICKMODE_CUTSCENE) {
+	if (!g_RagdollsEnabled || !g_RagdollGrab || g_Vars.normmplayerisrunning || player == NULL || player->prop == NULL
+			|| player->isdead || player->bondmovemode != MOVEMODE_WALK || g_Vars.tickmode == TICKMODE_CUTSCENE) {
 		rdGrabDrop(pn, "not available");
 		return;
 	}
@@ -448,9 +449,12 @@ static void ragdollGrabTickPlayer(s32 pn)
 	{
 		s32 contpad = optionsGetContpadNum1(g_Vars.playerstats[pn].mpindex);
 
+		s32 mode = optionsGetControlMode(g_Vars.playerstats[pn].mpindex);
 		held = inputButtonPressed(contpad, B_BUTTON) != 0
-			|| (optionsGetControlMode(g_Vars.playerstats[pn].mpindex) == CONTROLMODE_PC
-				&& inputButtonPressed(contpad, BUTTON_ACCEPT_USE) != 0);
+			|| (mode == CONTROLMODE_PC && inputButtonPressed(contpad, BUTTON_ACCEPT_USE) != 0);
+		if (mode >= CONTROLMODE_21 && mode <= CONTROLMODE_24) {
+			held |= inputButtonPressed(optionsGetContpadNum2(g_Vars.playerstats[pn].mpindex), B_BUTTON) != 0;
+		}
 	}
 
 	if (!held) {
@@ -523,11 +527,7 @@ static void ragdollGrabTickPlayer(s32 pn)
 			bodydist = rdVecLen(d);
 		}
 
-		// A pushable object in front of the body (or no body at all)
-		if (ragdollObjGrabTry(pn, eye, dir, bodydist)) {
-			player->usedowntime = -1;
-			return;
-		}
+		// This integration enables body dragging only; ordinary object interactions remain Dab's.
 
 		if (bodydist < 0.0f) {
 			return;

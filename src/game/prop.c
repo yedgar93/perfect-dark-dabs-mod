@@ -55,8 +55,11 @@
 #include "lib/lib_317f0.h"
 #include "data.h"
 #include "geimpact.h"
+#include "gehitpuff.h"
+#include "geguns.h"
 #include "types.h"
 #include <string.h>
+#include "gebeanstage.h"
 
 s16 *g_RoomPropListChunkIndexes;
 struct roomproplistchunk *g_RoomPropListChunks;
@@ -695,6 +698,73 @@ void func0f060bac(s32 weaponnum, struct prop *prop)
 	}
 }
 
+#ifndef PLATFORM_N64
+/**
+ * The rooms a shot's line is tested against on a converted GoldenEye level:
+ * `rooms` (the portal walk's and the forced ones, -1 ended) and then every
+ * other room whose box the line enters, into `dst` (len entries, -1 ended).
+ *
+ * GoldenEye does not follow the line through the portals. Its shot
+ * (chrprop.c, the bullet's background test) tries Bond's own room, then the
+ * rooms connected to it one after another until one is hit, then every room
+ * drawn this frame for a closer hit. A converted level's rooms overlap and a
+ * catwalk is a room of its own that the portal walk from the floor under it
+ * never enters, so Perfect Dark's walk let Bond's shots through Cradle's
+ * catwalks over his head (F3 20261003-154834). Every room the line meets,
+ * nearest hit kept by the caller, is what GoldenEye's three passes come to.
+ */
+static void shotGeRooms(struct coord *from, struct coord *to, RoomNum *rooms, RoomNum *dst, s32 len)
+{
+	struct coord dist;
+	struct coord inv;
+	struct coord pos;
+	s32 n = 0;
+	s32 i;
+	s32 r;
+
+	for (i = 0; rooms[i] != -1 && n < len - 1; i++) {
+		dst[n++] = rooms[i];
+	}
+
+	dist.x = to->x - from->x;
+	dist.y = to->y - from->y;
+	dist.z = to->z - from->z;
+	inv.x = 1.0f / dist.x;
+	inv.y = 1.0f / dist.y;
+	inv.z = 1.0f / dist.z;
+
+	for (r = 1; r < g_Vars.roomcount && n < len - 1; r++) {
+		struct coord bbmin;
+		struct coord bbmax;
+
+		for (i = 0; rooms[i] != -1; i++) {
+			if (rooms[i] == r) {
+				break;
+			}
+		}
+
+		// Rooms the HD look keeps loaded but hides (Cradle's GoldenEye duct
+		// round the release's, Dam's far cliffs) must not stop a shot either
+		if (rooms[i] != -1 || g_Rooms[r].vtxbatches == NULL || gebeanStageRoomHidden(r)) {
+			continue;
+		}
+
+		bbmin.x = g_Rooms[r].bbmin[0];
+		bbmin.y = g_Rooms[r].bbmin[1];
+		bbmin.z = g_Rooms[r].bbmin[2];
+		bbmax.x = g_Rooms[r].bbmax[0];
+		bbmax.y = g_Rooms[r].bbmax[1];
+		bbmax.z = g_Rooms[r].bbmax[2];
+
+		if (bg0f1612e4(&bbmin, &bbmax, from, &dist, &inv, &pos) != 0) {
+			dst[n++] = r;
+		}
+	}
+
+	dst[n] = -1;
+}
+#endif
+
 /**
  * Calculate what was hit from a single shot.
  *
@@ -831,8 +901,19 @@ struct prop *shotCalculateHits(s32 handnum, bool isshooting, struct coord *gunpo
 		// Note this is being appended to rooms
 		bgGetForceOnscreenRooms(roomsptr, 100);
 
-		for (i = 0; rooms[i] != -1; i++) {
-			if (bgTestHitInRoom(&shotdata.gunpos3d, &hitpos, rooms[i], &sp664)) {
+		RoomNum *testrooms = rooms;
+
+#ifndef PLATFORM_N64
+		static RoomNum gerooms[512];
+
+		if (geRoomActive()) {
+			shotGeRooms(&shotdata.gunpos3d, &hitpos, rooms, gerooms, ARRAYCOUNT(gerooms));
+			testrooms = gerooms;
+		}
+#endif
+
+		for (i = 0; testrooms[i] != -1; i++) {
+			if (bgTestHitInRoom(&shotdata.gunpos3d, &hitpos, testrooms[i], &sp664)) {
 				sp664.pos.x *= 1;
 				sp664.pos.y *= 1;
 				sp664.pos.z *= 1;
@@ -845,7 +926,7 @@ struct prop *shotCalculateHits(s32 handnum, bool isshooting, struct coord *gunpo
 							|| (hitpos.z <= shotdata.gunpos3d.z && hitpos.z <= sp664.pos.z && sp664.pos.z <= shotdata.gunpos3d.z))
 						&& (shotdata.gunpos3d.x != sp664.pos.x || shotdata.gunpos3d.y != sp664.pos.y || shotdata.gunpos3d.z != sp664.pos.z)) {
 					hitbg = true;
-					room = rooms[i];
+					room = testrooms[i];
 
 					sp694 = sp664;
 
@@ -971,7 +1052,11 @@ struct prop *shotCalculateHits(s32 handnum, bool isshooting, struct coord *gunpo
 			bgunSetHitPos(&sp694.pos);
 
 			if (surfacetype->numwallhittexes > 0 && (!func || (func->type & 0xff) != INVENTORYFUNCTYPE_MELEE)) {
-				if (!weaponHasFlag2(shotdata.gset.weaponnum, WEAPONFLAG2_NOWALLHIT)) {
+				if (!weaponHasFlag2(shotdata.gset.weaponnum, WEAPONFLAG2_NOWALLHIT)
+#ifndef PLATFORM_N64
+						|| gegunsMoonrakerMarks(shotdata.gset.weaponnum)
+#endif
+						) {
 					texnum = rngRandom() % surfacetype->numwallhittexes;
 					texnum = surfacetype->wallhittexes[texnum];
 
@@ -1000,6 +1085,18 @@ struct prop *shotCalculateHits(s32 handnum, bool isshooting, struct coord *gunpo
 					explosionCreateSimple(NULL, &sp694.pos, rooms2, EXPLOSIONTYPE_PHOENIX, g_Vars.currentplayernum);
 				} else {
 					if (!chrIsUsingPaintball(g_Vars.currentplayer->prop->chr)) {
+#ifndef PLATFORM_N64
+						// GoldenEye's wall hit (chrprop.c): its flash on
+						// every screen count, and its puff 26 back along the
+						// shot (gehitpuff.c)
+						if (geHitPuffActive()) {
+							if (texnum) {
+								explosionCreateSimple(NULL, &sp694.pos, rooms2, EXPLOSIONTYPE_BULLETHOLE, g_Vars.currentplayernum);
+							}
+
+							geHitPuffBg(&sp694.pos, &shotdata.gundir3d, 26.0f);
+						} else
+#endif
 						if (PLAYERCOUNT() >= 2) {
 							if ((rngRandom() % 8) == 0) {
 								smokeCreateSimple(&sp694.pos, rooms2, SMOKETYPE_BULLETIMPACT);
@@ -1057,6 +1154,14 @@ struct prop *shotCalculateHits(s32 handnum, bool isshooting, struct coord *gunpo
 								}
 							}
 
+#ifndef PLATFORM_N64
+							// GoldenEye's bullets leave its puff, not sparks
+							if (sparktype == SPARKTYPE_DEFAULT && geHitPuffActive()) {
+								sparktype = -1;
+							}
+
+							if (sparktype >= 0)
+#endif
 							sparksCreate(room, NULL, &sp694.pos, &shotdata.gundir3d, &sp694.unk0c, sparktype);
 						}
 					}
@@ -2849,6 +2954,22 @@ f32 func0f06438c(struct prop *prop, struct coord *arg1, f32 *arg2, f32 *arg3, f3
 						GEOFLAG_BLOCK_SHOOT);
 			}
 
+#ifndef PLATFORM_N64
+			// GoldenEye's auto-aim scores a target only where its line walk
+			// along the tile graph, from Bond's tile, ends on the target's
+			// tile (chrprop.c's chrpropScoreAutoAimTarget():
+			// stanTestLineUnobstructed() && line_stan == targetprop->stan). A
+			// converted level has no ceilings and its walls stop under the
+			// floor above, so Perfect Dark's line alone locked onto a guard on
+			// Frigate's deck above or behind the bridge walls (F3
+			// 20261002-160509, 20261002-155820).
+			if (ok && geRoomActive() && prop->chr
+					&& geStanLinks(&playerprop->pos, g_Vars.currentplayer->vv_ground,
+						&prop->pos, prop->chr->ground, true) == 0) {
+				ok = false;
+			}
+#endif
+
 			if (ok) {
 				f32 value = spa0[1];
 
@@ -3672,8 +3793,10 @@ void roomGetProps(RoomNum *rooms, s16 *propnums, s32 len)
 	}
 #endif
 
-	// Iterate rooms
-	while (room != -1) {
+	// Iterate rooms. Stops at any room below zero: -1 ends a list, and on a
+	// converted level GEROOM_PROPS_END ends the part whose props are asked
+	// for (geroom.h); the stock lists hold no other negative room.
+	while (room >= 0) {
 		// Find the chunk to start at
 		s32 chunkindex = g_RoomPropListChunkIndexes[room];
 

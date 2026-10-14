@@ -36,6 +36,7 @@
 #include "types.h"
 #ifndef PLATFORM_N64
 #include "geroom.h"
+#include "gehitpuff.h"
 
 #define GE_EXPLOSION_HARMLESS_TICKS 8
 #endif
@@ -55,6 +56,13 @@ struct explosion *g_Explosions;
 // pool, so a change from the menu waits for the next stage.
 s32 g_MaxExplosions = 48;
 s32 g_MaxExplosionsSetting = 48;
+
+// Set around an explosionCreate() whose flames are not to be held inside the
+// rooms it is in: GoldenEye's explosions have no such bound (explosion.c
+// there), and the fire under Aztec's shuttle is made 1800 under it as it
+// climbs out of the level - above the silo's box the flames had nowhere to
+// go and the launch fizzled out half way up (F3 20260929-235205)
+bool g_ExplosionUnbounded = false;
 #else
 s32 g_MaxExplosions = MAX_EXPLOSIONS_DEFAULT;
 #endif
@@ -271,8 +279,14 @@ bool explosionCreate(struct prop *sourceprop, struct coord *exppos, RoomNum *exp
 		return false;
 	}
 
-	// Bullet holes: only crate the flame (explosion) if within 4 metres
+	// Bullet holes: only crate the flame (explosion) if within 4 metres.
+	// GoldenEye has no such limit (explosion.c), so its levels flash at any
+	// range (gehitpuff.c).
+#ifndef PLATFORM_N64
+	if (type == EXPLOSIONTYPE_BULLETHOLE && !geHitPuffActive()) {
+#else
 	if (type == EXPLOSIONTYPE_BULLETHOLE) {
+#endif
 		f32 lodscale = camGetLodScaleZ();
 		struct coord *campos = &g_Vars.currentplayer->cam_pos;
 		f32 xdist = exppos->x - campos->x;
@@ -404,6 +418,10 @@ bool explosionCreate(struct prop *sourceprop, struct coord *exppos, RoomNum *exp
 
 			if (exp->type == EXPLOSIONTYPE_HUGE25) {
 				exp->numbb = 0;
+#ifndef PLATFORM_N64
+			} else if (g_ExplosionUnbounded) {
+				exp->numbb = 0;
+#endif
 			} else {
 				exp->bbs[0].bbmin.x = g_Rooms[exproom].bbmin[0];
 				exp->bbs[0].bbmin.y = g_Rooms[exproom].bbmin[1];
@@ -697,6 +715,71 @@ bool explosionOverlapsProp(struct explosion *exp, struct prop *prop, struct coor
 	return result;
 }
 
+#ifndef PLATFORM_N64
+/**
+ * How a GoldenEye mission's explosion reaches GoldenEye's thrown weapons: by
+ * GoldenEye's own rule (explosion.c there: explosionTick, and
+ * explosionInflictDamage). It hurts what is in a box of hrange + hchange *
+ * age across and vrange + vchange * age high, from age 8 and then once every
+ * quarter of its duration (unk3CA = age + duration / 4) - four times at most
+ * - on GoldenEye's row of the type (NTSC). Perfect Dark's explosion hurts
+ * every tick out to its own radius, and its row 13 lasts 90 where
+ * GoldenEye's mine explosion lasts 180. A mine is set off by any hurt at all,
+ * so ours went off the moment any explosion's reach found it: those lying
+ * beside one that went off, and one thrown past it, one after another. On
+ * the cartridge (n64twin, Dam, ten timed mines) a mine landing by a fresh
+ * explosion went off 57 ticks into it, its second quarter (FINDINGS row 10).
+ */
+static const struct {
+	f32 hrange, vrange, hchange, vchange;
+	s16 duration;
+} g_GeExplosionReach[] = {
+	{ 0.1f, 0.1f, 0, 0, 1 },        { 1, 1, 0, 0, 30 },             { 20, 20, 0, 0, 80 },
+	{ 50, 50, 0, 0, 90 },           { 60, 80, 1, 0.3f, 120 },       { 60, 120, 1, 0.3f, 120 },
+	{ 20, 20, 0, 0, 80 },           { 35, 40, 0, 0, 90 },           { 50, 80, 1, 0.3f, 120 },
+	{ 60, 120, 1, 0.3f, 120 },      { 40, 40, 0.4f, 0.2f, 170 },    { 50, 50, 0.6f, 0.4f, 180 },
+	{ 70, 60, 1, 0.6f, 180 },       { 80, 60, 2, 0.7f, 180 },       { 50, 50, 0, 0, 150 },
+	{ 1, 1, 0, 0, 1 },              { 1, 1, 0, 0, 1 },              { 80, 60, 15, 5, 300 },
+	{ 80, 60, 3, 1, 60 },           { 90, 75, 2.5f, 0.87f, 180 },   { 160, 120, 6, 2, 60 },
+};
+
+static bool explosionGeHurtsWeapon(struct explosion *exp, struct prop *expprop, struct prop *prop)
+{
+	const s32 step = g_Vars.lvupdate60 < TICKS(15) ? g_Vars.lvupdate60 : TICKS(15);
+	s32 quarter;
+	s32 t;
+	f32 h;
+	f32 v;
+
+	if (exp->type < 0 || exp->type >= ARRAYCOUNT(g_GeExplosionReach)) {
+		return true;
+	}
+
+	quarter = g_GeExplosionReach[exp->type].duration >> 2;
+
+	if (quarter < 1) {
+		quarter = 1;
+	}
+
+	for (t = GE_EXPLOSION_HARMLESS_TICKS; t < g_GeExplosionReach[exp->type].duration; t += quarter) {
+		if (t >= exp->age && t < exp->age + (step > 0 ? step : 1)) {
+			break;
+		}
+	}
+
+	if (t >= g_GeExplosionReach[exp->type].duration) {
+		return false;
+	}
+
+	h = g_GeExplosionReach[exp->type].hrange + g_GeExplosionReach[exp->type].hchange * exp->age;
+	v = g_GeExplosionReach[exp->type].vrange + g_GeExplosionReach[exp->type].vchange * exp->age;
+
+	return prop->pos.x - expprop->pos.x <= h && expprop->pos.x - prop->pos.x <= h
+		&& prop->pos.y - expprop->pos.y <= v && expprop->pos.y - prop->pos.y <= v
+		&& prop->pos.z - expprop->pos.z <= h && expprop->pos.z - prop->pos.z <= h;
+}
+#endif
+
 void explosionInflictDamage(struct prop *expprop)
 {
 	s32 stack;
@@ -842,6 +925,23 @@ void explosionInflictDamage(struct prop *expprop)
 
 					if (candamage && prop->type == PROPTYPE_WEAPON) {
 						struct weaponobj *weapon = prop->weapon;
+
+#ifndef PLATFORM_N64
+						// GoldenEye's thrown weapons on its own missions are hurt
+						// by GoldenEye's rule only (explosionGeHurtsWeapon()), and
+						// so are its guns' rounds in flight, which are their
+						// hosts' here: Perfect Dark's rule, every tick, set the
+						// grenade launcher's next round off at the muzzle in
+						// the last one's smoke, 109 ticks on, where GoldenEye's
+						// next quarter is 143
+						if (weapon && (WEAPON_IS_GE(weapon->weaponnum)
+									|| ((weapon->base.hidden & OBJHFLAG_PROJECTILE)
+										&& (weapon->base.projectile->flags & PROJECTILEFLAG_GEROUND)))
+								&& geRoomActive()
+								&& !g_Vars.normmplayerisrunning && !explosionGeHurtsWeapon(exp, expprop, prop)) {
+							candamage = false;
+						}
+#endif
 
 						if (weapon && weaponHost(weapon->weaponnum) == WEAPON_SKROCKET) {
 							weapon->timer240 = 0;

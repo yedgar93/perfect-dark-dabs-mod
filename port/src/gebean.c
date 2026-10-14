@@ -8,7 +8,7 @@
  * .gpu section, a command stream in .stream naming a vertex buffer, a
  * material, a bone palette and a draw, and a 16 bone SKEL_* skeleton whose
  * bind is translation only. What this does with one is what
- * .xbla-work/ge-bean/bean2pack.py did offline, with the one step the OBJ
+ * tools/geconvert/fit/bean2pack.py did offline, with the one step the OBJ
  * could not carry kept: the weights. Each Bean bone is turned so its segment
  * lies along the matching joint of the N64 model's rest pose (which is a star:
  * arms out, legs splayed), the whole is scaled to the N64 skeleton, and every
@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <math.h>
 #include <sys/stat.h>
 #include <ultra64.h>
@@ -69,8 +70,9 @@
 // before the remake's HD props were, so a cache holding any of them is unpacked
 // again. The tenth (".extracted10") is the menus' two fonts, the eleventh the
 // skydomes, the twelfth the HUD's crosshair, the thirteenth the HUD's
-// ammunition pictures.
-#define GEBEAN_DONE_FILE ".extracted13"
+// ammunition pictures, the fourteenth the monitors' pictures, the bullet holes
+// and the hit puffs.
+#define GEBEAN_DONE_FILE ".extracted14"
 #define GEBEAN_SCAN_DEPTH 2
 
 // What says a folder is Bean's, and which of an archive's entries are wanted:
@@ -110,6 +112,16 @@
 #define GEBEAN_WANT_HUD_AMMO "files/texture/bg/ammo"
 // and their two fonts, which are files/misc/alps3 and doc0 (gebeanFontOpen())
 #define GEBEAN_WANT_MENU_FONTS "files/misc/"
+// and the screens' pictures, new/texture/monitors (gemonitor.c), the bullet
+// holes, texture/bulletholes (geimpact.c), and the hit puffs, texture/sfx
+// (gehitpuff.c): none was taken until 2026-10-03, so from the archive every
+// screen showed GoldenEye's own pictures in the HD look - Depot's big world
+// map blurred up from the ROM's, its console GoldenEye's dashes for the
+// release's staff names (F3 20261002-232149) - and the holes and puffs fell
+// back to the ROM's too; only a folder of the whole release had them
+#define GEBEAN_WANT_MONITORS "files/new/texture/monitors/"
+#define GEBEAN_WANT_BULLETHOLES "files/texture/bulletholes/"
+#define GEBEAN_WANT_HITPUFFS "files/texture/sfx/"
 
 #define GEBEAN_BODY           0
 #define GEBEAN_BODY_WITH_HEAD 1
@@ -472,7 +484,7 @@ static s32 gunSlot[ARRAYCOUNT(gunRows)];
  * The GoldenEye remake's props (its `models` block, MODEL_REMAKE_FIRST): each
  * of GoldenEye's own prop models, converted, with Bean's HD prop drawn on it
  * the way a pickup is (gebeanBuildRigid()), fitted offline on Bean's N64-look
- * copy (.xbla-work/ge-arena/propfit.py). In the HD look only: with the meshes
+ * copy (tools/geconvert/fit/propfit.py). In the HD look only: with the meshes
  * off the converted model is GoldenEye's own and draws itself.
  */
 #define PROPROW(file, source, p0, p1, p2, s0, s1, s2, scale, bx, by, bz, nx, ny, nz) \
@@ -489,6 +501,12 @@ static const struct gebeangunrow propRows[] = {
 	// in the hand, the arm raised with the watch on it
 	PROPROW("Igx060Z", "gun/watchmagnetattract", 0, 1, 2, 1, 1, 1, 2.16710f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f),
 	PROPROW("Igx030Z", "gun/trigger", 0, 1, 2, 1, 1, 1, 0.18886f, 0.00f, 0.00f, 0.00f, 1.33f, 161.70f, 646.46f),
+	// and the watch laser's own GwatchlaserZ (Igx023Z), the detonator's twin
+	// in GoldenEye's ROM - same nodes, matrices, bounds and textures
+	// (gegadgets.c) - which the conversion now writes, so Train's watch laser
+	// drew GoldenEye's N64 hands in the HD look (F3 20261002-233019); the
+	// same HD hands and cuffs as the detonator
+	PROPROW("Igx023Z", "gun/trigger", 0, 1, 2, 1, 1, 1, 0.18886f, 0.00f, 0.00f, 0.00f, 1.33f, 161.70f, 646.46f),
 
 	// And the bare hand the slappers are drawn on (ITEM_FIST, geslappers.c):
 	// the release's gun/fist is GoldenEye's GfistZ at 4.7 times the size
@@ -830,6 +848,33 @@ static const u32 fpTint[ARRAYCOUNT(fpRows)] = {
 	[WEAPON_GE_GOLDENGUN       - WEAPON_GE_FIRST] = 0xfff0c86e,
 };
 
+// How much of its reflection map a tinted gun adds (beanGoldPicture())
+#define FP_GOLD_AMOUNT 255
+
+/**
+ * A tinted gun's colour in first person: in the HD look its gold is mostly
+ * the reflection added over it (beanGoldPicture()), so the tint under it is
+ * taken down a quarter for the two together not to wash out to a pale
+ * yellow. A map of a model's own is drawn whatever Mod.XblaReflections says,
+ * as the props' are, so the gun is never left with the dimmer tint alone.
+ */
+static u32 fpGunTint(s32 fp, s32 original)
+{
+	const u32 tint = fpTint[fp];
+
+	u32 out = tint & 0xff000000;
+
+	if (original) {
+		return tint;
+	}
+
+	for (s32 shift = 16; shift >= 0; shift -= 8) {
+		out |= (((tint >> shift) & 0xff) * 3 / 4) << shift;
+	}
+
+	return out;
+}
+
 // Where a tinted gun is lit from. In first person Bean's axes are the host's:
 // y up, the barrel along z, the eye towards -z - above and in front of the eye.
 static const f32 fpLight[3] = { 0.0f, 0.75f, -0.66f };
@@ -898,12 +943,37 @@ static s16 fpMuzzlePart[2][ARRAYCOUNT(fpRows)];
 static u8 fpMuzzleSet[2][ARRAYCOUNT(fpRows)];
 
 /**
+ * The release's muzzle-flash cards on the HD look's gun (fidelity H4; the
+ * user, 2026-10-01: the HD look draws the flash as the release does, in place
+ * of GoldenEye's own). Every gun file of the release carries its flash as
+ * flat cards across the barrel: a layer on SKEL_MUZZLE and a layer or two on
+ * the bones below it, each card one of four quarters of the picture. A Xenia
+ * draw log of the release firing the silenced PP7 on Dam (eight shots) has all
+ * of them drawn for the one frame of each shot, blended without a depth
+ * write, and against the gun's own bone the muzzle layer turned by a random
+ * roll about the barrel and scaled 1.03 to 1.14 about SKEL_MUZZLE's own
+ * place, and the layer below it scaled the same at its own place but turned
+ * to face the eye: GoldenEye's flash and star (gunfire.c's rwmtx[1] and [2],
+ * a roll, 1 to 1.25 the size) moved to the release's skeleton.
+ *
+ * They are drawn on GoldenEye's own model in the hand (fpOnOwn) in the lists
+ * of its flash and its star, which geguns.c's gegunsOwnModelFlash() poses
+ * GoldenEye's way, and so only for the frames the flash is switched on. What
+ * is kept here is where the release pivots them, for that pose: the muzzle
+ * layer's place as an offset from the matrix of the flash's switch (where
+ * GoldenEye's own flash stood), and the star's in the flash's own space.
+ * Only the HD look (0) has cards; the N64 look keeps GoldenEye's flash.
+ */
+static f32 fpCardFlash[ARRAYCOUNT(fpRows)][3];
+static f32 fpCardStar[ARRAYCOUNT(fpRows)][3];
+static u8 fpCardSet[ARRAYCOUNT(fpRows)]; // 1 the flash, 2 the flash and its star
+
+/**
  * The round a launcher's HD model is made loaded with, by Bean's draw number.
  * The release's rocket launcher carries its rocket in the tube as part of the
  * gun, on SKEL_TOP with the rest and under no switch: the rocket itself (draw
- * 2, from the back of the tube out past the mouth to the warhead), four
- * strips along it inside the tube and a disc in the mouth (3-6 and 1, all on
- * the rocket's own picture) and the cap on its nose (21 and 22, on a picture
+ * 2, from the neck in the mouth out to the warhead), a disc in the mouth
+ * (1, on the rocket's own picture) and the cap on its nose (21 and 22, on a picture
  * it shares with the sight). GoldenEye's gun has no rocket in it and hangs one
  * of its own in the mouth, which is what bondgun.c's held rocket is - so the
  * two were drawn together, Perfect Dark's rocket poking out of the warhead
@@ -930,8 +1000,15 @@ struct fpround {
 // starts at the neck in the mouth (1275) and ends at the warhead (4006). All
 // of draw 2 was taken as the round, so the back of the gun went with the
 // rocket on every shot (F3 20260926-071801).
+//
+// And 3-6 are not the round at all, though they are on its picture: four
+// strips lying in the slots of the tube's middle (z -1446..-118, about 200
+// from the tube's axis - on its outside, where the round never is, which
+// starts at 1275). Taken with the round, the empty launcher showed the
+// world through the slots: "a gap in the middle of the launcher" after a
+// shot and when depleted (F3 20261001-000127).
 static const struct fpround fpRound[ARRAYCOUNT(fpRows)] = {
-	[WEAPON_GE_ROCKETLAUNCHER  - WEAPON_GE_FIRST] = { 8, { 1, 2, 3, 4, 5, 6, 21, 22 }, 2, 1000.0f },
+	[WEAPON_GE_ROCKETLAUNCHER  - WEAPON_GE_FIRST] = { 4, { 1, 2, 21, 22 }, 2, 1000.0f },
 };
 
 // Whether the gun built for each look carries its round, as fpMuzzleSet
@@ -942,6 +1019,37 @@ static u8 fpRoundSet[2][ARRAYCOUNT(fpRows)];
 // and past the characters, the watch's bare copies of the guns that carry
 // their own hand (fpWatchRows)
 #define GEBEAN_FPWATCH_BASE (GEBEAN_CHRROW_BASE + ARRAYCOUNT(chrRows))
+
+/*
+ * The release's spent cartridges (files/new/gun/cartridge*), which it throws
+ * out of a GoldenEye gun on every shot in place of GoldenEye's own N64 ones:
+ * seen drawn on 20 of 23 mission captures (tools/gefidelity xbla census, H2),
+ * never loaded by ours, which threw Perfect Dark's GcartridgeZ (bondgun.c's
+ * g_CartFileNums) - the same four casings GoldenEye has (gun.c's
+ * ejected_cartridge[]), with Perfect Dark's own XBLA art on them in the HD
+ * look. In casing order: g_CartFileNums' cartridge, rifle, blue and shell.
+ *
+ * Each is laid onto Perfect Dark's model of the same casing, its one list in
+ * the list's own space (the position node over it stands 31.9 or 21.3 along
+ * z): fitted on the release's N64-look copy (files/original/gun/), every axis
+ * order and sign, the scale from the extents along the longest axis and the
+ * translation centring the boxes - within half a unit on the cartridge, the
+ * blue and the shell; Perfect Dark's rifle casing is wider than GoldenEye's,
+ * so the release's is GoldenEye's size on it. A GoldenEye gun's casing is
+ * loaded from an alias of the host's casing file (gebeanCasingFile()), so a
+ * Perfect Dark gun's casing is untouched, and in the N64 look the alias is
+ * the same model as before.
+ */
+static const struct gebeangunrow cartRows[] = {
+	PROPROW("GgeCartridgeZ", "gun/cartridge",      0, 1, 2,  1,  1, 1, 0.21667f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, -32.50f),
+	PROPROW("GgeCartrifleZ", "gun/cartridgerifle", 0, 1, 2,  1,  1, 1, 0.21250f, 0.00f, 0.00f, 0.00f, 0.00f, 1.50f, -21.00f),
+	PROPROW("GgeCartblueZ",  "gun/cartridgeblue",  0, 1, 2,  1,  1, 1, 0.21250f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, -21.00f),
+	PROPROW("GgeCartshellZ", "gun/cartridgeshell", 0, 1, 2, -1, -1, 1, 0.21491f, 0.00f, 0.00f, 0.00f, 0.00f, 0.00f, -21.00f),
+};
+
+static s32 cartSlot[ARRAYCOUNT(cartRows)];
+
+#define GEBEAN_CARTROW_BASE (GEBEAN_FPWATCH_BASE + ARRAYCOUNT(fpWatchRows))
 
 /**
  * A row of any table: GoldenEye X's first, then the pool's, then the guns',
@@ -979,6 +1087,10 @@ static const struct gebeanrow *gebeanRowAt(s32 row)
 		return &fpWatchRows[row - GEBEAN_FPWATCH_BASE];
 	}
 
+	if (row >= GEBEAN_CARTROW_BASE && row < GEBEAN_CARTROW_BASE + ARRAYCOUNT(cartRows)) {
+		return &cartRows[row - GEBEAN_CARTROW_BASE].row;
+	}
+
 	return NULL;
 }
 
@@ -992,6 +1104,27 @@ static s32 gebeanRowIsWatchArm(const struct gebeanrow *r)
  * The row number of a pool or gun file - an alias this registered - or -1.
  * The alias keeps the table's own string, so a pointer compare names it.
  */
+/**
+ * Whether a file is from a GoldenEye ROM hack's conversion (Goldfinger 64's,
+ * gexPlusRomIsConversionDir()). It names its files as GoldenEye's are named,
+ * but its Pgx027Z is not GoldenEye's console: the release's models are
+ * GoldenEye's own and never stand in for a hack's, in either look.
+ */
+static s32 gebeanFileIsRomHack(u16 fileid)
+{
+	const s32 index = romdataFileGetModDir(fileid);
+	const char *dir = index >= 0 ? fsGetModDirAt(index) : NULL;
+	const char *base = dir;
+
+	for (const char *c = dir; c && *c; ++c) {
+		if (*c == '/' || *c == '\\') {
+			base = c + 1;
+		}
+	}
+
+	return base && gexPlusRomIsConversionDir(base) && strcasecmp(base, GEXPLUSROM_DIR) != 0;
+}
+
 static s32 gebeanPoolRowForFile(u16 fileid)
 {
 	const char *name = fileid ? romdataFileGetName(fileid) : NULL;
@@ -1022,8 +1155,14 @@ static s32 gebeanPoolRowForFile(u16 fileid)
 		}
 	}
 
+	for (s32 i = 0; i < ARRAYCOUNT(cartRows); i++) {
+		if (cartSlot[i] && cartSlot[i] == fileid && name == cartRows[i].row.file) {
+			return GEBEAN_CARTROW_BASE + i;
+		}
+	}
+
 	// the remake's own files, props and characters, found by their name
-	if (name[1] == 'g' && name[2] == 'x' && romdataFileGetModDir(fileid) >= 0) {
+	if (name[1] == 'g' && name[2] == 'x' && romdataFileGetModDir(fileid) >= 0 && !gebeanFileIsRomHack(fileid)) {
 		if (name[0] == 'P' || name[0] == 'I') {
 			for (s32 i = 0; i < ARRAYCOUNT(propRows); i++) {
 				if (strcmp(name, propRows[i].row.file) == 0) {
@@ -1378,6 +1517,18 @@ static void gebeanGunsRefresh(void)
 
 	show = !modDataMpWeaponsImported() && (bean || anyborrowed || anyown);
 
+	// The release's spent cartridges, on aliases of Perfect Dark's casings
+	// that only a GoldenEye gun's ejection loads (gebeanCasingFile())
+	{
+		static const u16 casings[ARRAYCOUNT(cartRows)] = {
+			FILE_GCARTRIDGE, FILE_GCARTRIFLE, FILE_GCARTBLUE, FILE_GCARTSHELL,
+		};
+
+		for (s32 c = 0; c < ARRAYCOUNT(cartRows); c++) {
+			cartSlot[c] = show && bean ? romdataRegisterAliasFile(cartRows[c].row.file, casings[c]) : 0;
+		}
+	}
+
 	for (s32 i = 0; i < ARRAYCOUNT(gunRows); i++) {
 		const s32 hostmodel = gegunsHostModel(i);
 		struct modelstate *state = &g_ModelStates[MODEL_GE_FIRST + i];
@@ -1477,6 +1628,11 @@ static void gebeanGunsRefresh(void)
 		sysLogPrintf(LOG_NOTE, "gebean: %d GoldenEye guns in the Combat Simulator's weapons, %d with the release's pickup",
 				ARRAYCOUNT(gunRows), shown);
 	}
+}
+
+void gebeanGunsStageRefresh(void)
+{
+	gebeanGunsRefresh();
 }
 
 /** Whether a gun in a hand has to be loaded again when the look changes. */
@@ -2484,7 +2640,9 @@ static s32 gebeanWantEntry(const char *name, void *arg)
 		|| strstr(lower, GEBEAN_WANT_MENU_CHARS) != NULL || strstr(lower, GEBEAN_WANT_MENU_LEVELS) != NULL
 		|| strstr(lower, GEBEAN_WANT_MENU_SIGHT) != NULL || strstr(lower, GEBEAN_WANT_MENU_ATTRACT) != NULL
 		|| strstr(lower, GEBEAN_WANT_MENU_FONTS) != NULL || strstr(lower, GEBEAN_WANT_HUD_SIGHT) != NULL
-		|| strstr(lower, GEBEAN_WANT_HUD_AMMO) != NULL;
+		|| strstr(lower, GEBEAN_WANT_HUD_AMMO) != NULL
+		|| strstr(lower, GEBEAN_WANT_MONITORS) != NULL || strstr(lower, GEBEAN_WANT_BULLETHOLES) != NULL
+		|| strstr(lower, GEBEAN_WANT_HITPUFFS) != NULL;
 }
 
 static void gebeanSetRoot(const char *tree)
@@ -2720,9 +2878,20 @@ s32 gebeanRowIsFirstPerson(s32 row)
 		|| (row >= GEBEAN_FPWATCH_BASE && row < GEBEAN_FPWATCH_BASE + ARRAYCOUNT(fpWatchRows));
 }
 
+u16 gebeanCasingFile(s32 weaponnum, s32 casing, u16 stock)
+{
+	if (weaponnum >= WEAPON_GE_FIRST && weaponnum < WEAPON_GE_FIRST + NUM_GE_GUNS
+			&& casing >= 0 && casing < (s32)ARRAYCOUNT(cartRows) && cartSlot[casing]) {
+		return (u16)cartSlot[casing];
+	}
+
+	return stock;
+}
+
 s32 gebeanRowIsProp(s32 row)
 {
-	return row >= GEBEAN_PROPROW_BASE && row < GEBEAN_CHRROW_BASE;
+	return (row >= GEBEAN_PROPROW_BASE && row < GEBEAN_CHRROW_BASE)
+		|| (row >= GEBEAN_CARTROW_BASE && row < GEBEAN_CARTROW_BASE + (s32)ARRAYCOUNT(cartRows));
 }
 
 s32 gebeanRowIsChr(s32 row)
@@ -2732,14 +2901,43 @@ s32 gebeanRowIsChr(s32 row)
 	return r && r->kind != GEBEAN_RIGID;
 }
 
+/**
+ * Whether a character file is one of Bond's outfits with his head on its own
+ * neck and the skin of that neck in its hood group: one man, one rig, one
+ * face, so any of their heads is his own face on any of them
+ * (gebeanRowKeepsHood()). Not the parka, whose hood group is the hood: round
+ * another outfit's head it shows its bare collar, and its own head brings the
+ * hood with it onto another outfit (F3 20260929-051545).
+ */
+static s32 beanSourceIsBondOutfit(const char *source)
+{
+	static const char *const outfits[] = { "djbond", "boilerbond", "suitbond", "timberbond" };
+	const char *base = source ? strrchr(source, '/') : NULL;
+
+	base = base ? base + 1 : source;
+
+	for (s32 i = 0; base && i < ARRAYCOUNT(outfits); i++) {
+		if (strcmp(base, outfits[i]) == 0) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 s32 gebeanRowKeepsHood(s32 bodyrow, s32 headrow)
 {
 	const struct gebeanrow *body = gebeanRowAt(bodyrow);
 	const struct gebeanrow *head = gebeanRowAt(headrow);
 
-	// gebeanBuild()'s hoodsplit, for the body's side
+	// gebeanBuild()'s hoodsplit, for the body's side. Bond's head off one
+	// outfit on another is still his own face: the skin of the body's own
+	// neck below the cut closes his throat into the collar, and the cast
+	// reel's jungle fatigues under the suit's head showed the room through
+	// the shirt's open neck without it (F3 20260930-031838)
 	return body && head && bodyrow >= ARRAYCOUNT(rows) && body->kind == GEBEAN_BODY
-		&& head->kind == GEBEAN_HEAD && strcmp(body->source, head->source) == 0;
+		&& head->kind == GEBEAN_HEAD && (strcmp(body->source, head->source) == 0
+			|| (beanSourceIsBondOutfit(body->source) && beanSourceIsBondOutfit(head->source)));
 }
 
 /** Whether some head row is taken off this character's own neck (a Bond outfit's). */
@@ -2800,6 +2998,11 @@ s32 gebeanFindRow(u16 fileid, struct modeldef *modeldef)
 	}
 
 	if (romdataFileIsStock(fileid)) {
+		return -1;
+	}
+
+	// (a ROM hack's, gebeanFileIsRomHack())
+	if (gebeanFileIsRomHack(fileid)) {
 		return -1;
 	}
 
@@ -3315,6 +3518,8 @@ struct beandraw {
 	s16 inst;     // the instance matrix it is drawn under (bm->insts), or -1
 	u8 blend;     // in the release's blended pass (beanWalkStream())
 	u8 alpha;     // its material colour's alpha, 255 for none
+	u32 colour;   // and that colour, RGB, white for none
+	u32 matpc;    // the material record it takes its pictures from (0 for none)
 	u8 alphatest; // drawn with the alpha test on (render state 0x60)
 	u8 alpharef;  // and the reference it passes texels over (render state 0x64), 0 for none set
 	u8 masktexslot; // the slot masktex fills, which is the UV set it is read with
@@ -3326,6 +3531,17 @@ struct beandraw {
 	u16 reflenv;
 	u8 numpal;
 	u8 pal[BEAN_MAXPAL];
+	// The pieces the originals' draws number (record 0x30's fourth word, -1
+	// for a plain draw) and the kind of the 0x17 section a draw is inside (-1
+	// for none); and a plain draw straight after such a piece or section in
+	// the same material, which is all of its alternatives again in one
+	// (beanTriggerCuff())
+	s8 piece;
+	s8 section;
+	u8 afterpieces;
+	// repainted with another of the file's pictures and its UVs laid again
+	// from the position (beanRepaintDraws()): the row of beanRepaints + 1
+	u8 repaint;
 };
 
 struct beanib {
@@ -3351,6 +3567,10 @@ struct beanmodel {
 	// A bone at or below SKEL_MUZZLE, SKEL_FLASH or SKEL_EXTRAFLASH: what
 	// GoldenEye hangs its painted muzzle flash off (beanDrawIsFlash())
 	u8 muzzlebone[BEAN_MAXBONES];
+	// SKEL_MUZZLE itself: the bone the release's flash cards turn about with
+	// the barrel; its flash's other cards (on SKEL_FLASH, SKEL_EXTRAFLASH or
+	// an unnamed bone below the muzzle) are the star that faces the eye
+	u8 muzzleroot[BEAN_MAXBONES];
 	// A bone at or below SKEL_SLIDE: a pistol's slide, which GoldenEye moves
 	// back after each shot (its model's part 7, gegunsOwnModelSlide())
 	u8 slidebone[BEAN_MAXBONES];
@@ -3359,6 +3579,9 @@ struct beanmodel {
 	// hand and its working parts there and wants them; a head keeps
 	// sunglasses there and does not.
 	s32 keepparts;
+	// One of the N64-look originals (files/original/), whose 0x17 kind 2
+	// sections are a head's sunglasses (beanWalkStream())
+	s32 original;
 
 	s32 numremap;
 	u16 remap[BEAN_MAXPAL];      // palette number -> pose bone
@@ -3373,6 +3596,13 @@ struct beanmodel {
 
 	s32 numtex;
 	s32 texfile[GEBEAN_MAXMATS]; // a texture's header, by file index
+	// An animated picture's seconds a frame, as the file times it, 0 for one
+	// that stands at its first frame (beanTexAnimation())
+	f32 texspf[GEBEAN_MAXMATS];
+	// and how the file moves it: its UVs' scroll in repeats a second and its
+	// turn in degrees a second about the picture's middle (beanTexAnimation())
+	f32 texscroll[GEBEAN_MAXMATS][2];
+	f32 texrot[GEBEAN_MAXMATS];
 	// The pane of a glass material in the blended pass (beanWalkStream())
 	u8 glasspane[GEBEAN_MAXMATS];
 	// Such a pane under the window's reflection map: a tinted pane
@@ -3437,6 +3667,35 @@ static s32 beanReadVb(const struct beanmodel *bm, u32 desc, struct beanvb *vb)
 			}
 		}
 	}
+
+	return 1;
+}
+
+/**
+ * A buffer of positions alone (stride 12), which beanReadVb() leaves out: no
+ * normal, no UV, no colour. Its draw is shaded by its material's colour (the
+ * pixel shader's constant 12) and nothing else; Dam has the one, four black
+ * triangles the release draws (gebeanLevelTriangles()).
+ */
+static s32 beanReadVbPositions(const struct beanmodel *bm, u32 desc, struct beanvb *vb)
+{
+	u32 size;
+
+	memset(vb, 0, sizeof(*vb));
+
+	if (!gebeanFits(desc, 16, bm->datalen)) {
+		return 0;
+	}
+
+	vb->stride = gebeanBE32(bm->data + desc);
+	vb->off = gebeanBE32(bm->data + desc + 8);
+	size = gebeanBE32(bm->data + desc + 12);
+
+	if (vb->stride != 12 || !gebeanFits(vb->off, size, bm->gpulen)) {
+		return 0;
+	}
+
+	vb->count = size / vb->stride;
 
 	return 1;
 }
@@ -4062,6 +4321,8 @@ static void beanWalkStream(struct beanmodel *bm)
 	u8 passblend = 0;
 	u8 blend = 0;
 	u8 alpha = 0xff;
+	u32 colour = 0xffffff;
+	u32 matpc = 0;
 	u8 alphatest = 0;
 	u8 alpharef = 0;
 	u32 masktex = ~0u;
@@ -4074,6 +4335,9 @@ static void beanWalkStream(struct beanmodel *bm)
 	s32 reflform = 0;
 	u16 reflspot = 0;
 	u16 reflenv = 0;
+	s8 section = -1;
+	u32 sectionend = 0;
+	u8 afterpieces = 0;
 
 	pal[0] = 0;
 
@@ -4116,13 +4380,36 @@ static void beanWalkStream(struct beanmodel *bm)
 			break;
 		}
 
-		// A section behind a condition: 0x17 {kind, where it ends}. Kind 2 is
-		// only in the originals, round a head's sunglasses, which GoldenEye's
+		// A section behind a condition: 0x17 {kind, where it ends}. In the
+		// originals kind 2 is round a head's sunglasses, which GoldenEye's
 		// multiplayer heads do not wear. Kind 0 is in both, and its sections
 		// are drawn - the HD characters always had them.
-		if (type == 0x17 && size >= 12 && gebeanBE32(st + pc + 4) == 2) {
+		//
+		// The kind is the model's own and means nothing across files: in the
+		// release's HD guns (and their pickups) it numbers the pieces a gun
+		// switches, and kind 2 is the pistols' trigger finger (the PP7, the
+		// silenced PP7, the Cougar and the gold and silver PP7s: "Bond is
+		// missing his index finger", F3 20260930-185405) and the second of
+		// the shotgun's five shells and the automatic shotgun's first ("both
+		// shotguns are missing a shell at the top despite having max ammo",
+		// F3 20260930-190227). No HD character, head or level file has one,
+		// so only the originals leave it out.
+		if (type == 0x17 && size >= 12 && gebeanBE32(st + pc + 4) == 2 && bm->original) {
 			pc = gebeanBE32(st + pc + 8);
 			continue;
+		}
+
+		if (sectionend && pc >= sectionend) {
+			section = -1;
+			sectionend = 0;
+		}
+
+		if (type == 0x17 && size >= 12) {
+			section = (s8)MIN(gebeanBE32(st + pc + 4), 127);
+			sectionend = gebeanBE32(st + pc + 8);
+			afterpieces = 1;
+		} else if (type == 0x2d || type == 0x2e) {
+			afterpieces = 0;
 		}
 
 		if (type == 0x12 && size >= 12) {
@@ -4172,8 +4459,10 @@ static void beanWalkStream(struct beanmodel *bm)
 			s32 picslot = -1;
 
 			tex = beanMaterialTexture(bm, st, pc, size, len);
+			matpc = pc;
 			ownmat = 1;
 			alpha = 0xff;
+			colour = 0xffffff;
 			masktex = ~0u;
 			masktexslot = 0;
 			reflamount = 0;
@@ -4238,6 +4527,13 @@ static void beanWalkStream(struct beanmodel *bm)
 			const f32 a = gebeanBEF32(st + pc + 24);
 
 			alpha = a >= 1.0f ? 0xff : a <= 0.0f ? 0 : (u8)(a * 255.0f + 0.5f);
+			colour = 0;
+
+			for (s32 k = 0; k < 3; k++) {
+				const f32 c = gebeanBEF32(st + pc + 12 + k * 4);
+
+				colour = colour << 8 | (c >= 1.0f ? 0xff : c <= 0.0f ? 0 : (u32)(c * 255.0f + 0.5f));
+			}
 
 			// The gas tank's is a grey, 0.56, and it is the reflection's
 			// share: c_constant0 and c_constant1 (white) are its only two
@@ -4299,6 +4595,8 @@ static void beanWalkStream(struct beanmodel *bm)
 				d->inst = inst;
 				d->blend = blend;
 				d->alpha = alpha;
+				d->colour = colour;
+				d->matpc = matpc;
 				d->alphatest = alphatest;
 				d->alpharef = alpharef;
 				d->masktex = masktex;
@@ -4310,6 +4608,13 @@ static void beanWalkStream(struct beanmodel *bm)
 				d->reflenv = reflenv;
 				d->numpal = numpal;
 				memcpy(d->pal, pal, numpal);
+				d->piece = type == 0x30 ? (s8)MIN(part, 127) : -1;
+				d->section = section;
+				d->afterpieces = type == 0x01 && section < 0 && afterpieces;
+			}
+
+			if (type == 0x30) {
+				afterpieces = 1;
 			}
 		}
 
@@ -4386,6 +4691,7 @@ static void beanReadPose(struct beanmodel *bm, const char **names, s32 numnames)
 		bm->skel[i] = -1;
 		bm->watchhand[i] = 0;
 		bm->muzzlebone[i] = 0;
+		bm->muzzleroot[i] = 0;
 		bm->slidebone[i] = 0;
 		parent[i] = up == 0xffff || up >= count ? -1 : (s16)up;
 
@@ -4418,6 +4724,7 @@ static void beanReadPose(struct beanmodel *bm, const char **names, s32 numnames)
 			// that closes the sniper rifle - is on SKEL_TOP with the gun.
 			bm->muzzlebone[i] = strncmp(names[i], "SKEL_MUZZLE", 11) == 0
 				|| strstr(names[i], "FLASH") != NULL;
+			bm->muzzleroot[i] = strcmp(names[i], "SKEL_MUZZLE") == 0;
 			bm->slidebone[i] = strcmp(names[i], "SKEL_SLIDE") == 0;
 		}
 
@@ -4449,11 +4756,12 @@ static void beanReadPose(struct beanmodel *bm, const char **names, s32 numnames)
  * Whether a draw is GoldenEye's own muzzle flash: every bone its palette names
  * is the muzzle's or one below it. A gun's own geometry is on SKEL_TOP.
  *
- * The flash is dropped in both looks - it is painted on, always lit, and the
- * player asked for it off the guns in the hand - but only the N64 look needs
- * this test. The HD files' flash pictures are small enough to fall to the rule
- * that drops the hand's picture, which is no use in a file whose every picture
- * is an N64 texture.
+ * The flash is left out of the gun in both looks - drawn as part of it, it was
+ * always lit, and the player asked for it off the guns in the hand. The N64
+ * look keeps GoldenEye's own painted flash; the HD look draws these cards in
+ * the lists of GoldenEye's flash, lit only for a shot (fpBuildCards()). The HD
+ * files' flash pictures fall to the rule that drops the hand's small pictures
+ * as well, which is no use in a file whose every picture is an N64 texture.
  */
 static s32 beanDrawIsFlash(const struct beanmodel *bm, const struct beandraw *d)
 {
@@ -4663,6 +4971,156 @@ static void beanFree(struct beanmodel *bm)
  * model (a gun's hand and working parts) or an extra to leave out (a head's
  * sunglasses). See beanWalkStream().
  */
+static void beanTexAnimation(struct beanmodel *bm, const char *source);
+
+/**
+ * The release's reflecting surfaces - water and polished floors - and the
+ * picture of theirs this draws. Their pixel shader reads a bump map (two on
+ * Complex, animated), turns the bumped normal by the vertex's tangent frame
+ * and reads a sphere map of the surroundings with it, and lays that over
+ * the surface's own picture: Complex's water is c12 0.147 of the rippled
+ * reflection and c13 0.853 of its picture lit. The HD look draws one picture
+ * a triangle (beanMaterialTexture(), the biggest), which on Complex's water
+ * was its 512x512 sphere map laid on as if it were the surface. Here such a
+ * draw takes the surface's own picture - the sampler that is neither a bump,
+ * a distortion nor the reflection, read off each shader's microcode
+ * (disassembled with Xenia's compiler, every pixel shader of every level,
+ * prop and sky that a material of three pictures or more draws with, retail
+ * and Community Edition alike: these five, and no others). Only Complex's
+ * changes; the other four already drew their surface's picture as the
+ * biggest. The rippled reflection is not drawn: that needs a shader of the
+ * renderer's own (FIDRESULT.md, fid-hdfix).
+ */
+static const struct {
+	const char *source;
+	u32 ps;      // the draw's pixel shader record (0x02), the walk's first target
+	u8 sampler;  // the surface's picture
+} beanReflectingSurfaces[] = {
+	{ "new/background/complex", 0x7c94, 3 },  // water under the alien ship: 20, 21 bumps, 22 reflection, 23 its picture
+	{ "new/background/dam", 0x11fb4, 3 },     // the reservoir: 68 bump, 70 distortion, 69 reflection, 71 its picture
+	{ "new/background/dam", 0x13d2c, 3 },     // the same, the other draw
+	{ "new/background/silo", 0x5860, 2 },     // 30 bump, 31 reflection, 32 its picture
+	{ "new/background/control", 0x1940, 2 },  // marble floor: 0 bump, 1 reflection (the room), 2 the marble
+};
+
+static const char *beanTextureName(const struct beanmodel *bm, s32 t);
+
+static void beanReflectingSurfacePictures(struct beanmodel *bm, const char *source)
+{
+	u32 logged = ~0u;
+
+	for (s32 i = 0; i < bm->numdraws; i++) {
+		struct beandraw *d = &bm->draws[i];
+		s32 sampler = -1;
+
+		for (u32 k = 0; k < ARRAYCOUNT(beanReflectingSurfaces) && sampler < 0; k++) {
+			if (beanReflectingSurfaces[k].ps == d->vs && strcmp(beanReflectingSurfaces[k].source, source) == 0) {
+				sampler = beanReflectingSurfaces[k].sampler;
+			}
+		}
+
+		if (sampler < 0 || d->matpc == 0 || !gebeanFits(d->matpc, 12, bm->streamlen)) {
+			continue;
+		}
+
+		{
+			const u8 *st = bm->stream + d->matpc;
+			const u32 size = gebeanBE32(st) >> 16;
+			const u32 extra = gebeanBE16(st + 10);
+
+			for (u32 k = extra; 12 + 8 * k + 8 <= size && gebeanFits(d->matpc + 12 + 8 * k, 8, bm->streamlen); k++) {
+				const u32 t = gebeanBE32(st + 12 + 8 * k);
+
+				if ((s32)(gebeanBE32(st + 16 + 8 * k) >> 16) == sampler && t < (u32)bm->numtex) {
+					if (t != d->tex && logged != d->matpc) {
+						sysLogPrintf(LOG_NOTE, "gebean: %s: material %x is a reflecting surface's: drawn with its own picture %u (%s), not %u (%s)",
+								source, d->matpc, t, beanTextureName(bm, (s32)t), d->tex, beanTextureName(bm, (s32)d->tex));
+						logged = d->matpc;
+					}
+
+					d->tex = t;
+					break;
+				}
+			}
+		}
+	}
+}
+
+/**
+ * Pictures the release's HD props wear that do not fit them, swapped for
+ * another of the same file's and laid again from the vertex position, a
+ * repeat every `unit` of the file's own units from `origin` (x or z across,
+ * y up, by the face's normal; UVs in repeats).
+ *
+ * - cryptdoor1b, the 200x100 block under Egyptian's hieroglyph slab
+ *   (cryptdoor1a): its front and back carry a 512x512 photograph of an
+ *   Akhenaten relief at UV 0..1, the whole square squashed into the 2:1 face,
+ *   which read as a strip of carved wood under the door (F3 20261003-102624).
+ *   On the cartridge the block wears the wall's sandstone and hides in the
+ *   wall. The owner's call: the block-stone picture its sides already wear,
+ *   at the sides' own 75 units a repeat up the face and square texels across
+ *   it, the rows meeting the sides' at the corners. Retail and Community
+ *   Edition alike (the CE's copy differs only in six vertex colours).
+ */
+static const struct {
+	const char *source;
+	const char *oldpic;
+	const char *newpic;
+	f32 unit;
+	f32 origin[2];
+} beanRepaints[] = {
+	{ "new/prop/cryptdoor1b", "_0x01460E75", "_0x08A255B5", 75.0f, { 2750.0f, 400.0f } },
+};
+
+static void beanRepaintDraws(struct beanmodel *bm, const char *source)
+{
+	for (u32 k = 0; k < ARRAYCOUNT(beanRepaints); k++) {
+		s32 from = -1;
+		s32 to = -1;
+
+		if (strcmp(beanRepaints[k].source, source) != 0) {
+			continue;
+		}
+
+		for (s32 t = 0; t < bm->numtex; t++) {
+			const char *name = beanTextureName(bm, t);
+
+			if (strncmp(name, beanRepaints[k].oldpic, strlen(beanRepaints[k].oldpic)) == 0) {
+				from = t;
+			} else if (strncmp(name, beanRepaints[k].newpic, strlen(beanRepaints[k].newpic)) == 0) {
+				to = t;
+			}
+		}
+
+		if (from < 0 || to < 0) {
+			sysLogPrintf(LOG_WARNING, "gebean: %s: repaint %s -> %s: picture not in the file", source,
+					beanRepaints[k].oldpic, beanRepaints[k].newpic);
+			continue;
+		}
+
+		for (s32 i = 0; i < bm->numdraws; i++) {
+			if (bm->draws[i].tex == (u32)from) {
+				bm->draws[i].tex = (u32)to;
+				bm->draws[i].repaint = (u8)(k + 1);
+			}
+		}
+	}
+}
+
+/**
+ * A repainted draw's UV (beanRepaints), from the vertex's position in the
+ * file: across by the face's normal (x on a face looking along z, z on one
+ * looking along x), y up.
+ */
+static void beanRepaintUv(const struct beandraw *d, const struct beanvtx *v, f32 *uv)
+{
+	const u32 k = (u32)d->repaint - 1;
+	const f32 across = fabsf(v->nrm[0]) > fabsf(v->nrm[2]) ? v->pos[2] : v->pos[0];
+
+	uv[0] = (across - beanRepaints[k].origin[0]) / beanRepaints[k].unit;
+	uv[1] = (v->pos[1] - beanRepaints[k].origin[1]) / beanRepaints[k].unit;
+}
+
 static s32 beanLoad(struct beanmodel *bm, const char *source, s32 keepparts)
 {
 	const char *names[BEAN_MAXBONES];
@@ -4677,6 +5135,7 @@ static s32 beanLoad(struct beanmodel *bm, const char *source, s32 keepparts)
 
 	memset(bm, 0, sizeof(*bm));
 	bm->keepparts = keepparts;
+	bm->original = strncmp(source, "original/", 9) == 0;
 	// the Community Edition's copy first, where this session draws it (gebeance.c)
 	if (!gebeanCeFilePath(path, sizeof(path), source, "default.bin")) {
 		snprintf(path, sizeof(path), "%s/%s/default.bin", rootPath, source);
@@ -4769,6 +5228,9 @@ static s32 beanLoad(struct beanmodel *bm, const char *source, s32 keepparts)
 
 	beanReadPose(bm, names, numnames);
 	beanWalkStream(bm);
+	beanReflectingSurfacePictures(bm, source);
+	beanRepaintDraws(bm, source);
+	beanTexAnimation(bm, source);
 	beanFindIndexBuffers(bm);
 	bm->uv20 = beanShaderUv20(bm);
 	bm->uvscale = beanMeasureUvScale(bm);
@@ -4886,7 +5348,261 @@ static void beanBleedCutout(u8 *rgba, u32 w, u32 h)
 	free(filled);
 }
 
-static u8 *beanDecodeTexture(const struct beanmodel *bm, s32 t, s32 *outW, s32 *outH)
+/*
+ * What a texture header's type word (+0x1c) makes of it - the release's loader
+ * hands each to its own XGSet*Header (the asset type "texture", 0x8239a310 in
+ * the image): 0 a picture, 2 a cube, 3 a volume, 4 a picture a frame, 5 an
+ * array of frames. Of the release's 3141 pictures four have frames, all in
+ * those last two: Complex's water bumps (20 and 21, arrays of 16 and 32) and
+ * its satellite dish's beacon (24, two pictures), and the helicopter's rotor
+ * disc (an array of two).
+ */
+#define BEANTEX_FRAMES 4
+#define BEANTEX_ARRAY  5
+
+/** The bytes level 0 of a tiled picture takes, which is a frame of an array. */
+static u32 beanTexSurfaceBytes(u32 format, u32 w, u32 h)
+{
+	if (format == X360_FMT_8888) {
+		return ((w + 31) & ~31u) * ((h + 31) & ~31u) * 4;
+	}
+
+	return ((((w + 3) / 4) + 31) & ~31u) * ((((h + 3) / 4) + 31) & ~31u) * (format == X360_FMT_DXT1 ? 8 : 16);
+}
+
+/** How many frames picture t has, 1 for a still. */
+static s32 beanTexFrames(const struct beanmodel *bm, s32 t)
+{
+	u32 blen, type, n;
+	const u8 *b = t >= 0 && t < bm->numtex ? caffBlob(&bm->caff, bm->texfile[t], &blen) : NULL;
+
+	if (!b || blen < 0x40) {
+		return 1;
+	}
+
+	type = gebeanBE32(b + 0x1c);
+	n = gebeanBE32(b + 0x38);
+
+	return (type == BEANTEX_FRAMES || type == BEANTEX_ARRAY) && n > 1 && n <= 256 ? (s32)n : 1;
+}
+
+/**
+ * How the file moves its pictures (bm->texspf, texscroll, texrot), from the
+ * parameters Rare's exporter wrote for the shaders' Maya place2d and file
+ * nodes. The rendergraph header (.data) points at +0xdc to {?, the UV scale,
+ * a count, then the entries}, 0x64 bytes each:
+ *
+ *   +0x00 +0x04 +0x08  the material's, the file node's and the attribute's names
+ *   +0x18 +0x20        the per-instance offsets of the texture matrix the
+ *                      attribute's shader constants are set from (record 0x05),
+ *                      a list as long as +0x20
+ *   +0x2c +0x30        the UV's scroll, in repeats a second
+ *   +0x38 +0x3c        an offset (0 in every entry)
+ *   +0x40              the rotation about the picture's middle: the release turns
+ *                      it at half this many degrees a second (measured, below)
+ *   +0x44 +0x48        the repeat (1 in every entry, to a millionth)
+ *   +0x4c +0x50 +0x58  the frames, the seconds a frame, whether they run
+ *
+ * The release has 27 entries in 21 files (every file read, 2026-10-01), and
+ * every one is a motion its picture is made for: Frigate's bridge radar
+ * (-120), the helicopter's rotor disc (50), the M16's and P90's flash cards
+ * (999), Dam's reservoir sliding 0.5 and 0.5 (its transparency map) and 0.25
+ * (its bump map), Complex's water bump -0.1 up and its 16 identical frames.
+ * The engine code that reads them was not found in the image (the frames'
+ * bind is, 0x823a57a0); the units are the release's as captured in Xenia
+ * (fid-hd, 2026-10-01): Dam's reservoir vertex constant c28 = (t, 0.5, 1, 4)
+ * with t its clock in seconds, so a slide is repeats a second; Frigate's
+ * radar goes round clockwise once in about 350 ticks (6 s) on game time, so
+ * a turn is half its figure in degrees a second, clockwise for a negative one
+ * as the picture is drawn.
+ *
+ * An entry is the picture's that a record 0x05 sets the matrix of - the
+ * stream's shader constants from one of the entry's offsets - after the
+ * material binding it: the material's one picture past its extra pairs (the
+ * shared map they start with), or of several, the one with the entry's
+ * frames, or for a transparency attribute the one with alpha. An entry that
+ * none of those places is left alone and logged (Dam's reservoir bump, which
+ * the HD look does not draw).
+ */
+static const char *beanTextureName(const struct beanmodel *bm, s32 t);
+
+static s32 beanTexHasAlpha(const struct beanmodel *bm, s32 t)
+{
+	u32 blen;
+	const u8 *b = t >= 0 && t < bm->numtex ? caffBlob(&bm->caff, bm->texfile[t], &blen) : NULL;
+	const u32 format = b && blen >= 0x40 ? b[0x1b] & 0x3f : 0;
+
+	return format == X360_FMT_DXT23 || format == X360_FMT_DXT45 || format == X360_FMT_8888;
+}
+
+static void beanTexAnimation(struct beanmodel *bm, const char *source)
+{
+	const u8 *d = bm->data;
+	const u8 *st = bm->stream;
+	u32 blk, n, entries, end;
+	u32 mat[8];
+	s32 nummat = 0;
+	u8 seen[GEBEAN_MAXMATS];
+	u8 placed[256];
+
+	memset(seen, 0, sizeof(seen));
+	memset(placed, 0, sizeof(placed));
+
+	if (!d || bm->datalen < 0xe0 || memcmp(d, "rendergraph", 12) != 0 || !st || bm->streamlen < 0x28) {
+		return;
+	}
+
+	blk = gebeanBE32(d + 0xdc);
+
+	if (blk == 0 || !gebeanFits(blk, 0x10, bm->datalen)) {
+		return;
+	}
+
+	n = gebeanBE32(d + blk + 8);
+	entries = gebeanBE32(d + blk + 12);
+
+	if (n == 0 || n > 256 || !gebeanFits(entries, n * 0x64, bm->datalen)) {
+		return;
+	}
+
+	end = MIN(gebeanBE32(st + 4), bm->streamlen);
+
+	for (u32 pc = 0x24; pc + 4 <= end; ) {
+		const u32 tag = gebeanBE32(st + pc);
+		const u32 size = tag >> 16;
+		const u32 type = (tag >> 8) & 0xff;
+
+		if (size < 4 || !gebeanFits(pc, size, bm->streamlen)) {
+			break;
+		}
+
+		if (type == 0x2d && size >= 20) {
+			// {texture, sampler} pairs, the extra ones (+10) first: the bind
+			// (0x823a57a0) takes those, then the material's own (+8)
+			const u32 extra = gebeanBE16(st + pc + 10);
+
+			nummat = 0;
+
+			for (u32 k = extra; 12 + 8 * k + 8 <= size && nummat < (s32)ARRAYCOUNT(mat); k++) {
+				mat[nummat++] = gebeanBE32(st + pc + 12 + 8 * k);
+			}
+		} else if (type == 0x05 && size >= 12) {
+			const u32 ptr = gebeanBE32(st + pc + 4);
+
+			for (u32 e = 0; e < n; e++) {
+				const u8 *p = d + entries + e * 0x64;
+				const u32 attr = gebeanBE32(p + 8);
+				const u32 frames = gebeanBE32(p + 0x4c);
+				const u32 list = gebeanBE32(p + 0x18);
+				const u32 count = gebeanBE32(p + 0x20);
+				const f32 spf = gebeanBEF32(p + 0x50);
+				const s32 runs = gebeanBE32(p + 0x58) != 0;
+				const f32 su = gebeanBEF32(p + 0x2c);
+				const f32 sv = gebeanBEF32(p + 0x30);
+				const f32 rot = gebeanBEF32(p + 0x40);
+				const s32 transparency = gebeanFits(attr, 13, bm->datalen) && memcmp(d + attr, "transparency", 13) == 0;
+				s32 listed = 0;
+				s32 t = -1;
+
+				if (count > 64 || !gebeanFits(list, count * 4, bm->datalen)) {
+					continue;
+				}
+
+				for (u32 k = 0; k < count && !listed; k++) {
+					listed = gebeanBE32(d + list + k * 4) == ptr;
+				}
+
+				if (!listed) {
+					continue;
+				}
+
+				if (nummat == 1) {
+					t = (s32)mat[0];
+				} else {
+					for (s32 m = 0; m < nummat; m++) {
+						const s32 c = (s32)mat[m];
+
+						if (frames > 1 ? beanTexFrames(bm, c) == (s32)frames
+								: transparency && beanTexHasAlpha(bm, c)) {
+							t = t < 0 ? c : -2;
+						}
+					}
+				}
+
+				if (t < 0 || t >= bm->numtex || (frames > 1 && beanTexFrames(bm, t) != (s32)frames)) {
+					if (e < ARRAYCOUNT(placed) && !placed[e]) {
+						placed[e] = 2;
+					}
+
+					continue;
+				}
+
+				if (e < ARRAYCOUNT(placed)) {
+					placed[e] = 1;
+				}
+
+				if (seen[t]) {
+					continue;
+				}
+
+				seen[t] = 1;
+				bm->texspf[t] = frames > 1 && runs && spf > 0.0f ? spf : 0.0f;
+				bm->texscroll[t][0] = su == su && fabsf(su) < 100.0f ? su : 0.0f;
+				bm->texscroll[t][1] = sv == sv && fabsf(sv) < 100.0f ? sv : 0.0f;
+				// The release turns at half the table's figure: Frigate's
+				// radars (-120) go round clockwise once in about 350 ticks,
+				// 1 degree a tick, on game time (fid-hd's captures, two
+				// series agreeing). The slide is the table's own: Dam's
+				// reservoir constant is (t, 0.5, ...) with t its clock in
+				// seconds (fid-hd's draw log)
+				bm->texrot[t] = rot == rot && fabsf(rot) < 100000.0f ? rot * 0.5f : 0.0f;
+
+				if (frames > 1) {
+					sysLogPrintf(LOG_NOTE, "gebean: %s: texture %d (%s) is %u frames, %s %.3f s", source, t,
+							beanTextureName(bm, t), frames,
+							bm->texspf[t] > 0.0f ? "each shown for" : "standing at its first; the file's time a frame", spf);
+				}
+
+				if (bm->texscroll[t][0] != 0.0f || bm->texscroll[t][1] != 0.0f || bm->texrot[t] != 0.0f) {
+					sysLogPrintf(LOG_NOTE, "gebean: %s: texture %d (%s) slides %.3f %.3f repeats and turns %.1f degrees a second",
+							source, t, beanTextureName(bm, t), bm->texscroll[t][0], bm->texscroll[t][1], bm->texrot[t]);
+				}
+			}
+		}
+
+		pc += size;
+	}
+
+	for (u32 e = 0; e < n && e < ARRAYCOUNT(placed); e++) {
+		if (placed[e] == 2) {
+			const u8 *p = d + entries + e * 0x64;
+			const u32 node = gebeanBE32(p + 4);
+			const u32 attr = gebeanBE32(p + 8);
+
+			sysLogPrintf(LOG_NOTE, "gebean: %s: the %s of %s is on none of its material's pictures this can place",
+					source, gebeanFits(attr, 1, bm->datalen) ? (const char *)d + attr : "?",
+					gebeanFits(node, 1, bm->datalen) ? (const char *)d + node : "?");
+		}
+	}
+}
+
+/**
+ * Frame `frame` of picture t, as beanDecodeTexture() gives a still.
+ *
+ * An array's frames are its slices, back to back in the picture's .gpu from
+ * offset 0, each the tiled size of one; the release's loader sizes them with
+ * XGSetArrayTextureHeader(width, height, frames at +0x38, levels at +0x30...)
+ * and nothing past the header says where a frame is. Read as a picture with a
+ * table of frame offsets at +0x3c, which none of them has (the word is 0),
+ * every one of them took its first frame's offset from the header's own
+ * 'text' and would not decode: Complex's beacon and water and the rotor disc
+ * drew with no picture at all.
+ *
+ * A picture a frame lists each frame's width, height and levels in three
+ * tables the header points to (+0x44, +0x48, +0x4c), and the loader sets
+ * each up after the last, at the next 4K past its levels.
+ */
+static u8 *beanDecodeTextureFrame(const struct beanmodel *bm, s32 t, s32 frame, s32 *outW, s32 *outH)
 {
 	const struct caff *c = &bm->caff;
 	struct x360fetch fetch;
@@ -4894,7 +5610,7 @@ static u8 *beanDecodeTexture(const struct beanmodel *bm, s32 t, s32 *outW, s32 *
 	const u8 *b = caffBlob(c, bm->texfile[t], &blen);
 	const u8 *g;
 	s32 gi;
-	u32 base, first, w, h, bpe, ew, eh;
+	u32 base, first, w, h, bpe, ew, eh, type, levels;
 	u64 need, have;
 	u8 *copy;
 	u8 *rgba;
@@ -4906,10 +5622,43 @@ static u8 *beanDecodeTexture(const struct beanmodel *bm, s32 t, s32 *outW, s32 *
 	w = gebeanBE16(b + 0x24);
 	h = gebeanBE16(b + 0x26);
 	base = gebeanBE32(b + 0x28);
+	levels = b[0x30];
+	type = gebeanBE32(b + 0x1c);
 	first = 0;
 
-	if (gebeanBE32(b + 0x38) && gebeanFits(gebeanBE32(b + 0x3c), 4, blen)) {
-		first = gebeanBE32(b + gebeanBE32(b + 0x3c));
+	if (frame < 0 || frame >= beanTexFrames(bm, t)) {
+		return NULL;
+	}
+
+	if (type == BEANTEX_ARRAY) {
+		first = (u32)frame * beanTexSurfaceBytes(b[0x1b] & 0x3f, w, h);
+	} else if (type == BEANTEX_FRAMES && blen >= 0x50) {
+		const u32 wt = gebeanBE32(b + 0x44);
+		const u32 ht = gebeanBE32(b + 0x48);
+		const u32 lt = gebeanBE32(b + 0x4c);
+		const u32 n = (u32)beanTexFrames(bm, t);
+
+		if (!gebeanFits(wt, n * 4, blen) || !gebeanFits(ht, n * 4, blen) || !gebeanFits(lt, n * 4, blen)) {
+			return NULL;
+		}
+
+		for (s32 i = 0; i <= frame; i++) {
+			w = gebeanBE32(b + wt + i * 4);
+			h = gebeanBE32(b + ht + i * 4);
+			levels = gebeanBE32(b + lt + i * 4);
+
+			// A frame whose mips do not all share its level 0's tile has
+			// them after it, which no picture in the release does and this
+			// does not size
+			if (levels > 1 && w > 16 && h > 16 && i < frame) {
+				sysLogPrintf(LOG_WARNING, "gebean: texture %d frame %d: frame %d's mips are past its level 0, not read", t, frame, i);
+				return NULL;
+			}
+
+			if (i < frame) {
+				first += (beanTexSurfaceBytes(b[0x1b] & 0x3f, w, h) + 0xfff) & ~0xfffu;
+			}
+		}
 	}
 
 	gi = caffFind(c, c->files[bm->texfile[t]].asset, ".gpu");
@@ -4940,7 +5689,7 @@ static u8 *beanDecodeTexture(const struct beanmodel *bm, s32 t, s32 *outW, s32 *
 	// Byte 0x30 is the level count, and a picture with one level is not
 	// packed: it stands at the tile's origin. Every GoldenEye N64 texture is
 	// small enough for the difference to decide whether it decodes at all.
-	fetch.packed = b[0x30] > 1;
+	fetch.packed = levels > 1;
 
 	if (!x360FetchSupported(&fetch)) {
 		sysLogPrintf(LOG_WARNING, "gebean: texture format %02x is not one this decodes", b[0x1b]);
@@ -5068,6 +5817,82 @@ static u8 *beanDecodeTexture(const struct beanmodel *bm, s32 t, s32 *outW, s32 *
 		}
 	}
 
+	// Silo's steel door (prop/steeldoor1): the hazard stripes down its edge
+	// are black and yellow on GoldenEye's door and black and white in the
+	// release's picture (F3 20261002-040258); the Community Edition repainted
+	// them yellow ("Fixed steeldoor1 not retaining the original yellow
+	// stripe"). The stripe columns, above and below the lock plate, take the
+	// Community Edition's colour: each grey texel its brightness times
+	// (0.664, 0.675, 0.231), the fit of its picture to the release's. A texel
+	// already coloured (the Community Edition's own copy) is left alone.
+	if (w == 256 && h == 512 && t < bm->numtex
+			&& strcmp(caffAssetName(c, c->files[bm->texfile[t]].asset), "_0x04031685.tga.bin") == 0) {
+		for (u32 y = 0; y < h; y++) {
+			if (y >= 202 && y <= 307) {
+				continue;
+			}
+
+			for (u32 x = 220; x < w; x++) {
+				u8 *px = rgba + ((size_t)y * w + x) * 4;
+				const s32 lo = MIN(px[0], MIN(px[1], px[2]));
+				const s32 hi = MAX(px[0], MAX(px[1], px[2]));
+				const f32 l = (px[0] + px[1] + px[2]) / 3.0f;
+
+				if (hi - lo <= 24) {
+					px[0] = (u8)(l * 0.664f + 0.5f);
+					px[1] = (u8)(l * 0.675f + 0.5f);
+					px[2] = (u8)(l * 0.231f + 0.5f);
+				}
+			}
+		}
+	}
+
+	// Depot's roller doors (prop/doorroller4): the arrow painted on the
+	// shutter is white in the release's picture and yellow in GoldenEye's and
+	// the Community Edition's ("doorroller4", its blue taken down to 0.4 of
+	// the arrow's brightness; F3 20261002-232341). The arrow's box, grey
+	// texels only, by brightness: the shutter's dark slats are left as they
+	// are, the arrow's bright paint loses most of its blue.
+	if (w == 512 && h == 512 && t < bm->numtex
+			&& strcmp(caffAssetName(c, c->files[bm->texfile[t]].asset), "_0x07E50215.tga.bin") == 0) {
+		for (u32 y = 160; y <= 269; y++) {
+			for (u32 x = 200; x <= 291; x++) {
+				u8 *px = rgba + ((size_t)y * w + x) * 4;
+				const s32 lo = MIN(px[0], MIN(px[1], px[2]));
+				const s32 hi = MAX(px[0], MAX(px[1], px[2]));
+				const f32 l = (px[0] + px[1] + px[2]) / 3.0f;
+				const f32 k = l <= 120.0f ? 0.0f : l >= 200.0f ? 1.0f : (l - 120.0f) / 80.0f;
+
+				if (hi - lo <= 24) {
+					px[2] = (u8)(px[2] * (1.0f - 0.6f * k) + 0.5f);
+				}
+			}
+		}
+	}
+
+	// Egyptian's Golden Gun case (prop/doorwin, its four panes): the
+	// release's one picture is a near-black blur (RGB 23 on average) at alpha
+	// 85-102, laid at fixed UVs, which is the release's dark tint and not the
+	// glass. Through the front pane and the back one the case's inside came
+	// out at about 37% and streaked - murky where GoldenEye's case is light,
+	// clear glass (F3 20261002-042109, "glass isnt right yet"). Drawn as
+	// GoldenEye's is: a light pane at a faint alpha, the release's streaks
+	// kept as a little shading in it.
+	if (w == 54 && h == 54 && t < bm->numtex
+			&& strcmp(caffAssetName(c, c->files[bm->texfile[t]].asset), "_0x0DC40C15.tga.bin") == 0) {
+		for (u32 i = 0; i < w * h; i++) {
+			u8 *px = rgba + i * 4;
+
+			for (s32 k = 0; k < 3; k++) {
+				const s32 v = 96 + px[k];
+
+				px[k] = (u8)MIN(v, 255);
+			}
+
+			px[3] = (u8)(px[3] * 3 / 10);
+		}
+	}
+
 	beanBleedCutout(rgba, w, h);
 
 	// Decoded top row first, as a PNG of it would be; the renderer wants the
@@ -5087,6 +5912,12 @@ static u8 *beanDecodeTexture(const struct beanmodel *bm, s32 t, s32 *outW, s32 *
 	*outH = (s32)h;
 
 	return rgba;
+}
+
+/** Picture t, its first frame where it has several (beanDecodeTextureFrame()). */
+static u8 *beanDecodeTexture(const struct beanmodel *bm, s32 t, s32 *outW, s32 *outH)
+{
+	return beanDecodeTextureFrame(bm, t, 0, outW, outH);
 }
 
 static const char *beanTextureName(const struct beanmodel *bm, s32 t);
@@ -5528,7 +6359,71 @@ static s32 beanBindTexture(const struct beanmodel *bm, const char *source, s32 t
 				source, t, beanTextureName(bm, t));
 	}
 
-	*tile = rgba ? xblaTexBindImage(key, rgba, w, h) : NULL;
+	*tile = NULL;
+
+	// A picture the file animates (beanTexAnimation()): its frames, where it
+	// runs them, and its scroll and turn - a level's scroll excepted, which
+	// its rooms draw by moving the tile (gebeanstage.c), smoothly and with no
+	// picture made a step. Shown by the renderer in turn on the level's clock
+	if (rgba && t < bm->numtex) {
+		const s32 level = strncmp(source, "new/background/", 15) == 0 || strncmp(source, "original/background/", 20) == 0;
+		struct xblatexmotion motion;
+		s32 n = 1;
+
+		memset(&motion, 0, sizeof(motion));
+
+		if (bm->texspf[t] > 0.0f && beanTexFrames(bm, t) > 1) {
+			n = beanTexFrames(bm, t);
+			motion.secondsPerFrame = bm->texspf[t];
+		}
+
+		if (!level) {
+			motion.scroll[0] = bm->texscroll[t][0];
+			motion.scroll[1] = bm->texscroll[t][1];
+		}
+
+		motion.rotate = bm->texrot[t];
+
+		// Bean's screen placeholder turns too (the door console's, 50 a
+		// second), but GoldenEye's monitor programme is drawn on it and it is
+		// the black behind that (beanFindScreens(), beanScreenPlaceholder):
+		// a 512x512 picture made anew 30 times a second for nothing to see
+		if (strncmp(beanTextureName(bm, t), "_0x008C4635", 11) == 0) {
+			motion.scroll[0] = motion.scroll[1] = motion.rotate = 0.0f;
+		}
+
+		if (n > 1 || motion.scroll[0] != 0.0f || motion.scroll[1] != 0.0f || motion.rotate != 0.0f) {
+			u8 **frames = calloc(n, sizeof(*frames));
+			s32 ok = frames != NULL;
+
+			for (s32 f = 0; f < n && ok; f++) {
+				s32 fw, fh;
+
+				frames[f] = f == 0 ? rgba : beanDecodeTextureFrame(bm, t, f, &fw, &fh);
+				ok = frames[f] != NULL && (f == 0 || (fw == w && fh == h));
+
+				if (ok && f > 0 && beanTexBlendedOnly(bm, t)) {
+					beanKeyStencil(frames[f], w, h);
+				}
+			}
+
+			if (ok) {
+				*tile = xblaTexBindAnimation(key, frames, n, w, h, &motion);
+				rgba = NULL;
+			} else {
+				for (s32 f = 1; frames && f < n; f++) {
+					free(frames[f]);
+				}
+
+				free(frames);
+				sysLogPrintf(LOG_WARNING, "gebean: %s: texture %d's frames would not all decode, its first shown", source, t);
+			}
+		}
+	}
+
+	if (rgba) {
+		*tile = xblaTexBindImage(key, rgba, w, h);
+	}
 
 	if (*tile) {
 		xblaTexImageInfo(*tile, &a, &s);
@@ -5874,6 +6769,24 @@ static s32 beanArmSleeveAlso(const struct beanmodel *bm, u32 tex)
 static s32 beanArmDropsTexture(const struct beanmodel *bm, u32 tex)
 {
 	return bm->numtex == GEBEAN_ARM_TEXTURES && tex >= 9;
+}
+
+/*
+ * The release's own watch on the arm, all of it: GE Plus drew GoldenEye's
+ * watch on Bean's arm and left out the arm's pictures 9 to 11 - a small
+ * light quad (9, a 1x1 picture under light green and white vertices) and
+ * the glass over the dial (10 and 11) - which the release draws: the HD
+ * draw census found draws 0x11f8, 0x1450 and 0x1460 in every capture, and a
+ * Xenia draw log of the release's pause has the glass blended (source alpha,
+ * no depth write) through the 32x32 picture with alpha. The user, 2026-10-01:
+ * the HD look draws the arm's casing as the release does (fidelity H4).
+ */
+#define GEBEAN_ARM_GLASS 11
+
+static s32 beanArmGlass(const struct beanmodel *bm, const struct beandraw *d)
+{
+	return bm->numtex == GEBEAN_ARM_TEXTURES && (d->tex == 10 || d->tex == 11)
+		&& (d->masktex == 10 || d->masktex == 11 || d->tex == GEBEAN_ARM_GLASS);
 }
 
 /**
@@ -7580,6 +8493,61 @@ static s32 beanOutPointInTri(const struct beanout *o, const struct beantri *t, c
 }
 
 /**
+ * Whether triangle u (j) makes triangle t (i), whose middle is mid, a decal:
+ * beanMarkDecals()'s test of one pair.
+ */
+static s32 beanDecalPair(const struct beanout *o, const f32 *nrm, const struct gebeanmats *mats,
+		s32 i, s32 j, const f32 *mid)
+{
+	const struct beantri *t = &o->tris[i];
+	const struct beantri *u = &o->tris[j];
+	const f32 *nu = &nrm[j * 4];
+	const f32 ai = nrm[i * 4 + 3];
+	const f32 au = nrm[j * 4 + 3];
+	const s32 alphai = t->tex < mats->num && mats->alpha[t->tex];
+	const s32 alphau = u->tex < mats->num && mats->alpha[u->tex];
+	const f32 *ni = &nrm[i * 4];
+	const f32 *pu = &o->pos[u->v[0] * 3];
+	// A thousandth of the surface's size: Bean's are exactly in its plane
+	const f32 tol = 0.001f * sqrtf(au);
+	f32 cosang;
+	s32 flat = 1;
+
+	// The same group and bone, or the two are not in one space. The
+	// same picture is no reason to pass a pair over: the roller
+	// doors' hazard stripe is a strip of the door's own picture drawn
+	// again over it in a white vertex colour (the door's own is a
+	// grey ramp), so the two fought as bright and dim bands
+	if (j == i || u->group != t->group || au <= 0.0f
+			|| o->bone[t->v[0] * 3] != o->bone[u->v[0] * 3]) {
+		return 0;
+	}
+
+	// Facing the same way: a pair back to back is a sheet with a face
+	// either side (the truck's), and a decal of either would show its
+	// back from behind
+	cosang = ni[0] * nu[0] + ni[1] * nu[1] + ni[2] * nu[2];
+
+	if (cosang < 0.999f) {
+		return 0;
+	}
+
+	for (s32 v = 0; v < 3 && flat; v++) {
+		const f32 *q = &o->pos[t->v[v] * 3];
+
+		flat = fabsf((q[0] - pu[0]) * nu[0] + (q[1] - pu[1]) * nu[1] + (q[2] - pu[2]) * nu[2]) <= tol;
+	}
+
+	if (!flat || !beanOutPointInTri(o, u, nu, mid)) {
+		return 0;
+	}
+
+	return alphai != alphau ? alphai > alphau
+			: ai < au * 0.999f ? 1
+			: ai <= au * 1.001f && t->order > u->order;
+}
+
+/**
  * Gives the triangles of a mesh that lie flat on another triangle of the
  * same mesh a decal copy of their material (XBLAMESH_MAT_DECAL), so
  * they are drawn in the decal z mode. Bean puts a model's labels and stencils
@@ -7591,17 +8559,44 @@ static s32 beanOutPointInTri(const struct beanout *o, const struct beantri *t, c
  * (F3 20260925-025836). Of a pair, the one with a cut-out picture over one
  * without is the decal, else the smaller, else the one drawn later: the rule
  * gebeanstage.c's markDecals() uses for the levels. Returns the count.
+ *
+ * Every triangle was tried against every other, which on a gun of a few
+ * thousand triangles was most of the first-person build: 0.55 s for the
+ * 8000-triangle one, a freeze on the frame a new gun was first drawn (F3
+ * 20261003-123556). A pair can only pass where i's middle is inside u's
+ * prism and within u's tolerance of its plane, so inside u's box grown by
+ * that tolerance: u is filed in a grid by that box, and i asks only the
+ * triangles filed in its middle's cell. The test of a pair is unchanged and
+ * its outcome does not depend on the order the pairs are tried in, so the
+ * marks are the same.
  */
+#define DECAL_GRID 32
+#define DECAL_BIGCELLS 512
+
 static s32 beanMarkDecals(struct beanout *o, u32 *matwords, s32 *nummatwords, struct gebeanmats *mats)
 {
 	f32 *nrm = malloc(o->numtris * 4 * sizeof(f32));
 	u8 *decal = calloc(o->numtris, 1);
+	f32 *box = malloc(o->numtris * 6 * sizeof(f32));
+	s32 *cellof = malloc(o->numtris * 6 * sizeof(s32));
+	s32 *start = NULL;
+	s32 *filed = NULL;
+	s32 *big = NULL;
+	s32 numbig = 0;
+	s32 dims[3] = { 1, 1, 1 };
+	f32 lo[3] = { 1e30f, 1e30f, 1e30f };
+	f32 hi[3] = { -1e30f, -1e30f, -1e30f };
+	f32 cellsize[3] = { 1.0f, 1.0f, 1.0f };
+	s32 numcells;
+	s32 numfiled = 0;
 	s32 copy[GEBEAN_MAXMATS];
 	s32 count = 0;
 
-	if (!nrm || !decal) {
+	if (!nrm || !decal || !box || !cellof) {
 		free(nrm);
 		free(decal);
+		free(box);
+		free(cellof);
 		return 0;
 	}
 
@@ -7611,14 +8606,167 @@ static s32 beanMarkDecals(struct beanout *o, u32 *matwords, s32 *nummatwords, st
 		nrm[i * 4 + 3] = beanOutNormal(o, &o->tris[i], &nrm[i * 4], p0);
 	}
 
+	// Each triangle's box, grown by its plane tolerance and a margin for
+	// the rounding of the inside test, and the box round them all
+	for (s32 j = 0; j < o->numtris; j++) {
+		const struct beantri *u = &o->tris[j];
+		f32 *b = &box[j * 6];
+		f32 extent = 0.0f;
+		f32 grow;
+
+		if (nrm[j * 4 + 3] <= 0.0f) {
+			continue;
+		}
+
+		for (s32 k = 0; k < 3; k++) {
+			b[k] = 1e30f;
+			b[3 + k] = -1e30f;
+
+			for (s32 v = 0; v < 3; v++) {
+				const f32 c = o->pos[u->v[v] * 3 + k];
+
+				b[k] = c < b[k] ? c : b[k];
+				b[3 + k] = c > b[3 + k] ? c : b[3 + k];
+			}
+
+			extent = b[3 + k] - b[k] > extent ? b[3 + k] - b[k] : extent;
+		}
+
+		grow = 0.001f * sqrtf(nrm[j * 4 + 3]) + 0.01f * extent + 0.001f;
+
+		for (s32 k = 0; k < 3; k++) {
+			b[k] -= grow;
+			b[3 + k] += grow;
+			lo[k] = b[k] < lo[k] ? b[k] : lo[k];
+			hi[k] = b[3 + k] > hi[k] ? b[3 + k] : hi[k];
+		}
+	}
+
+	{
+		f32 longest = 0.0f;
+
+		for (s32 k = 0; k < 3; k++) {
+			longest = hi[k] - lo[k] > longest ? hi[k] - lo[k] : longest;
+		}
+
+		for (s32 k = 0; k < 3 && longest > 0.0f; k++) {
+			const f32 ext = hi[k] - lo[k];
+
+			dims[k] = (s32)(DECAL_GRID * ext / longest);
+			dims[k] = dims[k] < 1 ? 1 : dims[k] > DECAL_GRID ? DECAL_GRID : dims[k];
+			cellsize[k] = ext > 0.0f ? ext / dims[k] : 1.0f;
+		}
+	}
+
+	numcells = dims[0] * dims[1] * dims[2];
+	start = calloc(numcells + 1, sizeof(s32));
+	big = malloc(o->numtris * sizeof(s32));
+
+	if (!start || !big) {
+		free(nrm);
+		free(decal);
+		free(box);
+		free(cellof);
+		free(start);
+		free(big);
+		return 0;
+	}
+
+	// The cells each one's box covers, counted then filed
+	for (s32 j = 0; j < o->numtris; j++) {
+		const f32 *b = &box[j * 6];
+		s32 *c = &cellof[j * 6];
+		s32 n = 1;
+
+		c[0] = -1;
+
+		if (nrm[j * 4 + 3] <= 0.0f) {
+			continue;
+		}
+
+		for (s32 k = 0; k < 3; k++) {
+			s32 a = (s32)((b[k] - lo[k]) / cellsize[k]);
+			s32 z = (s32)((b[3 + k] - lo[k]) / cellsize[k]);
+
+			c[k] = a < 0 ? 0 : a >= dims[k] ? dims[k] - 1 : a;
+			c[3 + k] = z < 0 ? 0 : z >= dims[k] ? dims[k] - 1 : z;
+			n *= c[3 + k] - c[k] + 1;
+		}
+
+		if (n > DECAL_BIGCELLS) {
+			big[numbig++] = j;
+			c[0] = -1;
+			continue;
+		}
+
+		for (s32 x = c[0]; x <= c[3]; x++) {
+			for (s32 y = c[1]; y <= c[4]; y++) {
+				for (s32 z = c[2]; z <= c[5]; z++) {
+					start[(x * dims[1] + y) * dims[2] + z + 1]++;
+					numfiled++;
+				}
+			}
+		}
+	}
+
+	for (s32 cell = 0; cell < numcells; cell++) {
+		start[cell + 1] += start[cell];
+	}
+
+	filed = malloc((numfiled ? numfiled : 1) * sizeof(s32));
+
+	if (!filed) {
+		free(nrm);
+		free(decal);
+		free(box);
+		free(cellof);
+		free(start);
+		free(big);
+		return 0;
+	}
+
+	{
+		s32 *fill = malloc(numcells * sizeof(s32));
+
+		if (!fill) {
+			free(nrm);
+			free(decal);
+			free(box);
+			free(cellof);
+			free(start);
+			free(big);
+			free(filed);
+			return 0;
+		}
+
+		memcpy(fill, start, numcells * sizeof(s32));
+
+		for (s32 j = 0; j < o->numtris; j++) {
+			const s32 *c = &cellof[j * 6];
+
+			if (nrm[j * 4 + 3] <= 0.0f || c[0] < 0) {
+				continue;
+			}
+
+			for (s32 x = c[0]; x <= c[3]; x++) {
+				for (s32 y = c[1]; y <= c[4]; y++) {
+					for (s32 z = c[2]; z <= c[5]; z++) {
+						filed[fill[(x * dims[1] + y) * dims[2] + z]++] = j;
+					}
+				}
+			}
+		}
+
+		free(fill);
+	}
+
 	for (s32 i = 0; i < o->numtris; i++) {
 		const struct beantri *t = &o->tris[i];
-		const f32 *ni = &nrm[i * 4];
-		const f32 ai = nrm[i * 4 + 3];
-		const s32 alphai = t->tex < mats->num && mats->alpha[t->tex];
 		f32 mid[3];
+		s32 cell = -1;
+		s32 inside = 1;
 
-		if (ai <= 0.0f) {
+		if (nrm[i * 4 + 3] <= 0.0f) {
 			continue;
 		}
 
@@ -7626,53 +8774,37 @@ static s32 beanMarkDecals(struct beanout *o, u32 *matwords, s32 *nummatwords, st
 			mid[k] = (o->pos[t->v[0] * 3 + k] + o->pos[t->v[1] * 3 + k] + o->pos[t->v[2] * 3 + k]) / 3.0f;
 		}
 
-		for (s32 j = 0; j < o->numtris && !decal[i]; j++) {
-			const struct beantri *u = &o->tris[j];
-			const f32 *nu = &nrm[j * 4];
-			const f32 au = nrm[j * 4 + 3];
-			const s32 alphau = u->tex < mats->num && mats->alpha[u->tex];
-			const f32 *pu = &o->pos[u->v[0] * 3];
-			// A thousandth of the surface's size: Bean's are exactly in its plane
-			const f32 tol = 0.001f * sqrtf(au);
-			f32 cosang;
-			s32 flat = 1;
-
-			// The same group and bone, or the two are not in one space. The
-			// same picture is no reason to pass a pair over: the roller
-			// doors' hazard stripe is a strip of the door's own picture drawn
-			// again over it in a white vertex colour (the door's own is a
-			// grey ramp), so the two fought as bright and dim bands
-			if (j == i || u->group != t->group || au <= 0.0f
-					|| o->bone[t->v[0] * 3] != o->bone[u->v[0] * 3]) {
-				continue;
-			}
-
-			// Facing the same way: a pair back to back is a sheet with a face
-			// either side (the truck's), and a decal of either would show its
-			// back from behind
-			cosang = ni[0] * nu[0] + ni[1] * nu[1] + ni[2] * nu[2];
-
-			if (cosang < 0.999f) {
-				continue;
-			}
-
-			for (s32 v = 0; v < 3 && flat; v++) {
-				const f32 *q = &o->pos[t->v[v] * 3];
-
-				flat = fabsf((q[0] - pu[0]) * nu[0] + (q[1] - pu[1]) * nu[1] + (q[2] - pu[2]) * nu[2]) <= tol;
-			}
-
-			if (!flat || !beanOutPointInTri(o, u, nu, mid)) {
-				continue;
-			}
-
-			if (alphai != alphau ? alphai > alphau
-					: ai < au * 0.999f ? 1
-					: ai <= au * 1.001f && t->order > u->order) {
-				decal[i] = 1;
+		for (s32 k = 0; k < 3; k++) {
+			if (!(mid[k] >= lo[k] && mid[k] <= hi[k])) {
+				inside = 0;
 			}
 		}
+
+		if (inside) {
+			s32 c[3];
+
+			for (s32 k = 0; k < 3; k++) {
+				c[k] = (s32)((mid[k] - lo[k]) / cellsize[k]);
+				c[k] = c[k] < 0 ? 0 : c[k] >= dims[k] ? dims[k] - 1 : c[k];
+			}
+
+			cell = (c[0] * dims[1] + c[1]) * dims[2] + c[2];
+		}
+
+		for (s32 n = 0; n < numbig && !decal[i]; n++) {
+			decal[i] = (u8)beanDecalPair(o, nrm, mats, i, big[n], mid);
+		}
+
+		for (s32 n = cell >= 0 ? start[cell] : 0; cell >= 0 && n < start[cell + 1] && !decal[i]; n++) {
+			decal[i] = (u8)beanDecalPair(o, nrm, mats, i, filed[n], mid);
+		}
 	}
+
+	free(box);
+	free(cellof);
+	free(start);
+	free(filed);
+	free(big);
 
 	for (s32 m = 0; m < GEBEAN_MAXMATS; m++) {
 		copy[m] = -1;
@@ -8086,6 +9218,62 @@ static u8 *beanReflectPicture(const struct beanmodel *bm, s32 spot, s32 land)
 
 	free(s);
 	free(l);
+
+	return out;
+}
+
+/**
+ * The Golden Gun's gold as one sphere map for the reflection pass, laid out
+ * as beanReflectPicture()'s. Its material holds a 256x256 reflection map
+ * (_0x0903C7A5, a smeared olive and brass studio) in slot 0 and the gun's
+ * white scratch picture in slot 1, and its pixel shader's constants are
+ * c12 = 1.77 and c14 = -0.77 on every channel: the map stretched about its
+ * top, map * 1.77 - 0.77, which darkens its browns towards black and leaves
+ * its pale streaks bright - the dark bands and highlights of GoldenEye's own
+ * model, whose gold is a texgen'd reflection too. The map is near grey, and
+ * the gun's pictures white, so the gold is laid on here (fpGoldHue): the
+ * rest of the shader, and whatever colour it gives, is not decoded.
+ */
+static const f32 fpGoldHue[3] = { 1.25f, 1.05f, 0.45f };
+
+static u8 *beanGoldPicture(const struct beanmodel *bm, s32 map)
+{
+	s32 w = 0, h = 0;
+	u8 *m = beanDecodeTexture(bm, map, &w, &h);
+	u8 *out = m ? malloc((size_t)GEBEAN_ENV_CELL * GEBEAN_ENV_CELL * 4) : NULL;
+
+	if (!out || w <= 0 || h <= 0) {
+		free(m);
+		free(out);
+		return NULL;
+	}
+
+	for (s32 y = 0; y < GEBEAN_ENV_CELL; y++) {
+		for (s32 x = 0; x < GEBEAN_ENV_CELL; x++) {
+			u8 *px = &out[((size_t)y * GEBEAN_ENV_CELL + x) * 4];
+			f32 a = ((x + 0.5f) / GEBEAN_ENV_CELL) * 2.0f - 1.0f;
+			f32 b = ((y + 0.5f) / GEBEAN_ENV_CELL) * 2.0f - 1.0f;
+			const f32 d = a * a + b * b;
+
+			if (d > 0.999f) {
+				const f32 k = sqrtf(0.999f / d);
+
+				a *= k;
+				b *= k;
+			}
+
+			for (s32 c = 0; c < 3; c++) {
+				const f32 t = (beanReflectSample(m, w, h, a * 0.5f + 0.5f, b * 0.5f + 0.5f, c) * 1.77f - 0.77f * 255.0f)
+					* fpGoldHue[c];
+
+				px[c] = (u8)(t < 0.0f ? 0.0f : t > 255.0f ? 255.0f : t + 0.5f);
+			}
+
+			px[3] = 0xff;
+		}
+	}
+
+	free(m);
 
 	return out;
 }
@@ -8970,6 +10158,276 @@ static s32 beanDoubleWheels(struct beanout *o, struct modeldef *modeldef, s32 nu
 	return added;
 }
 
+/**
+ * The detonator and the watch laser in the hand (Igx030Z, GoldenEye's
+ * GtriggerZ, Bean's new/gun/trigger) wear one of six cuffs, switches 29 to 34
+ * of GoldenEye's model in bondviewSelectCuff()'s order: boiler suit, tuxedo,
+ * Connery's suit, the blue suit, jungle, snow (gegadgets.c sets the one the
+ * player wears). Bean's file has the six as well, in the N64 look's low
+ * detail round its HD hands, and numbers them its own way: the three suits'
+ * sleeves are 0x30 pieces 0 (navy, the blue suit), 1 (black, the tuxedo) and
+ * 2 (grey, Connery's), their white shirt cuff one draw for each, and the
+ * others are 0x17 sections, 3 jungle (a rolled sleeve and the forearm under
+ * it), 4 the boiler suit and 5 the snow suit. After each piece or section the
+ * same material draws every alternative again in one plain draw, in a second
+ * copy of the sleeves a little apart from the first, which goes on past the
+ * last section in the same vertex buffer.
+ *
+ * Laid rigid on the first list, as every prop is, all of it drew at once:
+ * six sleeves on one forearm, the tuxedo's black and white in front whatever
+ * Bond wore (F3 20260930-164246, Facility in the boiler suit: "watch weapon
+ * (detonator, laser) sleeve bugged"). Now each cuff's draws go under its own
+ * switch's list, which the model hides with the switch, and the plain draws
+ * that repeat them are left out.
+ *
+ * Returns the cuff (0 to 5, from switch 29) a draw belongs to, -1 for one
+ * drawn under every cuff, or -2 for a repeat to leave out.
+ */
+#define GEBEAN_TRIGGER_CUFF_FIRST 29
+#define GEBEAN_TRIGGER_CUFFS      6
+
+static s32 beanTriggerCuff(const struct beandraw *d, u32 *repeatvb)
+{
+	// and once the repeats have begun, the plain draws after them in the
+	// same vertex buffer are more of the same copy: a navy tube (texture 9)
+	// that stood through every other sleeve and covered the jungle's rolled
+	// one, a sliver of skin and a fleck on the watch's bezel
+	if (d->afterpieces || (*repeatvb != ~0u && d->vb == *repeatvb && d->piece < 0 && d->section < 0)) {
+		*repeatvb = d->vb;
+		return -2;
+	}
+
+	switch (d->piece) {
+	case 0: return 3; // navy: the blue suit
+	case 1: return 1; // black: the tuxedo
+	case 2: return 2; // grey: Connery's
+	}
+
+	switch (d->section) {
+	case 3: return 4; // jungle
+	case 4: return 0; // boiler suit
+	case 5: return 5; // snow suit
+	}
+
+	return -1;
+}
+
+/**
+ * The list a rigid prop's mesh is laid on: the model's first list, unless that
+ * one is a far level of detail - under a distance node that starts away from
+ * the camera - and a list on the same matrix is drawn near. The port always
+ * draws the near model (modelDistanceIsFullDetail()), and every list but the
+ * one the mesh is on is given an empty group, which hides the N64 geometry
+ * under it. GoldenEye's rocket (PROP_CHRROCKET, Pgx202Z) has its far list
+ * first: the whole HD rocket went on a list never drawn and the near one
+ * drew nothing, so the rockets on Depot's desk were not there at all in the
+ * HD look (F3 20261001-000059). The matrix is the same, so the offline fit
+ * (in the first list's matrix space) stands.
+ */
+static s32 gebeanRigidPrimaryList(struct modelnode **nodes, s32 numnodes)
+{
+	const s32 mtx0 = gebeanListNodeMatrix(nodes[0]);
+
+	for (s32 k = 0; k < numnodes; k++) {
+		s32 far = 0;
+
+		for (const struct modelnode *up = nodes[k]->parent; up && !far; up = up->parent) {
+			if ((up->type & 0xff) == MODELNODETYPE_DISTANCE && up->rodata->distance.near > 0.0f) {
+				far = 1;
+			}
+		}
+
+		if (!far && gebeanListNodeMatrix(nodes[k]) == mtx0) {
+			return k;
+		}
+	}
+
+	return 0;
+}
+
+// the window prop's pane, its material colour's alpha 0.56 (beanWalkStream())
+#define GEBEAN_HELI_PANE_ALPHA 143
+
+/**
+ * A rigid prop whose GoldenEye model holds more than the release's: the Cradle
+ * ending's helicopter (PROP_HELICOPTER, Pgx282Z) carries its pilot, Natalya,
+ * in the body's own list - 1003 of that list's 1624 vertices, seated in the
+ * cockpit - and the release's helicopter is the aircraft alone, in both looks.
+ * Laid on as every other prop is, the HD helicopter flew the ending empty (and
+ * without the row the whole of it stayed N64, F3 20261003-002429). The pilot
+ * is kept in GoldenEye's own look inside the HD aircraft
+ * (beanUncoveredVertices(), xblamesh.c's xblaMeshKeptLists()).
+ */
+static s32 gebeanRigidKeepsUncovered(const struct gebeangunrow *g)
+{
+	return g->weaponnum < 0 && strcmp(g->row.source, "prop/helicopter") == 0;
+}
+
+/**
+ * And whose moving parts the release put elsewhere than GoldenEye's, to be
+ * turned about its own hubs (the same helicopter's rotors: see the binding
+ * in gebeanBuildRigid()).
+ */
+static s32 gebeanRigidOwnHubs(const struct gebeangunrow *g)
+{
+	return gebeanRigidKeepsUncovered(g);
+}
+
+/**
+ * How many of a model's vertices each of its bones carries, as its draws' own
+ * palettes give them (a vertex shared by two draws counted twice).
+ */
+static void beanBoneVertexCounts(const struct beanmodel *bm, s32 *counts)
+{
+	for (s32 b = 0; b < BEAN_MAXBONES; b++) {
+		counts[b] = 0;
+	}
+
+	for (s32 di = 0; di < bm->numdraws; di++) {
+		const struct beandraw *d = &bm->draws[di];
+		struct beanvb vb;
+
+		if (!beanReadVb(bm, d->vb, &vb)) {
+			continue;
+		}
+
+		for (u32 i = 0; i < vb.count; i++) {
+			struct beanvtx v;
+			s32 b;
+
+			if (!beanVertex(bm, &vb, i, &v) || v.slot[0] < 0 || v.slot[0] >= d->numpal) {
+				continue;
+			}
+
+			b = d->pal[(s32)v.slot[0]];
+			b = bm->numremap && b < bm->numremap ? bm->remap[b] : b;
+
+			if (b >= 0 && b < BEAN_MAXBONES) {
+				counts[b]++;
+			}
+		}
+	}
+}
+
+/**
+ * Which of a list's vertices the release's N64-look copy of the prop does not
+ * have: a byte per vertex, 1 for one no vertex of Bean's files/original/ copy
+ * lands on once laid by the row's own fit - which puts every one of Bean's
+ * within a unit of GoldenEye's (0.89 at most on the helicopter), so two units
+ * is a match and anything Bean left out stands far off. NULL for none, or a
+ * list that is not a plain one.
+ */
+static u8 *beanUncoveredVertices(const struct gebeangunrow *g, const struct modelnode *node, s32 *outNumVerts,
+		s32 *outNumKept)
+{
+	char source[64];
+	struct beanmodel orig;
+	u32 seenvb[64];
+	s32 numseen = 0;
+	f32 *placed = NULL;
+	s32 numplaced = 0;
+	s32 maxplaced = 0;
+	const Vtx *vertices;
+	s32 numvertices;
+	u8 *keep;
+	s32 numkept = 0;
+
+	*outNumVerts = 0;
+	*outNumKept = 0;
+
+	if (!node || (node->type & 0xff) != MODELNODETYPE_DL || !node->rodata->dl.vertices
+			|| node->rodata->dl.numvertices <= 0) {
+		return NULL;
+	}
+
+	vertices = node->rodata->dl.vertices;
+	numvertices = node->rodata->dl.numvertices;
+
+	snprintf(source, sizeof(source), "original/%s", g->row.source);
+
+	if (!beanLoad(&orig, source, 0)) {
+		return NULL;
+	}
+
+	for (s32 di = 0; di < orig.numdraws; di++) {
+		struct beanvb vb;
+		s32 seen = 0;
+
+		for (s32 i = 0; i < numseen && !seen; i++) {
+			seen = seenvb[i] == orig.draws[di].vb;
+		}
+
+		if (seen || numseen >= ARRAYCOUNT(seenvb) || !beanReadVb(&orig, orig.draws[di].vb, &vb)) {
+			continue;
+		}
+
+		seenvb[numseen++] = orig.draws[di].vb;
+
+		if (numplaced + (s32)vb.count > maxplaced) {
+			f32 *grown;
+
+			maxplaced = (numplaced + (s32)vb.count) * 2;
+			grown = realloc(placed, maxplaced * 3 * sizeof(f32));
+
+			if (!grown) {
+				break;
+			}
+
+			placed = grown;
+		}
+
+		for (u32 i = 0; i < vb.count; i++) {
+			struct beanvtx v;
+
+			if (!beanVertex(&orig, &vb, i, &v)) {
+				continue;
+			}
+
+			for (s32 k = 0; k < 3; k++) {
+				placed[numplaced * 3 + k] = (g->sign[k] * v.pos[g->perm[k]] - g->beancentre[k]) * g->scale + g->n64centre[k];
+			}
+
+			numplaced++;
+		}
+	}
+
+	beanFree(&orig);
+
+	keep = numplaced > 0 ? calloc(numvertices, 1) : NULL;
+
+	for (s32 i = 0; keep && i < numvertices; i++) {
+		const f32 x = vertices[i].x;
+		const f32 y = vertices[i].y;
+		const f32 z = vertices[i].z;
+		s32 covered = 0;
+
+		for (s32 j = 0; j < numplaced && !covered; j++) {
+			const f32 dx = placed[j * 3] - x;
+			const f32 dy = placed[j * 3 + 1] - y;
+			const f32 dz = placed[j * 3 + 2] - z;
+
+			covered = dx * dx + dy * dy + dz * dz < 2.0f * 2.0f;
+		}
+
+		if (!covered) {
+			keep[i] = 1;
+			numkept++;
+		}
+	}
+
+	free(placed);
+
+	if (keep && numkept == 0) {
+		free(keep);
+		keep = NULL;
+	}
+
+	*outNumVerts = numvertices;
+	*outNumKept = numkept;
+
+	return keep;
+}
+
 static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *modeldef, struct modelnode **nodes, s32 numnodes,
 		struct gebeanmats *mats, u64 *outAbsent, u32 *outLen)
 {
@@ -8979,7 +10437,8 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 	u32 matwords[GEBEAN_MAXMATS];
 	s32 nummatwords;
 	s32 nummatrices = modeldef->nummatrices;
-	s32 mtx = gebeanListNodeMatrix(nodes[0]);
+	const s32 primary = gebeanRigidPrimaryList(nodes, numnodes);
+	s32 mtx = gebeanListNodeMatrix(nodes[primary]);
 	s32 mirror;
 	u64 flash = 0;
 	s32 numflash = 0;
@@ -9000,6 +10459,8 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 	u8 screenfit = 0;
 	u8 screenrecess = 0;
 	f32 screenquad[4][4][3];
+	s32 numcuffrepeats = 0;
+	u32 repeatvb = ~0u;
 	u8 *file;
 
 	memset(glass, 0, sizeof(glass));
@@ -9021,7 +10482,48 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 
 	snprintf(source, sizeof(source), "new/%s", g->row.source);
 
-	if (!gebeanLocate(1) || !beanLoad(&bm, source, 0)) {
+	// the detonator's cuffs: the list under each of GoldenEye's switches
+	// (beanTriggerCuff()), or none found and it is drawn as it was
+	s32 cuffgroup[GEBEAN_TRIGGER_CUFFS];
+	s32 numcuffs = 0;
+
+	for (s32 c = 0; c < GEBEAN_TRIGGER_CUFFS; c++) {
+		cuffgroup[c] = -1;
+	}
+
+	if (strcmp(g->row.source, "gun/trigger") == 0) {
+		for (s32 c = 0; c < GEBEAN_TRIGGER_CUFFS; c++) {
+			const struct modelnode *toggle = modelGetPart(modeldef, GEBEAN_TRIGGER_CUFF_FIRST + c);
+
+			if (!toggle || (toggle->type & 0xff) != MODELNODETYPE_TOGGLE) {
+				continue;
+			}
+
+			for (s32 k = 0; k < numnodes && cuffgroup[c] < 0; k++) {
+				if (k == primary) {
+					continue;
+				}
+
+				for (const struct modelnode *up = nodes[k]->parent; up; up = up->parent) {
+					if (up == toggle) {
+						cuffgroup[c] = k;
+						break;
+					}
+				}
+			}
+
+			numcuffs += cuffgroup[c] >= 0;
+		}
+
+		if (numcuffs != GEBEAN_TRIGGER_CUFFS) {
+			sysLogPrintf(LOG_WARNING, "gebean: %s: %d of GoldenEye's %d cuff switches have a list, the cuffs drawn together",
+					g->row.file, numcuffs, GEBEAN_TRIGGER_CUFFS);
+			numcuffs = 0;
+		}
+	}
+
+	// the cuffs' third suit is a piece past 1
+	if (!gebeanLocate(1) || !beanLoad(&bm, source, numcuffs > 0)) {
 		return NULL;
 	}
 
@@ -9192,6 +10694,91 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 		}
 	}
 
+	// The Cradle helicopter's rotors. The release remade the aircraft: its
+	// cabin, skids and nose lie on GoldenEye's (the fit is on its N64-look
+	// copy, which is GoldenEye's own), but its mast stands 816 units further
+	// forward than GoldenEye's rotor and its tail rotor 1711 units from
+	// GoldenEye's, so neither bone is near the held position its rotor turns
+	// on and both rode the body standing still while the aircraft flew. Each
+	// bone with vertices of its own, other than the body's (the one with
+	// most), takes the nearest held position on the first list's matrix, and
+	// is turned about its own hub - the bone - rather than moved onto
+	// GoldenEye's: the matrix it is drawn under is moved by the hub's offset
+	// from the node as the body's matrix turns it (hubs below, xblamesh.c's
+	// xblaMeshPoseMatrices()), so it spins where the release built it.
+	s32 numhubs = 0;
+	s8 hubmtx[GEBEAN_MAXHUBS];
+	f32 hubshift[GEBEAN_MAXHUBS][3];
+
+	if (gebeanRigidOwnHubs(g)) {
+		s32 counts[BEAN_MAXBONES];
+		s32 body = -1;
+		u64 taken = 0;
+
+		beanBoneVertexCounts(&bm, counts);
+
+		for (s32 b = 0; b < bm.numbones && b < BEAN_MAXBONES; b++) {
+			if (body < 0 || counts[b] > counts[body]) {
+				body = b;
+			}
+		}
+
+		for (s32 b = 0; b < bm.numbones && b < BEAN_MAXBONES && numhubs < GEBEAN_MAXHUBS; b++) {
+			f32 at[3];
+			f32 bestdist = 0.0f;
+			s32 best = -1;
+			const f32 *bestpos = NULL;
+
+			if (b == body || counts[b] == 0 || bonemtx[b] >= 0) {
+				continue;
+			}
+
+			for (s32 k = 0; k < 3; k++) {
+				at[k] = (g->sign[k] * bm.bind[b][g->perm[k]] - g->beancentre[k]) * g->scale + g->n64centre[k];
+			}
+
+			for (s32 k = 0; k < numnodes; k++) {
+				const f32 *ppos = NULL;
+				s32 pmtx = -1;
+				const struct modelnode *pn = gebeanListPositionNode(nodes[k], &ppos, &pmtx);
+				f32 dist;
+
+				if (!pn || (pn->type & 0xff) != MODELNODETYPE_POSITIONHELD || pmtx == mtx || pmtx < 0
+						|| pmtx >= nummatrices || pmtx >= 64 || (taken & (1ull << pmtx))
+						|| gebeanListNodeMatrix(pn) != mtx) {
+					continue;
+				}
+
+				dist = (at[0] - ppos[0]) * (at[0] - ppos[0]) + (at[1] - ppos[1]) * (at[1] - ppos[1])
+					+ (at[2] - ppos[2]) * (at[2] - ppos[2]);
+
+				if (best < 0 || dist < bestdist) {
+					best = pmtx;
+					bestdist = dist;
+					bestpos = ppos;
+				}
+			}
+
+			if (best < 0) {
+				continue;
+			}
+
+			taken |= 1ull << best;
+			bonemtx[b] = best;
+
+			for (s32 k = 0; k < 3; k++) {
+				bonepos[b][k] = at[k];
+				hubshift[numhubs][k] = at[k] - bestpos[k];
+			}
+
+			hubmtx[numhubs++] = (s8)best;
+			numparts++;
+
+			sysLogPrintf(LOG_NOTE, "gebean: %s: bone %d turns on matrix %d about its own hub, %.0f %.0f %.0f from GoldenEye's",
+					g->row.file, b, best, hubshift[numhubs - 1][0], hubshift[numhubs - 1][1], hubshift[numhubs - 1][2]);
+		}
+	}
+
 	// Caverns' eye and iris doors: every leaf is a part of its own, and the
 	// first list is a leaf's (the iris's part 2 - an inner leaf, under the
 	// outer one - and the eyelid's part 1, the top lid). The HD mesh was
@@ -9349,6 +10936,14 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 			continue;
 		}
 
+		const s32 cuff = numcuffs > 0 ? beanTriggerCuff(d, &repeatvb) : -1;
+		const s32 group = cuff >= 0 ? cuffgroup[cuff] : primary;
+
+		if (cuff == -2) {
+			numcuffrepeats++;
+			continue;
+		}
+
 		if (!beanReadVb(&bm, d->vb, &vb)) {
 			continue;
 		}
@@ -9361,6 +10956,33 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 		}
 
 		sphere = beanDrawIsSphereMapped(&bm, d, &vb);
+
+		// A spent cartridge's brass: a skinned vertex with a colour and no
+		// UV (stride 28), on GoldenEye's own banded reflection picture
+		// (_0x087BD385.rgb.bin, the blue's and the rifle's _0x02D7CFA5),
+		// which the release's shader looks up by the normal as GoldenEye's
+		// texgen did. Read at the UV it has not got, the side of the case was
+		// one flat beige texel. Only the cartridges: the helicopter's, the
+		// truck's and the plane's stride 28 draws are not looked at here
+		if (!sphere && g >= cartRows && g < cartRows + ARRAYCOUNT(cartRows)
+				&& vb.stride == 28 && vb.col28 && d->ownmat && d->tex < (u32)bm.numtex) {
+			sphere = 1;
+		}
+
+		// The Cradle helicopter's windows are the same kind of draw: a
+		// coloured vertex with no UV over the aircraft's own landscape map
+		// (_0x075981A5, 256x128), the release's reflecting glass. Read at the
+		// UV they have not got they were flat slate panes, opaque, and the
+		// pilot GoldenEye seats behind them (gebeanRigidKeepsUncovered()) was
+		// not there to see: GoldenEye's own windscreen is its translucent
+		// list. Looked up by the normal, and see-through at the release's own
+		// window pane's 0.56 (the window prop's c_constant0)
+		const s32 heliglass = gebeanRigidKeepsUncovered(g) && vb.stride == 28 && vb.col28 && d->ownmat
+			&& d->tex < (u32)bm.numtex;
+
+		if (heliglass) {
+			sphere = 1;
+		}
 
 		if (sphere) {
 			beanSphereFrame(&bm, &vb, tris, numtris, &sp);
@@ -9394,8 +11016,14 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 				s32 part = -1;
 				s32 backing = 0;
 				u32 argb;
+				// A pane the release draws untextured over a screen it shows a
+				// programme on (the modem's, the door panel's: no texture fetch
+				// in its pixel shader, the programme drawn over it): the screen's
+				// backing, as the consoles' placeholder is, so the release's draw
+				// is there and the programme in front of it, not a grey card
+				const s32 pane = beanVertexDropped(source, vb.off, vi);
 
-				if (beanVertexDropped(source, vb.off, vi)) {
+				if (pane && numscreens == 0) {
 					ok = 0;
 					break;
 				}
@@ -9428,9 +11056,12 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 					nrm[k] = g->sign[k] * v.nrm[g->perm[k]];
 				}
 
-				if (placeholder && beanScreenBacking(screens, numscreens, pos)) {
+				if ((placeholder || pane) && beanScreenBacking(screens, numscreens, pos)) {
 					backing = 1;
 					numbacking++;
+				} else if (pane) {
+					ok = 0;
+					break;
 				} else if (!placeholder) {
 					const s32 face = beanScreenFace(screens, numscreens, pos);
 
@@ -9463,6 +11094,11 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 				// and drawn black the bike's bars came out as flat black shapes.
 				v.argb = beanFixVertexColour(source, vb.off, vi, v.argb);
 				beanFixVertexUv(source, &bm, vb.off, vi, v.uv);
+
+				if (d->repaint) {
+					beanRepaintUv(d, &v, v.uv);
+				}
+
 				argb = v.argb == 0xff000000 ? 0xffffffff : v.argb;
 
 				// The Golden Gun's pickup is the first-person gun's near-white
@@ -9481,8 +11117,8 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 				// vertex's. The material colour, and not the vertex alpha, says
 				// what is glass: the N64 vertex alpha Bean kept is often the
 				// fog's (the crypt doors' blended draws are 0 on every vertex).
-				if (d->blend && d->alpha < 0xff) {
-					const u32 a = ((argb >> 24) * d->alpha + 127) / 255;
+				if ((d->blend && d->alpha < 0xff) || heliglass) {
+					const u32 a = ((argb >> 24) * (heliglass ? GEBEAN_HELI_PANE_ALPHA : d->alpha) + 127) / 255;
 
 					argb = (argb & 0x00ffffff) | (a << 24);
 
@@ -9510,7 +11146,7 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 				continue;
 			}
 
-			if (!beanAddTri(&out, 0, (s32)d->tex, idx[0], mirror ? idx[2] : idx[1], mirror ? idx[1] : idx[2])) {
+			if (!beanAddTri(&out, group, (s32)d->tex, idx[0], mirror ? idx[2] : idx[1], mirror ? idx[1] : idx[2])) {
 				break;
 			}
 		}
@@ -9524,8 +11160,10 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 	}
 
 	if (out.numverts > 0) {
-		for (s32 k = 1; k < numnodes; k++) {
-			beanAddTri(&out, k, 0, 0, 0, 0);
+		for (s32 k = 0; k < numnodes; k++) {
+			if (k != primary) {
+				beanAddTri(&out, k, 0, 0, 0, 0);
+			}
 		}
 	}
 
@@ -9540,6 +11178,28 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 	memset(mats->noskin, -1, sizeof(mats->noskin));
 	mats->num = nummatwords;
 	mats->screenfit = screenfit;
+
+	// the helicopter's pilot, in GoldenEye's own look on the list the HD
+	// aircraft is on (gebeanRigidKeepsUncovered())
+	if (gebeanRigidKeepsUncovered(g)) {
+		s32 numkeepverts = 0;
+		s32 numkept = 0;
+
+		mats->keepvtx = beanUncoveredVertices(g, nodes[primary], &numkeepverts, &numkept);
+		mats->numkeepvtx = mats->keepvtx ? numkeepverts : 0;
+		mats->keeplist = (s8)primary;
+
+		sysLogPrintf(LOG_NOTE, "gebean: %s: %d of list %d's %d vertices are not on the release's N64-look copy, kept in GoldenEye's look",
+				g->row.file, numkept, primary, numkeepverts);
+	}
+
+	mats->numhubs = numhubs;
+
+	for (s32 h = 0; h < numhubs; h++) {
+		mats->hubmtx[h] = hubmtx[h];
+		mats->hubparent[h] = (s8)mtx;
+		memcpy(mats->hubshift[h], hubshift[h], sizeof(hubshift[h]));
+	}
 	mats->screenrecess = screenrecess;
 	memcpy(mats->screenquad, screenquad, sizeof(mats->screenquad));
 
@@ -9604,6 +11264,11 @@ static u8 *gebeanBuildRigid(const struct gebeangunrow *g, struct modeldef *model
 			numflash ? ", GoldenEye's muzzle flash dropped" : "",
 			mirror ? ", mirrored" : "", file ? "" : " - did not write",
 			numparts ? gebeanPartsNote(numparts, numpartverts) : "");
+
+	if (numcuffs) {
+		sysLogPrintf(LOG_NOTE, "gebean: %s: each of the %d cuffs under its own switch, %d draws repeating them left out",
+				g->row.file, numcuffs, numcuffrepeats);
+	}
 
 	if (numdual) {
 		sysLogPrintf(LOG_NOTE, "gebean: %s: %d triangles of wheels drawn again as the inner of a pair", g->row.file, numdual);
@@ -9742,6 +11407,23 @@ static s32 beanTextureIsGlove(const struct beanmodel *bm, s32 t)
 	}
 
 	return 0;
+}
+
+/**
+ * Whether a gun's draw is GoldenEye's glove: in the HD files the one 512x511
+ * picture, in the originals the glove's six (beanGunExtent()).
+ */
+static s32 beanDrawIsGlove(const struct beanmodel *bm, s32 original, const struct beandraw *d)
+{
+	s32 w = 0;
+	s32 h = 0;
+
+	if (d->tex >= (u32)bm->numtex) {
+		return 0;
+	}
+
+	return original ? beanTextureIsGlove(bm, (s32)d->tex)
+		: beanTextureSize(bm, (s32)d->tex, &w, &h) && w == 512 && h == 511;
 }
 
 /**
@@ -9916,14 +11598,9 @@ static f32 fpCloudMedian(const struct fpcloud *cloud, s32 axis, f32 fallback)
 	return median;
 }
 
-/**
- * The rounds themselves, from `hostc`, over at most `points` of Bean's; the
- * answer is how far the kept host vertices still are from Bean's (the mean
- * square of the closest `FP_ICP_KEEP`, measured after the last move), or a
- * negative number when there was nothing to measure.
- */
-static f32 fpRefineRounds(const struct fpcloud *bean, const struct fpcloud *host,
-		const s8 *axis, const f32 *beanc, f32 scale, f32 *hostc, s32 points)
+/** fpRefineRoundsN() measuring every point: for a cloud with no order to it. */
+static f32 fpRefineRoundsBrute(const struct fpcloud *bean, const struct fpcloud *host,
+		const s8 *axis, const f32 *beanc, f32 scale, f32 *hostc, s32 points, s32 rounds)
 {
 	const f32 zero[3] = { 0.0f, 0.0f, 0.0f };
 	f32 *base;
@@ -9969,7 +11646,7 @@ static f32 fpRefineRounds(const struct fpcloud *bean, const struct fpcloud *host
 	}
 
 	// the last pass only measures
-	for (s32 round = 0; round <= FP_ICP_ROUNDS; round++) {
+	for (s32 round = 0; round <= rounds; round++) {
 		f32 cut;
 		f32 move[3] = { 0.0f, 0.0f, 0.0f };
 		f32 sum = 0.0f;
@@ -10017,7 +11694,7 @@ static f32 fpRefineRounds(const struct fpcloud *bean, const struct fpcloud *host
 			break;
 		}
 
-		if (round == FP_ICP_ROUNDS) {
+		if (round == rounds) {
 			residual = sum / taken;
 			break;
 		}
@@ -10033,6 +11710,221 @@ static f32 fpRefineRounds(const struct fpcloud *bean, const struct fpcloud *host
 	free(sorted);
 
 	return residual;
+}
+
+static const f32 *fpSortKeys;
+
+static int fpCompareByKey(const void *a, const void *b)
+{
+	const f32 x = fpSortKeys[*(const s32 *)a];
+	const f32 y = fpSortKeys[*(const s32 *)b];
+
+	return x < y ? -1 : x > y ? 1 : *(const s32 *)a - *(const s32 *)b;
+}
+
+/**
+ * The rounds themselves, from `hostc`, over at most `points` of Bean's; the
+ * answer is how far the kept host vertices still are from Bean's (the mean
+ * square of the closest `FP_ICP_KEEP`, measured after the last move), or a
+ * negative number when there was nothing to measure.
+ *
+ * Each host vertex's nearest is found among Bean's points sorted along the
+ * gun's longest axis, walking out both ways from the host vertex's place on
+ * it and stopping each way at the first point whose distance along that axis
+ * alone is already past the best. Measured against every point, as it was,
+ * this was 20-230 ms of every first-person gun's build (F3 20261003-123556,
+ * a freeze the first time each gun was drawn). The distance is worked out as
+ * it always was, a point is taken over an equal one only when it comes
+ * earlier in Bean's order, and the square of one axis's part can never be
+ * more than the whole sum it is added into, so the point chosen - and the
+ * placement - are the same.
+ */
+static f32 fpRefineRoundsN(const struct fpcloud *bean, const struct fpcloud *host,
+		const s8 *axis, const f32 *beanc, f32 scale, f32 *hostc, s32 points, s32 rounds)
+{
+	const f32 zero[3] = { 0.0f, 0.0f, 0.0f };
+	f32 *base;
+	f32 *dist;
+	f32 *delta;
+	f32 *sorted;
+	f32 *keys;
+	s32 *order;
+	f32 residual = -1.0f;
+	f32 lo[3] = { 1e30f, 1e30f, 1e30f };
+	f32 hi[3] = { -1e30f, -1e30f, -1e30f };
+	s32 stride;
+	s32 num = 0;
+	s32 keep;
+	s32 ax = 0;
+
+	if (bean->num < 8 || host->num < 8) {
+		return -1.0f;
+	}
+
+	// Only the translation moves between rounds, so each of Bean's points is
+	// placed once with none of it and the rounds are arithmetic. A gun can
+	// carry a few thousand and every one of them would otherwise be measured
+	// against every one of the host's, eight times over, at a model load.
+	stride = bean->num / points + 1;
+	base = malloc((size_t)(bean->num / stride + 1) * 3 * sizeof(f32));
+	keys = malloc((size_t)(bean->num / stride + 1) * sizeof(f32));
+	order = malloc((size_t)(bean->num / stride + 1) * sizeof(s32));
+	dist = malloc((size_t)host->num * sizeof(f32));
+	delta = malloc((size_t)host->num * 3 * sizeof(f32));
+	sorted = malloc((size_t)host->num * sizeof(f32));
+
+	if (!base || !keys || !order || !dist || !delta || !sorted) {
+		free(base);
+		free(keys);
+		free(order);
+		free(dist);
+		free(delta);
+		free(sorted);
+		return -1.0f;
+	}
+
+	for (s32 b = 0; b < bean->num; b += stride) {
+		fpPlace(&bean->pos[b * 3], axis, beanc, scale, zero, &base[num * 3]);
+		num++;
+	}
+
+	for (s32 b = 0; b < num; b++) {
+		for (s32 a = 0; a < 3; a++) {
+			const f32 v = base[b * 3 + a];
+
+			if (!(v == v) || v > 1e29f || v < -1e29f) {
+				// nothing to sort by: measured against every point
+				free(keys);
+				free(order);
+				free(base);
+				free(dist);
+				free(delta);
+				free(sorted);
+				return fpRefineRoundsBrute(bean, host, axis, beanc, scale, hostc, points, rounds);
+			}
+
+			lo[a] = v < lo[a] ? v : lo[a];
+			hi[a] = v > hi[a] ? v : hi[a];
+		}
+	}
+
+	for (s32 a = 1; a < 3; a++) {
+		if (hi[a] - lo[a] > hi[ax] - lo[ax]) {
+			ax = a;
+		}
+	}
+
+	for (s32 b = 0; b < num; b++) {
+		order[b] = b;
+		keys[b] = base[b * 3 + ax];
+	}
+
+	fpSortKeys = keys;
+	qsort(order, num, sizeof(s32), fpCompareByKey);
+	fpSortKeys = NULL;
+
+	keep = (s32)(host->num * FP_ICP_KEEP);
+
+	if (keep < 8) {
+		keep = 8;
+	}
+
+	// the last pass only measures
+	for (s32 round = 0; round <= rounds; round++) {
+		f32 cut;
+		f32 move[3] = { 0.0f, 0.0f, 0.0f };
+		f32 sum = 0.0f;
+		s32 taken = 0;
+
+		for (s32 h = 0; h < host->num; h++) {
+			const f32 *q = &host->pos[h * 3];
+			f32 best = 1e30f;
+			s32 bestb = -1;
+			s32 at = 0;
+			s32 top = num;
+
+			// the first point at or past q along the axis, as the
+			// distance below places it
+			while (at < top) {
+				const s32 m = (at + top) / 2;
+
+				if (base[order[m] * 3 + ax] + hostc[ax] < q[ax]) {
+					at = m + 1;
+				} else {
+					top = m;
+				}
+			}
+
+			for (s32 dir = 0; dir < 2; dir++) {
+				for (s32 k = dir ? at - 1 : at; k >= 0 && k < num; k += dir ? -1 : 1) {
+					const s32 b = order[k];
+					f32 d[3];
+					f32 d2;
+
+					for (s32 a = 0; a < 3; a++) {
+						d[a] = q[a] - (base[b * 3 + a] + hostc[a]);
+					}
+
+					if (d[ax] * d[ax] > best) {
+						break;
+					}
+
+					d2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
+
+					if (d2 < best || (d2 == best && b < bestb)) {
+						best = d2;
+						bestb = b;
+						memcpy(&delta[h * 3], d, sizeof(d));
+					}
+				}
+			}
+
+			dist[h] = best;
+		}
+
+		memcpy(sorted, dist, (size_t)host->num * sizeof(f32));
+		qsort(sorted, host->num, sizeof(f32), fpCompareF32);
+		cut = sorted[keep - 1];
+
+		for (s32 h = 0; h < host->num; h++) {
+			if (dist[h] <= cut) {
+				for (s32 a = 0; a < 3; a++) {
+					move[a] += delta[h * 3 + a];
+				}
+
+				sum += dist[h];
+				taken++;
+			}
+		}
+
+		if (!taken) {
+			break;
+		}
+
+		if (round == rounds) {
+			residual = sum / taken;
+			break;
+		}
+
+		for (s32 a = 0; a < 3; a++) {
+			hostc[a] += move[a] / taken;
+		}
+	}
+
+	free(keys);
+	free(order);
+	free(base);
+	free(dist);
+	free(delta);
+	free(sorted);
+
+	return residual;
+}
+
+static f32 fpRefineRounds(const struct fpcloud *bean, const struct fpcloud *host,
+		const s8 *axis, const f32 *beanc, f32 scale, f32 *hostc, s32 points)
+{
+	return fpRefineRoundsN(bean, host, axis, beanc, scale, hostc, points, FP_ICP_ROUNDS);
 }
 
 static void fpRefinePlacement(const struct fpcloud *bean, const struct fpcloud *host,
@@ -10107,9 +11999,40 @@ static void fpRefinePlacementSearch(s32 fp, const struct fpcloud *bean, const st
 		sysLogPrintf(LOG_NOTE, "fpfit: row %d placement searched: %.1f %.1f %.1f from %.1f %.1f %.1f (residual %.2f from %.2f)",
 				fp, best[0], best[1], best[2], hostc[0], hostc[1], hostc[2], bestres, firstres);
 		memcpy(hostc, best, sizeof(best));
+	} else {
+		// and the first start's answer is where its walk ended, not where it
+		// began. Settling from the beginning again at the full count, the
+		// plain D5K's walk stopped half way: the first start (Bean's origin 57
+		// along the barrel from GoldenEye's) had ended on GoldenEye's gun,
+		// 0.3 from its origin, and the settling from 57 out stopped at 29 out
+		// and 4 down, with nothing at the muzzle to pull it (the silenced
+		// one's silencer does), where every other gun's ends within half a
+		// unit
+		memcpy(hostc, first, sizeof(first));
 	}
 
-	fpRefinePlacement(bean, host, axis, beanc, scale, hostc);
+	// Settled at the full count, unless that walks off: measured on the
+	// same points, the place the search ended is kept when it is closer.
+	{
+		f32 searched[3];
+		f32 settled[3];
+		f32 ressearched;
+		f32 ressettled;
+
+		memcpy(searched, hostc, sizeof(searched));
+		memcpy(settled, hostc, sizeof(settled));
+		fpRefinePlacement(bean, host, axis, beanc, scale, settled);
+
+		ressearched = fpRefineRoundsN(bean, host, axis, beanc, scale, searched, FP_ICP_POINTS, 0);
+		ressettled = fpRefineRoundsN(bean, host, axis, beanc, scale, settled, FP_ICP_POINTS, 0);
+
+		if (ressearched >= 0.0f && ressettled >= 0.0f && ressearched < ressettled) {
+			sysLogPrintf(LOG_NOTE, "fpfit: row %d kept where the search ended: %.1f %.1f %.1f (residual %.3f; settled %.1f %.1f %.1f, %.3f)",
+					fp, hostc[0], hostc[1], hostc[2], ressearched, settled[0], settled[1], settled[2], ressettled);
+		} else {
+			memcpy(hostc, settled, sizeof(settled));
+		}
+	}
 }
 
 /**
@@ -10405,6 +12328,422 @@ static void beanFixLettering(struct beanmodel *bm, const char *source, s32 fp, s
 	}
 }
 
+/**
+ * The toggled lists of a host's model into its cloud and box, in the model's
+ * space - each vertex by the rest of the matrix it is drawn under, as the
+ * visible lists' are gathered in gebeanBuildFirstPerson().
+ */
+static void fpCloudAddToggled(struct fpcloud *cloud, struct modelnode **nodes, s32 numnodes, const s32 *nodemtx,
+		s32 nummatrices, const struct beanrig *rig, f32 lo[3], f32 hi[3])
+{
+	for (s32 k = 0; k < numnodes && k < 64; k++) {
+		const u32 type = nodes[k]->type & 0xff;
+		const Vtx *v = NULL;
+		s32 n = 0;
+		s16 *vtxmtx;
+
+		if (!beanNodeIsToggled(nodes[k])) {
+			continue;
+		}
+
+		if (type == MODELNODETYPE_DL) {
+			v = nodes[k]->rodata->dl.vertices;
+			n = nodes[k]->rodata->dl.numvertices;
+		} else if (type == MODELNODETYPE_GUNDL) {
+			v = nodes[k]->rodata->gundl.vertices;
+			n = nodes[k]->rodata->gundl.numvertices;
+		}
+
+		if (!v || n <= 0) {
+			continue;
+		}
+
+		vtxmtx = malloc((size_t)n * sizeof(*vtxmtx));
+
+		if (vtxmtx) {
+			beanListMatrices(nodes[k], vtxmtx, n);
+		}
+
+		for (s32 j = 0; j < n; j++) {
+			const s32 mtx = vtxmtx && vtxmtx[j] >= 0 && vtxmtx[j] < nummatrices && rig->hasrest[vtxmtx[j]]
+				? vtxmtx[j] : nodemtx[k];
+			f32 p[3];
+
+			for (s32 a = 0; a < 3; a++) {
+				p[a] = v[j].v[a] + rig->rest[mtx][a];
+
+				if (p[a] < lo[a]) lo[a] = p[a];
+				if (p[a] > hi[a]) hi[a] = p[a];
+			}
+
+			fpCloudAdd(cloud, p);
+		}
+
+		free(vtxmtx);
+	}
+}
+
+/** A point of Bean's gun, where the first-person build lays it in the host's model. */
+static void fpLayPoint(const s8 *axis, const f32 *beanc, f32 scale, const f32 *hostc, const f32 *p, f32 *out)
+{
+	f32 rel[3];
+	f32 turned[3];
+
+	for (s32 a = 0; a < 3; a++) {
+		rel[a] = p[a] - beanc[a];
+	}
+
+	beanAxisMap(axis, rel, turned);
+
+	for (s32 a = 0; a < 3; a++) {
+		out[a] = turned[a] * scale + hostc[a];
+	}
+}
+
+/**
+ * Whether a draw of a gun file is one of the release's flash cards: the
+ * draws of piece 0 (record 0x30's fourth word), which the release draws only
+ * for the frame of a shot - the ZMG's streaks on SKEL_TOP for the same 32
+ * frames of the Caverns capture as its cards on the muzzle - and anything
+ * hanging off the muzzle's bones (beanDrawIsFlash()).
+ */
+static s32 fpDrawIsCard(const struct beanmodel *bm, const struct beandraw *d)
+{
+	return d->piece == 0 || beanDrawIsFlash(bm, d);
+}
+
+/**
+ * The release's muzzle-flash cards (fpCardSet) for GoldenEye's own model in
+ * the hand (fpDrawIsCard(); beanGunExtent() leaves them out of the gun), in
+ * the lists under GoldenEye's flash switch (part 1), so they draw only while
+ * it is on.
+ *
+ * Where GoldenEye poses its flash (part 3 on a matrix of its own, and its star,
+ * part 2, on another): the cards on SKEL_MUZZLE - and those on the gun's own
+ * bones, which the release keeps still with the gun and which turn with the
+ * flash here - into the flash's list, the rest into the star's, each in its
+ * list's space less the point the release turns it about - Bean's
+ * SKEL_MUZZLE, and the star's bone nearest it - laid on the host as the gun
+ * is. With no star list of its own the star goes with the flash.
+ *
+ * Where it does not (the AR33's, the RC-P90's and the Shotgun's models carry
+ * the flash on the gun's own matrix): all of them into the first list under
+ * the switch, where the gun lays them, still. Returns the triangles drawn (0
+ * leaves GoldenEye's flash as it was) and the switch.
+ */
+static s32 fpBuildCards(s32 fp, struct beanmodel *bm, struct modeldef *modeldef, struct modelnode **nodes,
+		s32 numnodes, const s32 *nodemtx, const struct beanrig *rig, const s8 *axis, const f32 *beanc,
+		f32 scale, const f32 *hostc, struct beanout *out, u8 *nodeused, struct modelnode **outswitch,
+		u64 *outgroups, u64 *outtex)
+{
+	struct modelnode *sw = modelGetPart(modeldef, 1);
+	struct modelnode *flashpos = modelGetPart(modeldef, 3);
+	struct modelnode *starpos = modelGetPart(modeldef, 2);
+	const s32 basemtx = sw ? modelFindNodeMtxIndex(sw, 0) : -1;
+	const s32 flashmtx = flashpos && (flashpos->type & 0xff) == MODELNODETYPE_POSITION
+		? modelFindNodeMtxIndex(flashpos, 0) : -1;
+	s32 starmtx = starpos && (starpos->type & 0xff) == MODELNODETYPE_POSITION
+		? modelFindNodeMtxIndex(starpos, 0) : -1;
+	s32 posed = sw && flashmtx >= 0 && basemtx >= 0 && flashmtx != basemtx
+		&& flashmtx < GEBEAN_MAXMTX && basemtx < GEBEAN_MAXMTX && rig->hasrest[basemtx];
+	s32 anylist = -1;
+	s32 billboard = 0;   // every card on the star (no list of the flash's own)
+	s32 flashlist = -1;
+	s32 starlist = -1;
+	s32 root = -1;
+	s32 star = -1;
+	f32 rootat[3];
+	f32 starat[3];
+	f32 best = 1e30f;
+	s32 numtris = 0;
+
+	if (!sw) {
+		return 0;
+	}
+
+	if (!posed || starmtx == flashmtx || starmtx == basemtx || starmtx >= GEBEAN_MAXMTX) {
+		starmtx = -1;
+	}
+
+	// GoldenEye's lists under the switch that draw under each matrix
+	for (s32 k = 0; k < numnodes; k++) {
+		s32 under = 0;
+
+		for (const struct modelnode *up = nodes[k]; up && !under; up = up->parent) {
+			under = up == sw;
+		}
+
+		if (!under) {
+			continue;
+		}
+
+		if (anylist < 0) {
+			anylist = k;
+		}
+
+		if (flashlist < 0 && posed && nodemtx[k] == flashmtx) {
+			flashlist = k;
+		}
+
+		if (starlist < 0 && starmtx >= 0 && nodemtx[k] == starmtx) {
+			starlist = k;
+		}
+	}
+
+	// A flash whose only list is its star's (the RC-P90's and the AR33's: the
+	// star, and a gunfire sprite) has every card on the star, facing the eye at
+	// the muzzle. A flash matrix no list under the switch draws with at all is
+	// not posed either.
+	if (flashlist < 0 && posed && starlist >= 0) {
+		billboard = 1;
+		flashlist = starlist;
+	} else if (flashlist < 0) {
+		posed = 0;
+		starlist = -1;
+		flashlist = anylist;
+	}
+
+	if (flashlist < 0 || nodemtx[flashlist] < 0 || nodemtx[flashlist] >= GEBEAN_MAXMTX) {
+		return 0;
+	}
+
+	// The bones the cards hang from: the muzzle, and the star's nearest it
+	for (s32 pass = 0; pass < 2; pass++) {
+		for (s32 di = 0; di < bm->numdraws; di++) {
+			const struct beandraw *d = &bm->draws[di];
+
+			if (!fpDrawIsCard(bm, d)) {
+				continue;
+			}
+
+			for (s32 k = 0; k < d->numpal; k++) {
+				s32 bone = d->pal[k];
+
+				bone = bm->numremap && bone < bm->numremap ? bm->remap[bone] : bone;
+
+				if (bone < 0 || bone >= bm->numbones || !bm->muzzlebone[bone]) {
+					continue;
+				}
+
+				if (pass == 0 && (root < 0 || (bm->muzzleroot[bone] && !bm->muzzleroot[root]))) {
+					root = bone;
+				} else if (pass == 1 && root >= 0 && bone != root && !bm->muzzleroot[bone]) {
+					f32 d2 = 0.0f;
+
+					for (s32 a = 0; a < 3; a++) {
+						d2 += (bm->bind[bone][a] - bm->bind[root][a]) * (bm->bind[bone][a] - bm->bind[root][a]);
+					}
+
+					if (d2 < best) {
+						best = d2;
+						star = bone;
+					}
+				}
+			}
+		}
+	}
+
+	if (star < 0 && !billboard) {
+		starlist = -1;
+	}
+
+	// what the cards' places are measured from: where the release turns the
+	// flash (its muzzle, else where GoldenEye's own stands), or for a flash
+	// GoldenEye does not pose, its list's own rest
+	if (posed && root >= 0) {
+		fpLayPoint(axis, beanc, scale, hostc, bm->bind[root], rootat);
+	} else if (posed) {
+		// no card on the muzzle's bones (the grenade launcher's are all on
+		// SKEL_TOP): they turn about their own middle, as a flash does
+		f32 sum[3] = { 0.0f, 0.0f, 0.0f };
+		s32 count = 0;
+
+		for (s32 di = 0; di < bm->numdraws; di++) {
+			const struct beandraw *d = &bm->draws[di];
+			struct beanvb vb;
+
+			if (!fpDrawIsCard(bm, d) || !beanReadVb(bm, d->vb, &vb)) {
+				continue;
+			}
+
+			for (u32 vi = 0; vi < vb.count; vi++) {
+				struct beanvtx v;
+				f32 at[3];
+
+				if (beanVertex(bm, &vb, vi, &v)) {
+					fpLayPoint(axis, beanc, scale, hostc, v.pos, at);
+
+					for (s32 a = 0; a < 3; a++) {
+						sum[a] += at[a];
+					}
+
+					count++;
+				}
+			}
+		}
+
+		for (s32 a = 0; a < 3; a++) {
+			rootat[a] = count ? sum[a] / count : rig->rest[basemtx][a];
+		}
+	} else {
+		memcpy(rootat, rig->rest[nodemtx[flashlist]], sizeof(rootat));
+	}
+
+	if (billboard) {
+		memcpy(starat, rootat, sizeof(starat));
+	} else if (starlist >= 0) {
+		fpLayPoint(axis, beanc, scale, hostc, bm->bind[star], starat);
+	}
+
+	for (s32 di = 0; di < bm->numdraws; di++) {
+		const struct beandraw *d = &bm->draws[di];
+		struct beanvb vb;
+		u16 *tris;
+		s32 n;
+		s32 *mapped;
+		s8 *layer;
+
+		if (!fpDrawIsCard(bm, d) || !beanReadVb(bm, d->vb, &vb)) {
+			continue;
+		}
+
+		n = beanTriangles(bm, d, &tris);
+		mapped = n > 0 ? malloc(vb.count * sizeof(s32)) : NULL;
+		layer = mapped ? malloc(vb.count) : NULL;
+
+		if (!layer) {
+			free(mapped);
+			free(tris);
+			continue;
+		}
+
+		for (u32 i = 0; i < vb.count; i++) {
+			mapped[i] = -1;
+			layer[i] = -1;
+		}
+
+		for (s32 t = 0; t < n; t++) {
+			u16 idx[3];
+			s32 ok = 1;
+
+			for (s32 i = 0; i < 3 && ok; i++) {
+				const u16 vi = tris[t * 3 + i];
+				struct beanvtx v;
+				s32 bone = root;
+				s32 star_;
+				f32 at[3];
+				f32 nrm[3];
+				u8 bones[3];
+				const f32 weight[3] = { 1.0f, 0.0f, 0.0f };
+
+				if (mapped[vi] < 0) {
+					if (!beanVertex(bm, &vb, vi, &v)) {
+						ok = 0;
+						break;
+					}
+
+					if (v.slot[0] >= 0 && v.slot[0] < d->numpal) {
+						bone = d->pal[(s32)v.slot[0]];
+						bone = bm->numremap && bone < bm->numremap ? bm->remap[bone] : bone;
+					}
+
+					star_ = billboard || (starlist >= 0 && bone != root && bone >= 0 && bone < bm->numbones
+						&& bm->muzzlebone[bone] && !bm->muzzleroot[bone]);
+					fpLayPoint(axis, beanc, scale, hostc, v.pos, at);
+					beanAxisMap(axis, v.nrm, nrm);
+
+					for (s32 a = 0; a < 3; a++) {
+						at[a] -= star_ ? starat[a] : rootat[a];
+					}
+
+					bones[0] = bones[1] = bones[2] = (u8)nodemtx[star_ ? starlist : flashlist];
+					mapped[vi] = beanAddVertex(out, at, nrm, v.uv, bones, weight, v.argb);
+					layer[vi] = (s8)star_;
+
+					if (mapped[vi] < 0) {
+						ok = 0;
+						break;
+					}
+				}
+
+				idx[i] = (u16)mapped[vi];
+			}
+
+			// a card is in one layer; a triangle across two is no card
+			if (!ok || layer[tris[t * 3]] != layer[tris[t * 3 + 1]] || layer[tris[t * 3]] != layer[tris[t * 3 + 2]]) {
+				continue;
+			}
+
+			if (!beanAddTri(out, layer[tris[t * 3]] ? starlist : flashlist, (s32)d->tex, idx[0], idx[1], idx[2])) {
+				break;
+			}
+
+			nodeused[layer[tris[t * 3]] ? starlist : flashlist] = 1;
+			*outgroups |= 1ull << (layer[tris[t * 3]] ? starlist : flashlist);
+			*outtex |= d->tex < 64 ? 1ull << d->tex : 0;
+			numtris++;
+		}
+
+		if (xblaMeshIsVerbose()) {
+			for (s32 l = 0; l < 2; l++) {
+				f32 lo[3] = { 1e30f, 1e30f, 1e30f };
+				f32 hi[3] = { -1e30f, -1e30f, -1e30f };
+				s32 cnt = 0;
+
+				for (u32 i = 0; i < vb.count; i++) {
+					if (mapped[i] >= 0 && layer[i] == l) {
+						for (s32 a = 0; a < 3; a++) {
+							const f32 p = out->pos[mapped[i] * 3 + a];
+
+							lo[a] = p < lo[a] ? p : lo[a];
+							hi[a] = p > hi[a] ? p : hi[a];
+						}
+
+						cnt++;
+					}
+				}
+
+				if (cnt) {
+					sysLogPrintf(LOG_NOTE, "gebean:   card draw %d tex %d layer %d: %d vertices, (%.1f %.1f %.1f)..(%.1f %.1f %.1f)",
+							di, d->tex, l, cnt, lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]);
+				}
+			}
+		}
+
+		free(layer);
+		free(mapped);
+		free(tris);
+	}
+
+	if (numtris > 0 && posed) {
+		for (s32 a = 0; a < 3; a++) {
+			fpCardFlash[fp][a] = rootat[a] - rig->rest[basemtx][a];
+			fpCardStar[fp][a] = starlist >= 0 ? starat[a] - rootat[a] : 0.0f;
+		}
+
+		fpCardSet[fp] = starlist >= 0 ? 2 : 1;
+	}
+
+
+	if (numtris > 0) {
+		*outswitch = sw;
+
+		if (posed) {
+			sysLogPrintf(LOG_NOTE, "gebean: %s: the release's muzzle flash, %d triangles on GoldenEye's flash (list %d)%s; "
+					"turned about (%.1f %.1f %.1f) from the switch's matrix, star at (%.1f %.1f %.1f)",
+					fpRows[fp].file, numtris, flashlist, starlist >= 0 ? (billboard ? " star only" : " and star") : "",
+					fpCardFlash[fp][0], fpCardFlash[fp][1], fpCardFlash[fp][2],
+					fpCardStar[fp][0], fpCardStar[fp][1], fpCardStar[fp][2]);
+		} else {
+			sysLogPrintf(LOG_NOTE, "gebean: %s: the release's muzzle flash, %d triangles in list %d (matrix %d) under "
+					"GoldenEye's flash switch (matrix %d, flash %d), still (GoldenEye does not pose this one)",
+					fpRows[fp].file, numtris, flashlist, nodemtx[flashlist], basemtx, flashmtx);
+		}
+	}
+
+	return numtris;
+}
+
 static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modeldef, struct modelnode **nodes,
 		s32 numnodes, struct gebeanmats *mats, u64 *outAbsent, u32 *outLen)
 {
@@ -10436,6 +12775,10 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 	struct fpcloud fitcloud;   // the points the placement is measured on
 	struct fpcloud hostcloud;  // the host's visible lists, in the model's space
 	struct fpcloud togglecloud; // a host of toggled lists only: all of them, list by list
+	s32 numcards = 0;            // the release's flash cards' triangles drawn (fpBuildCards())
+	struct modelnode *cardswitch = NULL; // and the flash switch they are drawn under,
+	u64 cardgroups = 0;          // the groups they are in
+	u64 cardtex = 0;             // and the pictures they are drawn with
 	s32 togglestart[64];
 	s32 togglecount[64];
 	s32 bonemtx[BEAN_MAXBONES];
@@ -10449,6 +12792,10 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 	s32 numbladepts = 0;
 	s32 capbladepts = 0;
 	s8 spentof[64];     // each list's group of the gun without its round, or -1
+	s32 numshells = 0;  // a shotgun's shell lists (parts 18 to 27) found in nodes
+	s32 shellnode[10];
+	f32 shellc[10][3];  // and where each is, in the model's space
+	f32 shellrest[10][3];
 	s32 numspent = 0;
 	u64 roundgroups = 0; // the lists the round's triangles went to
 
@@ -10464,6 +12811,10 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 	memset(&togglecloud, 0, sizeof(togglecloud));
 	memset(togglecount, 0, sizeof(togglecount));
 	fpMuzzleSet[look][fp] = 0;
+
+	if (!original && !fpBuildBare) {
+		fpCardSet[fp] = 0;
+	}
 	fpRoundSet[look][fp] = 0;
 	memset(spentof, -1, sizeof(spentof));
 
@@ -10738,6 +13089,24 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 
 				usegrip = 0;
 				scale = 1.0f / 4.7f;
+
+				// GoldenEye's own model is the gun the original is, all of it,
+				// so it is measured whole when its untoggled lists are not the
+				// gun: the rocket launcher's tube is under two toggles, and the
+				// sight and front grip left over measured 305 of the 968 the
+				// gun is long. The middles of those against the whole original
+				// stood the release's launcher 35 units further out along the
+				// barrel and 1 up (Bean's origin on GoldenEye's model at
+				// (-17, 12, 347) where every other gun's lands within half a
+				// unit of the origin): the tube from the middle of the view up
+				// to the right with its grip below, where the release holds it
+				// from the middle down to the bottom right corner, sight on top
+				// (board report 20261001-041452, the release captured on
+				// Depot by fid-hd).
+				if (fpOnOwn[fp] && hostcloud.num > 0
+						&& (hosthi[2] - hostlo[2]) < 0.5f * (ohi[2] - olo[2]) * scale) {
+					fpCloudAddToggled(&hostcloud, nodes, numnodes, nodemtx, nummatrices, &rig, hostlo, hosthi);
+				}
 
 				// The knives keep their quarter turn: GoldenEye X's knife is
 				// modelled along x as Perfect Dark's is, Bean's up y.
@@ -11048,6 +13417,78 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 		}
 	}
 
+	// GoldenEye's shotguns carry five shells on the side of the gun, and its
+	// own model hangs each under a switch of its own (parts 18 to 22, and 23
+	// to 27 for the other five lists), which the game turns off one by one
+	// as the reserve runs down (geguns.c's gegunsOwnModelParts()). The
+	// release's gun draws its shells in sections of their own (0x17). Each is
+	// put in the group of the ROM shell nearest it - under that list's own
+	// matrix, so it is drawn only while the list is - rather than in the
+	// body's, which drew all five whatever was left.
+	if (fpOnOwn[fp] && (fp == WEAPON_GE_SHOTGUN - WEAPON_GE_FIRST || fp == WEAPON_GE_AUTOSHOTGUN - WEAPON_GE_FIRST)) {
+		for (s32 part = 18; part <= 27 && numshells < ARRAYCOUNT(shellnode); part++) {
+			const struct modelnode *sw = modelGetPart(modeldef, part);
+
+			if (!sw) {
+				continue;
+			}
+
+			for (s32 k = 0; k < numnodes; k++) {
+				const u32 type = nodes[k]->type & 0xff;
+				const struct modelnode *up = nodes[k]->parent;
+				const Vtx *v = NULL;
+				s32 n = 0;
+				s32 walked = 0;
+				f32 rest[3];
+				f32 sum[3] = { 0.0f, 0.0f, 0.0f };
+
+				while (up && up != sw && walked++ < 64) {
+					up = up->parent;
+				}
+
+				if (up != sw) {
+					continue;
+				}
+
+				if (type == MODELNODETYPE_DL) {
+					v = nodes[k]->rodata->dl.vertices;
+					n = nodes[k]->rodata->dl.numvertices;
+				} else if (type == MODELNODETYPE_GUNDL) {
+					v = nodes[k]->rodata->gundl.vertices;
+					n = nodes[k]->rodata->gundl.numvertices;
+				}
+
+				if (!v || n <= 0) {
+					continue;
+				}
+
+				// the list's vertices are in the space it is drawn in: its
+				// own rest, or the rest of the matrix it loads
+				if (gebeanListLoadedMatrix(nodes[k]) >= 0 && rig.hasrest[nodemtx[k]]) {
+					memcpy(rest, rig.rest[nodemtx[k]], sizeof(rest));
+				} else {
+					xblaMeshNodeRestOffset(nodes[k], rest);
+				}
+
+				for (s32 j = 0; j < n; j++) {
+					for (s32 a = 0; a < 3; a++) {
+						sum[a] += v[j].v[a] + rest[a];
+					}
+				}
+
+				shellnode[numshells] = k;
+
+				for (s32 a = 0; a < 3; a++) {
+					shellrest[numshells][a] = rest[a];
+					shellc[numshells][a] = sum[a] / n;
+				}
+
+				numshells++;
+				break;
+			}
+		}
+	}
+
 	memset(&out, 0, sizeof(out));
 
 	// A knife's points as they are drawn, for its frame in a menu
@@ -11065,6 +13506,8 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 		s32 numtris;
 		s32 *mapped;
 		s32 *mappedmtx;
+		s32 glovedraw;
+		s32 shell;
 
 		if (!drawn[di] || !beanReadVb(&bm, d->vb, &vb)) {
 			continue;
@@ -11089,6 +13532,67 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 
 		for (u32 i = 0; i < vb.count; i++) {
 			mapped[i] = -1;
+		}
+
+		glovedraw = beanDrawIsGlove(&bm, original, d);
+
+		// One of a shotgun's shells: the ROM shell nearest the section's
+		// middle, as the gun is laid on the host
+		shell = -1;
+
+		if (numshells && d->section >= 0) {
+			f32 mid[3] = { 0.0f, 0.0f, 0.0f };
+			s32 count = 0;
+			f32 best = 1e30f;
+			f32 next = 1e30f;
+
+			for (s32 t = 0; t < numtris * 3; t++) {
+				struct beanvtx v;
+				f32 rel[3], turned[3];
+
+				if (!beanVertex(&bm, &vb, tris[t], &v)) {
+					continue;
+				}
+
+				if (!original) {
+					fpMendVertex(fp, v.pos);
+				}
+
+				for (s32 a = 0; a < 3; a++) {
+					rel[a] = v.pos[a] - beanc[a];
+				}
+
+				beanAxisMap(fpaxis, rel, turned);
+
+				for (s32 a = 0; a < 3; a++) {
+					mid[a] += turned[a] * scale + hostc[a];
+				}
+
+				count++;
+			}
+
+			for (s32 k = 0; count && k < numshells; k++) {
+				f32 d2 = 0.0f;
+
+				for (s32 a = 0; a < 3; a++) {
+					const f32 e = mid[a] / count - shellc[k][a];
+
+					d2 += e * e;
+				}
+
+				if (d2 < best) {
+					next = best;
+					best = d2;
+					shell = k;
+				} else if (d2 < next) {
+					next = d2;
+				}
+			}
+
+			if (xblaMeshIsVerbose()) {
+				sysLogPrintf(LOG_NOTE, "gebean: %s draw %d section %d -> shell %d (list %d) at %.1f, next %.1f",
+						source, di, d->section, shell, shell >= 0 ? shellnode[shell] : -1, sqrtf(best), sqrtf(next));
+			}
 		}
 
 		for (s32 t = 0; t < numtris; t++) {
@@ -11125,6 +13629,11 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 				}
 
 				mtx = bone >= 0 && bone < BEAN_MAXBONES ? bonemtx[bone] : nodemtx[bodynode];
+
+				if (shell >= 0) {
+					mtx = nodemtx[shellnode[shell]];
+				}
+
 				bones[0] = bones[1] = bones[2] = (u8)mtx;
 
 				// In the space of the list's matrix, the way the host's own
@@ -11142,7 +13651,7 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 
 					for (s32 a = 0; a < 3; a++) {
 						pos[a] = turned[a] * scale + hostc[a]
-							- (rig.hasrest[mtx] ? rig.rest[mtx][a] : 0.0f);
+							- (shell >= 0 ? shellrest[shell][a] : rig.hasrest[mtx] ? rig.rest[mtx][a] : 0.0f);
 					}
 
 					if (bladepts && numbladepts < capbladepts) {
@@ -11163,8 +13672,12 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 				// footage shows - the AR33 at 0x50-0x90, the PP7 at 0x30.
 				// Left white, every HD gun drew a bright silver (F3
 				// 20260928-231646, "all ge xbla weapons are the wrong shade").
+				//
+				// A tinted gun's glove keeps its own colours: the Golden Gun's
+				// tint turned the hand holding it gold (F3 20260930-190258,
+				// "turns Bond's hand orange").
 				mapped[vi] = beanAddVertex(&out, pos, v.nrm, v.uv, bones, weight,
-						fpTint[fp] ? beanShadeTint(fpTint[fp], v.nrm, fpLight) : v.argb);
+						fpTint[fp] && !glovedraw ? beanShadeTint(fpGunTint(fp, original), v.nrm, fpLight) : v.argb);
 				mappedmtx[vi] = mtx;
 
 				if (mapped[vi] < 0) {
@@ -11179,7 +13692,7 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 				continue;
 			}
 
-			group = mtxnode[mappedmtx[tris[t * 3]]];
+			group = shell >= 0 ? shellnode[shell] : mtxnode[mappedmtx[tris[t * 3]]];
 
 			if (group < 0) {
 				group = bodynode;
@@ -11211,6 +13724,14 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 		free(mapped);
 		free(mappedmtx);
 		free(tris);
+	}
+
+	// The release's flash cards (fpCardSet): into the lists of GoldenEye's
+	// flash and star under its flash switch, each layer in its own list's
+	// space less the point the release turns it about
+	if (!original && !fpBuildBare && fpOnOwn[fp]) {
+		numcards = fpBuildCards(fp, &bm, modeldef, nodes, numnodes, nodemtx, &rig, fpaxis, beanc, scale, hostc,
+				&out, nodeused, &cardswitch, &cardgroups, &cardtex);
 	}
 
 	if (bladepts) {
@@ -11253,7 +13774,9 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 				isflash = up && (up == flash[0] || up == flash[1] || up == flash[2]);
 			}
 
-			if (nodeused[k] || isflash) {
+			// With the release's cards drawn in it, the rest of GoldenEye's
+			// flash is covered as the rest of its gun is
+			if (nodeused[k] || (isflash && !(numcards > 0 && flash[0] == cardswitch))) {
 				continue;
 			}
 
@@ -11291,6 +13814,33 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 		}
 	}
 
+	// The flash cards as the release draws them: blended by the picture's
+	// alpha with no depth write (xblamesh.c's fade span), sampled clamped -
+	// repeating, each quarter's edge read the far side of its picture, a
+	// dark seam through the flash - and both sides, a card's back included.
+	// Only a picture no other triangle of the gun is drawn with.
+	if (numcards > 0) {
+		for (s32 t = 0; t < out.numtris; t++) {
+			const struct beantri *bt = &out.tris[t];
+
+			// (a covered list's triangle of nothing is no use of a picture)
+			if (bt->tex < 64 && !(cardgroups & (1ull << bt->group))
+					&& !(bt->v[0] == bt->v[1] && bt->v[1] == bt->v[2])) {
+				cardtex &= ~(1ull << bt->tex);
+			}
+		}
+
+		for (s32 i = 0; i < bm.numtex && i < nummatwords && i < 64; i++) {
+			if ((cardtex & (1ull << i)) && mats->tile[i]) {
+				matwords[i] |= 0x8000 | XBLAMESH_MAT_CLAMP;
+				mats->alpha[i] = 1;
+				mats->soft[i] = 1;
+			}
+		}
+
+		mats->twosided = cardgroups;
+	}
+
 	for (s32 t = 0; t < out.numtris; t++) {
 		if (out.tris[t].tex >= bm.numtex) {
 			out.tris[t].tex = (u16)(nummatwords - 1);
@@ -11302,6 +13852,28 @@ static u8 *gebeanBuildFirstPerson(s32 fp, s32 original, struct modeldef *modelde
 	}
 
 	numdecals = beanMarkDecals(&out, matwords, &nummatwords, mats);
+
+	// A tinted gun's gold is the reflection map its material holds beside
+	// the picture (beanGoldPicture()), added over the tint by the XBLA
+	// meshes' reflection pass as a GoldenEye prop's own maps are, looked up
+	// by the view-space normal. Only the tint drew the Golden Gun as flat
+	// matte paint (F3 20260930-190258, "Golden Gun shader is completely
+	// broken"). The glove reflects nothing.
+	if (fpTint[fp] && !original) {
+		snprintf(mats->envkey, sizeof(mats->envkey), "gebeanfpenv:%s", r->source);
+
+		for (s32 di = 0; di < bm.numdraws; di++) {
+			const struct beandraw *d = &bm.draws[di];
+
+			if (!drawn[di] || beanDrawIsGlove(&bm, original, d) || d->masktex >= (u32)bm.numtex
+					|| d->tex >= (u32)nummatwords || d->tex >= (u32)bm.numtex || mats->env[d->tex]) {
+				continue;
+			}
+
+			mats->env[d->tex] = beanGoldPicture(&bm, (s32)d->masktex);
+			mats->envamount[d->tex] = mats->env[d->tex] ? FP_GOLD_AMOUNT : 0;
+		}
+	}
 
 	// A list the round did not touch draws the same either way, so only
 	// those it did are given their other group; the rest are never drawn
@@ -11578,6 +14150,27 @@ s32 gebeanHeldGunMuzzle(struct model *model, s32 modelnum, f32 out[3])
 	out[2] = geHeldMuzzle[i][2];
 
 	return 1;
+}
+
+/**
+ * The release's muzzle-flash cards drawn on this weapon's GoldenEye model in
+ * the hand (fpCardSet): 0 for none - the N64 look, or no mesh - else 1, or 2
+ * with a star, and where the release turns them about: the flash's place
+ * as an offset from the flash switch's matrix (where GoldenEye's own stood),
+ * and the star's in the flash's own space, both in the model's units.
+ */
+s32 gebeanFirstPersonFlashCards(s32 weaponnum, f32 *flash, f32 *star)
+{
+	const s32 i = weaponnum - WEAPON_GE_FIRST;
+
+	if (i < 0 || i >= (s32)ARRAYCOUNT(fpRows) || !fpSlot[i] || gebeanGunsAreN64() || !fpCardSet[i]) {
+		return 0;
+	}
+
+	memcpy(flash, fpCardFlash[i], 3 * sizeof(f32));
+	memcpy(star, fpCardStar[i], 3 * sizeof(f32));
+
+	return fpCardSet[i];
 }
 
 /**
@@ -11970,6 +14563,14 @@ u8 *gebeanBuild(s32 row, s32 original, struct modeldef *modeldef, struct modelno
 			? gebeanBuildRigid(&propRows[row - GEBEAN_PROPROW_BASE], modeldef, nodes, numnodes, mats, outAbsent, outLen) : NULL;
 	}
 
+	if (row >= GEBEAN_CARTROW_BASE && row < GEBEAN_CARTROW_BASE + (s32)ARRAYCOUNT(cartRows)) {
+		*outLen = 0;
+		*outAbsent = 0;
+
+		return !original && modeldef && numnodes > 0 && numnodes <= 64
+			? gebeanBuildRigid(&cartRows[row - GEBEAN_CARTROW_BASE], modeldef, nodes, numnodes, mats, outAbsent, outLen) : NULL;
+	}
+
 	const u16 fileid = mats->fileid;
 	const struct gebeanrow *r;
 	char source[64];
@@ -12229,6 +14830,16 @@ u8 *gebeanBuild(s32 row, s32 original, struct modeldef *modeldef, struct modelno
 	const s32 dropownskin = !ishead && !original && row >= GEBEAN_CHRROW_BASE
 			&& row < GEBEAN_CHRROW_BASE + (s32)ARRAYCOUNT(chrRows)
 			&& r->kind == GEBEAN_BODY && !gebeanSourceIsHead(r->source);
+	// And the rest of the body file's own head section (the 0x17 section of
+	// kind 0 its head and neck are drawn in): the release switches the whole
+	// section off on a body that wears a head file, its neck with it - twelve
+	// guard bodies, 175 to 298 triangles each, never drawn in any capture
+	// (tools/gefidelity xbla census, H1). The ring was a part of it; the
+	// noskin groups leave all of it out, and every list node the section's
+	// triangles go to has one. The skeleton numbers its triangles go to
+	// (bit per SK_*), from the first pass
+	u32 headsecskel = 0;
+	s32 headsecleft = 0;
 	s32 ownskincount[GEBEAN_MAXMATS];
 	s32 ownskincand[GEBEAN_MAXMATS];
 	s32 ownskintex = -1;
@@ -12366,8 +14977,11 @@ u8 *gebeanBuild(s32 row, s32 original, struct modeldef *modeldef, struct modelno
 			}
 		}
 
-		for (s32 k = 0; ownskintex >= 0 && ownskincand[ownskintex] > 0 && k < numnodes && k < 64; k++) {
-			if (nodeskel[k] == SK_BACK && numnodes + numfill + numhood + numbare + numown + numnoskin < 64) {
+		for (s32 k = 0; k < numnodes && k < 64; k++) {
+			const s32 ring = ownskintex >= 0 && ownskincand[ownskintex] > 0 && nodeskel[k] == SK_BACK;
+			const s32 headsec = nodeskel[k] >= 0 && (headsecskel & (1u << nodeskel[k]));
+
+			if ((ring || headsec) && numnodes + numfill + numhood + numbare + numown + numnoskin < 64) {
 				noskinof[k] = (s8)(numnodes + numfill + numhood + numbare + numown + numnoskin++);
 			}
 		}
@@ -12388,8 +15002,22 @@ u8 *gebeanBuild(s32 row, s32 original, struct modeldef *modeldef, struct modelno
 
 		const s32 armsleeve = arm ? beanArmSleeve(&bm, d->tex) : -1;
 
-		if (arm && beanArmDropsTexture(&bm, d->tex)) {
+		// (the N64 look's, not the HD look's: beanArmGlass())
+		if (arm && original && beanArmDropsTexture(&bm, d->tex)) {
 			continue;
+		}
+
+		// The watch's glass, as the release draws it: its picture is the
+		// material's one with alpha (texture 11, black at three eighths),
+		// drawn blended over the dial; read through the other one (10, a
+		// grey patch) it was the opaque grey plate beanArmDropsTexture() is
+		// about
+		struct beandraw glassdraw;
+
+		if (arm && !original && beanArmGlass(&bm, d)) {
+			glassdraw = *d;
+			glassdraw.tex = GEBEAN_ARM_GLASS;
+			d = &glassdraw;
 		}
 
 		if (!beanReadVb(&bm, d->vb, &vb)) {
@@ -12594,6 +15222,19 @@ u8 *gebeanBuild(s32 row, s32 original, struct modeldef *modeldef, struct modelno
 			}
 
 			if (pass == 0) {
+				// The node a triangle of the head section goes to (as the
+				// second pass's want, below)
+				if (dropownskin && d->section == 0 && dominant != SK_NECK) {
+					s32 want = dominant == SK_POSITION ? SK_BASE : dominant;
+					s32 any = 0;
+
+					for (s32 j = 0; j < numnodes && !any; j++) {
+						any = nodeskel[j] == want;
+					}
+
+					headsecskel |= 1u << (any ? want : SK_BASE);
+				}
+
 				for (s32 i = 0; dropownskin && d->tex < GEBEAN_MAXMATS && i < 3; i++) {
 					if (dominant == SK_NECK) {
 						ownskincount[d->tex]++;
@@ -13056,9 +15697,19 @@ u8 *gebeanBuild(s32 row, s32 original, struct modeldef *modeldef, struct modelno
 						break;
 					}
 
+					// The watch's glass is blended: in each of the wrist's six
+					// lists it was laid six deep over the dial, near black
+					// where the release darkens it by a third. Once is all
+					// the release draws.
+					if (takes && d == &glassdraw) {
+						break;
+					}
+
 					// and the node's copy without its own neck's skin
 					if (takes && !asown && !asfill && !ashood && k < 64 && noskinof[k] >= 0) {
-						if (ownskin) {
+						if (dropownskin && d->section == 0) {
+							headsecleft++;
+						} else if (ownskin) {
 							ownskinleft++;
 						} else if (!beanAddTri(&out, noskinof[k], (s32)d->tex, idx[0], idx[1], idx[2])) {
 							ok = 0;
@@ -13282,8 +15933,8 @@ u8 *gebeanBuild(s32 row, s32 original, struct modeldef *modeldef, struct modelno
 	}
 
 	if (numnoskin > 0) {
-		sysLogPrintf(LOG_NOTE, "gebean: %s <- %s: %d triangles of its own neck's skin under the collar, left out under a head file's neck (%d groups, picture %d)",
-				r->file, source, ownskinleft, numnoskin, ownskintex);
+		sysLogPrintf(LOG_NOTE, "gebean: %s <- %s: %d triangles of its own neck's skin under the collar and %d of its head section, left out under a head file's neck (%d groups, picture %d)",
+				r->file, source, ownskinleft, headsecleft, numnoskin, ownskintex);
 	}
 
 	file = beanWriteMesh(&out, numnodes + numfill + numhood + numbare + numown + numnoskin + numneck, nummatrices, ishead ? NULL : &rig, matwords, nummatwords, outAbsent, outLen);
@@ -13602,6 +16253,18 @@ static void beanTreeUvs(const struct beanmodel *bm, const struct beanvb *vb, con
 	}
 }
 
+/** PD_BEANDRAWLOG=1: each level draw logged as it is read (a probe for F3 work). Read once. */
+static s32 beanDrawLogOn(void)
+{
+	static s32 on = -1;
+
+	if (on < 0) {
+		on = getenv("PD_BEANDRAWLOG") != NULL;
+	}
+
+	return on;
+}
+
 /**
  * Every triangle of the level, in the file's own units, with the texture its
  * material draws (-1 for none). Returns how many were handed over.
@@ -13618,6 +16281,56 @@ s32 gebeanLevelTriangles(struct gebeanlevel *level,
 	s32 count = 0;
 	u32 treevbs[32];
 	s32 numtreevbs = 0;
+	s32 numblendpic = 0;
+	u32 blendshaders[32][2];
+	s32 numblendshaders = 0;
+
+	// The shaders of the draws whose vertices blend one solid picture into
+	// another all the way across (see blendpic below). A draw of the same
+	// shader whose blend words stay inside the range - a few triangles all
+	// part-way snow - is the same blend: read alone as the first picture at
+	// its first UV set, Dam's six such triangles by the manhole drew as a
+	// sliver of snow at the overlay's scale beside the bank (F3s
+	// 20261002-012037, -012323, -154038)
+	for (s32 d = 0; d < bm->numdraws; d++) {
+		const struct beandraw *draw = &bm->draws[d];
+		struct beanvb vb;
+		u32 *tris = NULL;
+		s32 numtris, amin = 255, amax = 0, known = 0;
+
+		if (draw->alphatest || draw->blend || draw->tex >= (u32)bm->numtex
+				|| draw->masktex >= (u32)bm->numtex || draw->masktexslot != 0
+				|| !beanReadVb(bm, draw->vb, &vb) || vb.stride != 32) {
+			continue;
+		}
+
+		for (s32 i = 0; i < numblendshaders; i++) {
+			known |= blendshaders[i][0] == draw->vs && blendshaders[i][1] == draw->matpc;
+		}
+
+		if (known || numblendshaders >= ARRAYCOUNT(blendshaders)) {
+			continue;
+		}
+
+		numtris = beanTriangles32(bm, draw, &tris);
+
+		for (s32 i = 0; i < numtris * 3; i++) {
+			if (tris[i] < vb.count) {
+				const s32 a = bm->gpu[vb.off + tris[i] * vb.stride + 24];
+
+				amin = MIN(amin, a);
+				amax = MAX(amax, a);
+			}
+		}
+
+		free(tris);
+
+		if (amin == 0 && amax == 255) {
+			blendshaders[numblendshaders][0] = draw->vs;
+			blendshaders[numblendshaders][1] = draw->matpc;
+			numblendshaders++;
+		}
+	}
 
 	// The buffers any instancing record draws - its first copy is drawn
 	// without one, where the tree was modelled
@@ -13648,10 +16361,20 @@ s32 gebeanLevelTriangles(struct gebeanlevel *level,
 		s32 istree = 0;
 		s32 tex = draw->tex < (u32)bm->numtex ? (s32)draw->tex : -1;
 		s32 ismask = 0;
+		s32 blendpic;
 		s32 plain;
 
 		if (!beanReadVb(bm, draw->vb, &vb)) {
-			continue;
+			// A draw of positions alone takes no picture: its pixel shader
+			// fetches none and gives its material's colour, which on Dam's
+			// one such draw (four triangles at 4dc0) is black. Read as a
+			// buffer of no known layout, it was never built where the
+			// release draws it (tools/gefidelity FINDINGS.md row 6)
+			if (!beanReadVbPositions(bm, draw->vb, &vb)) {
+				continue;
+			}
+
+			tex = -1;
 		}
 
 		// An alpha-tested draw of two pictures, one solid and one with alpha:
@@ -13687,6 +16410,59 @@ s32 gebeanLevelTriangles(struct gebeanlevel *level,
 
 		numtris = beanTriangles32(bm, draw, &tris);
 
+		if (beanDrawLogOn()) {
+			sysLogPrintf(LOG_NOTE, "beandraw %d tex %d %s mask %d %s slot %d stride %d at %d/%d blend %d alpha %d colour %08x ownmat %d ismask %d tris %d vs %x mat %x",
+					d, draw->tex, beanTextureName(bm, tex), (s32)draw->masktex,
+					draw->masktex < (u32)bm->numtex ? beanTextureName(bm, (s32)draw->masktex) : "-",
+					draw->masktexslot, vb.stride, draw->alphatest, draw->alpharef, draw->blend, draw->alpha, draw->colour,
+					draw->ownmat, ismask, numtris, draw->vs, draw->matpc);
+		}
+
+		// A draw of two solid pictures that its vertices blend between: the
+		// material's slot 0 picture (read at the first UV set) over its slot
+		// 1 picture (the second set), by the blend word's alpha. Dam's
+		// reservoir banks are snow at the top running down into mossy rock
+		// at the water (F3 20261001-211323, "no snow on bank"); the other
+		// levels' are ground into rock or grass. Taken for the bigger picture
+		// alone at the first UV set, the bank was rock all the way up. Drawn
+		// as the slot 1 picture, with the slot 0 one blended over it: a
+		// twin in the blended pass, which markDecals() lays on it. Only where
+		// the blend runs the whole way across the draw - a blend word that
+		// stays at one value (Silo's 179, Aztec's 128, lightmaps and detail
+		// maps) or within 0-63 (the four-way terrain shaders) is another
+		// shader.
+		blendpic = 0;
+
+		if (vb.stride == 32 && !ismask && !draw->alphatest && !draw->blend && tex >= 0
+				&& draw->masktex < (u32)bm->numtex && draw->masktexslot == 0 && numtris > 0) {
+			const void *tile;
+			u8 basea, overa, soft;
+			s32 amin = 255, amax = 0;
+
+			for (s32 i = 0; i < numtris * 3; i++) {
+				if (tris[i] < vb.count) {
+					const s32 a = bm->gpu[vb.off + tris[i] * vb.stride + 24];
+
+					amin = MIN(amin, a);
+					amax = MAX(amax, a);
+				}
+			}
+
+			s32 sameshader = 0;
+
+			for (s32 i = 0; i < numblendshaders; i++) {
+				sameshader |= blendshaders[i][0] == draw->vs && blendshaders[i][1] == draw->matpc;
+			}
+
+			if (((amin == 0 && amax == 255) || sameshader)
+					&& beanBindTexture(bm, level->source, tex, &tile, &basea, &soft)
+					&& beanBindTexture(bm, level->source, (s32)draw->masktex, &tile, &overa, &soft)
+					&& !basea && !overa) {
+				blendpic = 1;
+				numblendpic++;
+			}
+		}
+
 		// A draw with no UV (stride 16, or 20 with a colour) and no picture
 		// since its vertex shader was set: the picture it is read with here is
 		// only the one the draw before it left bound, sampled at one texel.
@@ -13694,7 +16470,7 @@ s32 gebeanLevelTriangles(struct gebeanlevel *level,
 		// shader 0x3958, white vertices), which drew as a flat grey band of
 		// the concrete strip's corner (F3 20260926-210317); gebeanstage.c
 		// leaves the white ones lying on another surface out
-		plain = !draw->ownmat && !istree && (vb.stride == 16 || (vb.stride == 20 && !vb.uv20));
+		plain = (!draw->ownmat && !istree && (vb.stride == 16 || (vb.stride == 20 && !vb.uv20))) || vb.stride == 12;
 
 		for (s32 t = 0; t < numtris; t++) {
 			struct gebeanlevelvtx v[3];
@@ -13722,6 +16498,20 @@ s32 gebeanLevelTriangles(struct gebeanlevel *level,
 						bv.uv[1] = (s16)gebeanBE16(p + 22) / bm->uvscale;
 						bv.argb = beanColour(gebeanBE32(p + 32));
 					}
+				} else if (vb.stride == 12) {
+					const u8 *p = bm->gpu + vb.off + tris[t * 3 + k] * vb.stride;
+
+					ok = tris[t * 3 + k] < vb.count;
+
+					if (ok) {
+						memset(&bv, 0, sizeof(bv));
+
+						for (s32 j = 0; j < 3; j++) {
+							bv.pos[j] = gebeanBEF32(p + j * 4);
+						}
+
+						bv.argb = (u32)draw->alpha << 24 | (draw->colour & 0xffffff);
+					}
 				} else {
 					ok = beanVertex(bm, &vb, tris[t * 3 + k], &bv);
 				}
@@ -13733,7 +16523,7 @@ s32 gebeanLevelTriangles(struct gebeanlevel *level,
 				// (0xffff) and Runway's road drew as streaks
 				if (ok && vb.stride == 32) {
 					const u8 *p = bm->gpu + vb.off + tris[t * 3 + k] * vb.stride;
-					const u32 uvat = ismask ? 20 : 16;
+					const u32 uvat = ismask || blendpic ? 20 : 16;
 
 					bv.uv[0] = (s16)gebeanBE16(p + uvat) / bm->uvscale;
 					bv.uv[1] = (s16)gebeanBE16(p + uvat + 2) / bm->uvscale;
@@ -13757,6 +16547,8 @@ s32 gebeanLevelTriangles(struct gebeanlevel *level,
 					v[k].uv[1] = bv.uv[1];
 					v[k].argb = bv.argb;
 					v[k].blend = draw->blend;
+					v[k].alphatest = draw->alphatest;
+					v[k].alpharef = draw->alpharef;
 					v[k].plain = plain;
 					memcpy(v[k].nrm, bv.nrm, sizeof(v[k].nrm));
 				}
@@ -13790,9 +16582,36 @@ s32 gebeanLevelTriangles(struct gebeanlevel *level,
 
 			fn(arg, tex, v);
 			count++;
+
+			if (blendpic) {
+				struct gebeanlevelvtx over[3];
+				s32 seen = 0;
+
+				memcpy(over, v, sizeof(over));
+
+				for (s32 k = 0; k < 3; k++) {
+					const u8 *p = bm->gpu + vb.off + tris[t * 3 + k] * vb.stride;
+
+					over[k].uv[0] = (s16)gebeanBE16(p + 16) / bm->uvscale;
+					over[k].uv[1] = (s16)gebeanBE16(p + 18) / bm->uvscale;
+					over[k].argb = (v[k].argb & 0x00ffffff) | (u32)p[24] << 24;
+					over[k].blend = 1;
+					seen |= p[24] != 0;
+				}
+
+				if (seen) {
+					fn(arg, (s32)draw->masktex, over);
+					count++;
+				}
+			}
 		}
 
 		free(tris);
+	}
+
+	if (numblendpic) {
+		sysLogPrintf(LOG_NOTE, "gebean: %s: %d draws of two pictures blended by their vertices, the second laid over the first",
+				level->source, numblendpic);
 	}
 
 	return count;
@@ -13817,6 +16636,19 @@ u8 *gebeanLevelDecode(struct gebeanlevel *level, s32 tex, s32 *outWidth, s32 *ou
 const char *gebeanLevelTextureName(struct gebeanlevel *level, s32 tex)
 {
 	return level ? beanTextureName(&level->bm, tex) : "";
+}
+
+/** How the file scrolls a level's picture, in repeats a second (beanTexAnimation()); 0 when it does not. */
+s32 gebeanLevelTextureScroll(struct gebeanlevel *level, s32 tex, f32 *su, f32 *sv)
+{
+	if (!level || tex < 0 || tex >= level->bm.numtex) {
+		return 0;
+	}
+
+	*su = level->bm.texscroll[tex][0];
+	*sv = level->bm.texscroll[tex][1];
+
+	return *su != 0.0f || *sv != 0.0f;
 }
 
 s32 gebeanLevelTextureIsWater(struct gebeanlevel *level, s32 tex)
@@ -14313,29 +17145,44 @@ static const void *beanLevelCutTexture(struct gebeanlevel *level, s32 tex, u8 *a
  * one drawn outside the blended pass or alpha tested, one with alpha of
  * its own, one with colour, or one with no dark part to be a gap (the
  * light shafts' flat grey).
+ *
+ * Dam's window glass is the other kind (F3 20260929-213543, "windows
+ * bugged"): GoldenEye's streaked pane, which GoldenEye draws see-through, is
+ * in Bean a single row of black and light grey bars (an intensity picture,
+ * ".int") that the release draws in its opaque pass - every window of the
+ * guard huts stood as a solid sheet of grey and black stripes, hiding the
+ * room behind. A one-row intensity picture drawn only opaque, and grey,
+ * black and light like the stripes, is drawn as glass: white, faint at its
+ * black bars and half there at its light ones, tinted by the vertices.
  */
 static const void *beanLevelMaskTexture(struct gebeanlevel *level, s32 tex, u8 *alpha, u8 *soft)
 {
 	struct beanmodel *bm = &level->bm;
 	char key[80];
 	s32 used = 0;
+	s32 opaque = 0;
 	s32 w, h;
 	s32 lo = 255, hi = 0, dark = 0, mid = 0;
 	u8 *rgba;
 	const void *tile;
 	s32 a = 0, s = 0;
+	const char *name = beanTextureName(bm, tex);
+	const size_t namelen = name ? strlen(name) : 0;
+	const s32 streak = namelen > 8 && strcmp(name + namelen - 8, ".int.bin") == 0;
 
 	for (s32 d = 0; d < bm->numdraws; d++) {
 		if (bm->draws[d].tex == (u32)tex) {
-			if (!bm->draws[d].blend || bm->draws[d].alphatest) {
+			if (bm->draws[d].alphatest || (!bm->draws[d].blend && !streak)) {
 				return NULL;
 			}
 
-			used = 1;
+			opaque |= !bm->draws[d].blend;
+			used |= bm->draws[d].blend ? 1 : 2;
 		}
 	}
 
-	if (!used) {
+	// the glass: in no blended draw at all
+	if (!used || (opaque && used != 2)) {
 		return NULL;
 	}
 
@@ -14351,7 +17198,7 @@ static const void *beanLevelMaskTexture(struct gebeanlevel *level, s32 tex, u8 *
 
 	rgba = beanDecodeTexture(bm, tex, &w, &h);
 
-	if (!rgba || beanTexIsPlaceholder(rgba, w, h)) {
+	if (!rgba || beanTexIsPlaceholder(rgba, w, h) || (opaque && h != 1)) {
 		free(rgba);
 		return NULL;
 	}
@@ -14390,7 +17237,7 @@ static const void *beanLevelMaskTexture(struct gebeanlevel *level, s32 tex, u8 *
 		u8 *p = &rgba[i * 4];
 		const s32 v = MAX(p[0], MAX(p[1], p[2]));
 
-		p[3] = (u8)MIN(255, v * 255 / hi);
+		p[3] = opaque ? (u8)(40 + MIN(hi, v) * 100 / hi) : (u8)MIN(255, v * 255 / hi);
 		p[0] = p[1] = p[2] = 0xff;
 	}
 
@@ -14404,7 +17251,8 @@ static const void *beanLevelMaskTexture(struct gebeanlevel *level, s32 tex, u8 *
 	*alpha = (u8)a;
 	*soft = (u8)s;
 
-	sysLogPrintf(LOG_NOTE, "gebean: %s: texture %d (%s) is a grey mask in the blended pass, drawn by its brightness",
+	sysLogPrintf(LOG_NOTE, opaque ? "gebean: %s: texture %d (%s) is streaked glass drawn opaque, drawn see-through by its brightness"
+			: "gebean: %s: texture %d (%s) is a grey mask in the blended pass, drawn by its brightness",
 			level->source, tex, beanTextureName(bm, tex));
 
 	if (numTexCache < GEBEAN_TEXCACHE) {

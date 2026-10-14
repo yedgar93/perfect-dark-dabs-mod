@@ -1702,15 +1702,13 @@ Gfx *sightDraw(Gfx *gdl, bool sighton, s32 sight)
 	sightTick(sighton);
 
 #ifndef PLATFORM_N64
-	// Keep targeting updates running while hiding the crosshair at the hip.
-	if (PLAYER_EXTCFG().crosshairaimonly && !sighton) {
-		g_ScaleX = 1;
-		return gdl;
-	}
-
 	// GoldenEye's own crosshair for anything of GoldenEye's in the hand on GE
-	// Plus's levels (gehud.c): shown while aiming, as GoldenEye shows it, and
-	// for a player who keeps a target on screen all the time, then too
+	// Plus's levels (gehud.c). The watch's SIGHT ON-SCREEN is Sight on Screen,
+	// and on the cartridge it shows the sight only while aiming (bondview2.c's
+	// GUNSIGHTREASON_1 with GUNSIGHTREASON_NOTAIMING, read in ares), never
+	// with it off; Perfect Dark's Always Show Target keeps it up with the gun
+	// lowered as well (the user's call, F3 20261001-065320 - it had been left
+	// out for a GE Plus toggle of its own, F3 20260930-025317)
 	if (sight != SIGHT_NONE && geHudOwnsWeapon()) {
 		if (optionsGetSightOnScreen(g_Vars.currentplayerstats->mpindex)
 				&& (sighton || optionsGetAlwaysShowTarget(g_Vars.currentplayerstats->mpindex))) {

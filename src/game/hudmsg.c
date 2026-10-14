@@ -141,6 +141,22 @@ extern s32 viGetHeight_hack(void);
  */
 #define HUDMSG_SPLITLINEHEIGHT 11
 
+/**
+ * Racing a ghost brings the clock with it, whether or not the player asked
+ * for one, and keeps it in third person where the stock timer steps aside. A
+ * time trial without a time on screen is not one, and third person is where a
+ * ghost is worth watching.
+ */
+static bool hudmsgIsMissionTimerVisible(void)
+{
+	return (optionsGetShowMissionTime(g_Vars.currentplayerstats->mpindex) || modGhostHasSplit())
+		&& var80075d60 == 2
+		&& g_Vars.normmplayerisrunning == false
+		&& g_Vars.stagenum != STAGE_CITRAINING
+		&& g_Vars.currentplayer->cameramode != CAMERAMODE_EYESPY
+		&& (g_Vars.currentplayer->cameramode != CAMERAMODE_THIRDPERSON || modGhostHasSplit());
+}
+
 Gfx *hudmsgRenderMissionTimer(Gfx *gdl, u32 alpha)
 {
 	s32 x;
@@ -547,6 +563,40 @@ void hudmsgRemoveByPrefix(const char *prefix)
 			g_HudMessages[i].state = HUDMSGSTATE_FREE;
 		}
 	}
+}
+
+static void hudmsgRemoveByLine(const char *text)
+{
+	char prefix[128];
+	size_t len = 0;
+
+	while (text[len] && text[len] != '\n' && len < sizeof(prefix) - 1) {
+		prefix[len] = text[len];
+		len++;
+	}
+
+	prefix[len] = '\0';
+
+	if (len) {
+		hudmsgRemoveByPrefix(prefix);
+	}
+}
+
+/**
+ * A port toggle key's "<thing> On" / "<thing> Off", already translated. Only
+ * in a level with a player to show it to; takes down either of the two left
+ * from the last press first, by their own (translated) first lines, so it
+ * works in any language.
+ */
+void hudmsgSayToggle(const char *ontext, const char *offtext, s32 on)
+{
+	if (!STAGE_IS_LEVEL(g_Vars.stagenum) || !g_Vars.currentplayer || g_Vars.lvframenum <= 0) {
+		return;
+	}
+
+	hudmsgRemoveByLine(ontext);
+	hudmsgRemoveByLine(offtext);
+	hudmsgCreateWithFlags((char *)(on ? ontext : offtext), HUDMSGTYPE_DEFAULT, HUDMSGFLAG_ALLOWDUPES);
 }
 #endif
 
@@ -1581,6 +1631,13 @@ Gfx *hudmsgsRender(Gfx *gdl)
 
 	gdl = text0f153628(gdl);
 
+#ifndef PLATFORM_N64
+	// GoldenEye's bottom messages stack over its mission timer
+	if (gehud) {
+		geHudSetMissionTimerShown(hudmsgIsMissionTimerVisible());
+	}
+#endif
+
 	if ((g_Vars.coopplayernum >= 0 || g_Vars.antiplayernum >= 0)
 			&& g_InCutscene
 			&& g_MainIsEndscreen == 0
@@ -1838,16 +1895,14 @@ Gfx *hudmsgsRender(Gfx *gdl)
 	}
 
 	if (timerthing) {
-		// Racing a ghost brings the clock with it, whether or not the player
-		// asked for one, and keeps it in third person where the stock timer
-		// steps aside. A time trial without a time on screen is not one, and
-		// third person is where a ghost is worth watching.
-		if ((optionsGetShowMissionTime(g_Vars.currentplayerstats->mpindex) || modGhostHasSplit())
-				&& var80075d60 == 2
-				&& g_Vars.normmplayerisrunning == false
-				&& g_Vars.stagenum != STAGE_CITRAINING
-				&& g_Vars.currentplayer->cameramode != CAMERAMODE_EYESPY
-				&& (g_Vars.currentplayer->cameramode != CAMERAMODE_THIRDPERSON || modGhostHasSplit())) {
+		if (hudmsgIsMissionTimerVisible()) {
+#ifndef PLATFORM_N64
+			// GoldenEye's numbers on its levels (gehud.c)
+			if (gehud) {
+				gdl = geHudRenderMissionTimer(gdl, playerGetMissionTime(), modGhostHasSplit(), modGhostGetSplit60());
+				gdl = text0f153628(gdl);
+			} else
+#endif
 			gdl = hudmsgRenderMissionTimer(gdl, timerthing);
 		}
 

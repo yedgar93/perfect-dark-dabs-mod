@@ -40,6 +40,35 @@
 #include "getank.h"
 #include "sitchair.h"
 #endif
+
+#ifndef PLATFORM_N64
+/**
+ * Bond's eye on a converted GoldenEye mission is GoldenEye's own
+ * (bondview2.c, bondviewUpdatePlayerCollisionPositionFields()): the animated
+ * head's height plus 7 - eyeheight = headpos.y * player_perspective_height + 7,
+ * the perspective height 1 in solo - and a crouch that lowers it by
+ * FULL_CROUCH_OFFSET (100) squatting and 60 half crouched, at the same rate
+ * Perfect Dark's does. Perfect Dark's eye is the body row's height (159) scaled
+ * by the head's bob, its crouch 90 and 45 scaled by that height over Joanna's:
+ * Bond's eye stood 8.3 lower than GoldenEye's on every mission, 32 squatting
+ * and 15 half crouched (tools/gefidelity world/eyeprobe.py, on ares).
+ */
+static bool bwalkGeEye(void)
+{
+	return modloaderStageIsMission(g_Vars.stagenum);
+}
+
+#define BWALK_GE_SQUAT -100.0f
+#define BWALK_GE_DUCK  -60.0f
+#define BWALK_GE_EYE   7.0f
+
+/** The crouch offset of a full squat: 90 for Perfect Dark, GoldenEye's 100 on a converted mission. */
+static f32 bwalkSquatOffset(void)
+{
+	return bwalkGeEye() ? BWALK_GE_SQUAT : -90.0f;
+}
+#endif
+
 #endif
 #ifndef PLATFORM_N64
 extern f32 fabsf(f32);
@@ -54,6 +83,11 @@ static s32 g_GeCrouchHoldTicks[MAX_PLAYERS];
 // lifted him (bwalk0f0c63bc()): 0 or less, back to 0 at the pace a step up is
 // eased (bwalkUpdateVertical())
 static f32 g_GeClimbEyeLag[MAX_PLAYERS];
+
+// the floor GoldenEye's climb lifted the player onto, held under him while his
+// circle still touches it and his middle is not yet over it
+// (geStanTouchesFloor()); GESTAN_NOCLIMBFLOOR when there is none
+static f32 g_GeClimbHold[MAX_PLAYERS] = { GESTAN_NOCLIMBFLOOR, GESTAN_NOCLIMBFLOOR, GESTAN_NOCLIMBFLOOR, GESTAN_NOCLIMBFLOOR };
 
 /**
  * Something that is not a number was about to go into the player's height.
@@ -154,7 +188,8 @@ static void bwalkKeepFinite(void)
  * stuck for good, the moment the stair's room was theirs (F3 report
  * 20260926-005903). `rooms` is left alone - it is the room list the player
  * goes on with, which the AI asks "is Bond in the room with pad N" of - and
- * the test's list is written to `out` (`maxlen` rooms at most).
+ * the test's list is written to `out` (`maxlen` rooms at most). The rooms
+ * added are asked for walls alone, never props (GEROOM_PROPS_END).
  */
 static RoomNum *bwalkCdRooms(RoomNum *rooms, struct coord *pos, f32 radius, f32 ymin, f32 ymax, RoomNum *out, s32 maxlen)
 {
@@ -164,10 +199,13 @@ static RoomNum *bwalkCdRooms(RoomNum *rooms, struct coord *pos, f32 radius, f32 
 		return rooms;
 	}
 
-	for (i = 0; i < maxlen && rooms[i] != -1; i++) {
+	for (i = 0; i < maxlen - 1 && rooms[i] != -1; i++) {
 		out[i] = rooms[i];
 	}
 
+	// the rooms added from here on are asked for their walls, not their
+	// props: GoldenEye's props are the tile walk's rooms' (GEROOM_PROPS_END)
+	out[i++] = GEROOM_PROPS_END;
 	out[i] = -1;
 
 	geRoomAddNear(pos, radius, ymin, ymax, out, maxlen);
@@ -217,6 +255,7 @@ void bwalkInit(void)
 	g_Vars.currentplayer->camstepphase = 0;
 	g_Vars.currentplayer->camstepamp = 0;
 	g_GeClimbEyeLag[g_Vars.currentplayernum] = 0;
+	g_GeClimbHold[g_Vars.currentplayernum] = GESTAN_NOCLIMBFLOOR;
 #endif
 
 	if (prevmode != MOVEMODE_WALK && prevmode != MOVEMODE_CUTSCENE) {
@@ -339,6 +378,50 @@ void bwalk0f0c3b38(struct coord *reltarget, struct defaultobj *obj)
 	func0f082e84(obj, &posunk, &vector, &tween, false);
 }
 
+#ifndef PLATFORM_N64
+/**
+ * The player is held up by another body's cylinder (bwalkUpdateVertical()):
+ * move him off it in plan, away from its middle, a few units a tick, so the
+ * fall goes on. The move is an ordinary one: the level's walls still stop it.
+ */
+static void bwalkGeSlipOffBody(struct prop *body)
+{
+	struct coord delta;
+	f32 dx = g_Vars.currentplayer->prop->pos.x - body->pos.x;
+	f32 dz = g_Vars.currentplayer->prop->pos.z - body->pos.z;
+	f32 dist = sqrtf(dx * dx + dz * dz);
+	f32 step = 4.0f * g_Vars.lvupdate60freal;
+
+	if (dist < 0.5f) {
+		// dead over its middle: any way will do
+		dx = g_Vars.currentplayer->vv_sintheta;
+		dz = g_Vars.currentplayer->vv_costheta;
+		dist = 1.0f;
+	}
+
+	delta.x = dx / dist * step;
+	delta.y = 0.0f;
+	delta.z = dz / dist * step;
+
+	if (bwalkCalculateNewPosition(&delta, 0, true, 0, CDTYPE_ALL) != CDRESULT_NOCOLLISION) {
+		// a wall behind him: either way round it
+		const f32 side[2] = { 1.0f, -1.0f };
+
+		for (s32 i = 0; i < 2; i++) {
+			struct coord turn;
+
+			turn.x = -dz / dist * step * side[i];
+			turn.y = 0.0f;
+			turn.z = dx / dist * step * side[i];
+
+			if (bwalkCalculateNewPosition(&turn, 0, true, 0, CDTYPE_ALL) == CDRESULT_NOCOLLISION) {
+				break;
+			}
+		}
+	}
+}
+#endif
+
 /**
  * Attempt to move the current player up vertically by the given amount.
  *
@@ -406,12 +489,18 @@ s32 bwalkTryMoveUpwards(f32 amount)
 	ymin -= 0.1f;
 
 #ifndef PLATFORM_N64
+	if (geRoomActive()) {
+		geStanSetMover(g_Vars.currentplayernum);
+	}
+
 	result = cdTestVolume(&newpos, radius,
 			bwalkCdRooms(rooms, &newpos, radius, ymin - g_Vars.currentplayer->prop->pos.y,
 				ymax - g_Vars.currentplayer->prop->pos.y, cdrooms, ARRAYCOUNT(cdrooms) - 1),
 			types, CHECKVERTICAL_YES,
 			ymax - g_Vars.currentplayer->prop->pos.y,
 			ymin - g_Vars.currentplayer->prop->pos.y);
+
+	geStanSetMover(-1);
 #else
 	result = cdTestVolume(&newpos, radius, rooms, types, CHECKVERTICAL_YES,
 			ymax - g_Vars.currentplayer->prop->pos.y,
@@ -486,12 +575,18 @@ bool bwalkCanMoveUpwards(f32 amount)
 	ymin -= 0.1f;
 
 #ifndef PLATFORM_N64
+	if (geRoomActive()) {
+		geStanSetMover(g_Vars.currentplayernum);
+	}
+
 	result = cdTestVolume(&newpos, radius,
 			bwalkCdRooms(rooms, &newpos, radius, ymin - g_Vars.currentplayer->prop->pos.y,
 				ymax - g_Vars.currentplayer->prop->pos.y, cdrooms, ARRAYCOUNT(cdrooms) - 1),
 			types, CHECKVERTICAL_YES,
 			ymax - g_Vars.currentplayer->prop->pos.y,
 			ymin - g_Vars.currentplayer->prop->pos.y);
+
+	geStanSetMover(-1);
 #else
 	result = cdTestVolume(&newpos, radius, rooms, types, CHECKVERTICAL_YES,
 			ymax - g_Vars.currentplayer->prop->pos.y,
@@ -672,6 +767,14 @@ bool bwalkCalculateNewPosition(struct coord *vel, f32 rotateamount, bool apply, 
 
 		propSetPerimEnabled(g_Vars.currentplayer->prop, false);
 
+#ifndef PLATFORM_N64
+		// a converted level's walls stand for the player as GoldenEye's walk
+		// from Bond's tile has them, not by the floor nearest his foot (gestan.h)
+		if (geRoomActive()) {
+			geStanSetMover(g_Vars.currentplayernum);
+		}
+#endif
+
 		dstpos.x += vel->x;
 		dstpos.y += vel->y;
 		dstpos.z += vel->z;
@@ -754,6 +857,10 @@ bool bwalkCalculateNewPosition(struct coord *vel, f32 rotateamount, bool apply, 
 		}
 
 		propSetPerimEnabled(g_Vars.currentplayer->prop, true);
+
+#ifndef PLATFORM_N64
+		geStanSetMover(-1);
+#endif
 
 		if (g_Vars.currentplayer->tank) {
 			propSetPerimEnabled(g_Vars.currentplayer->tank, true);
@@ -1378,6 +1485,25 @@ void bwalkUpdateVertical(void)
 				ground = g_Vars.currentplayer->vv_ground - g_Vars.currentplayer->bondonground;
 			}
 		}
+
+		// The floor GoldenEye's climb lifted the player onto is his ground
+		// until his middle is over it, while his circle still touches it.
+		// He is lifted as the circle meets it (geStanClimbFloor()), so that
+		// it can pass over the climb wall, and the floor under his middle was
+		// still the ground he climbed from: he sank back down the wall as he
+		// walked on, stopped against it, and was lifted again - a hitch and a
+		// dip of a third of a body in every window on Streets (F3 report
+		// 20260930-235737)
+		if (g_GeClimbHold[g_Vars.currentplayernum] > GESTAN_NOCLIMBFLOOR) {
+			const f32 hold = g_GeClimbHold[g_Vars.currentplayernum];
+
+			if (g_Vars.currentplayer->onladder || ground >= hold - 1.0f
+					|| !geStanTouchesFloor(&testpos, g_Vars.currentplayer->bond2.radius, hold)) {
+				g_GeClimbHold[g_Vars.currentplayernum] = GESTAN_NOCLIMBFLOOR;
+			} else {
+				ground = hold;
+			}
+		}
 	}
 #endif
 
@@ -1615,6 +1741,20 @@ void bwalkUpdateVertical(void)
 				// Must be something in the way...
 				prop = cdGetObstacleProp();
 
+#ifndef PLATFORM_N64
+				// GoldenEye's height is the floor tile and nothing else: no
+				// guard ever holds Bond up, and its bodies stop each other in
+				// plan only. Perfect Dark's fall stops on any body's cylinder,
+				// so a player running down a converted stair over a scientist
+				// coming up it landed on his head and stayed there, the two of
+				// them stuck (F3 report 20261003-000823, Caverns). On a
+				// converted level he slides off the head, away from its middle
+				if (prop && geRoomActive()
+						&& (prop->type == PROPTYPE_CHR || prop->type == PROPTYPE_PLAYER)) {
+					bwalkGeSlipOffBody(prop);
+				}
+#endif
+
 				if (prop) {
 					if (prop->type == PROPTYPE_CHR) {
 						// Landed on top of a chr
@@ -1751,6 +1891,16 @@ void bwalkUpdateVertical(void)
 			g_Vars.currentplayer->crouchheight *
 			g_Vars.currentplayer->vv_eyeheight * 0.0062893079593778f;
 
+#ifndef PLATFORM_N64
+		if (bwalkGeEye()) {
+			g_Vars.currentplayer->vv_height = g_Vars.currentplayer->headpos.y + BWALK_GE_EYE;
+
+			eyeheight = g_Vars.currentplayer->vv_height +
+				g_Vars.currentplayer->crouchoffsetrealsmall +
+				g_Vars.currentplayer->crouchheight;
+		}
+#endif
+
 		if (eyeheight < 30) {
 			eyeheight = 30;
 		}
@@ -1807,6 +1957,13 @@ void bwalkApplyCrouchSpeed(void)
 
 void bwalkUpdateCrouchOffsetReal(void)
 {
+#ifndef PLATFORM_N64
+	if (bwalkGeEye()) {
+		// GoldenEye's ducking_height_offset is the eye's own drop (times the
+		// perspective height, 1 in solo)
+		g_Vars.currentplayer->crouchoffsetreal = g_Vars.currentplayer->crouchoffset;
+	} else
+#endif
 	if (g_Vars.currentplayer->vv_eyeheight + -90.0f * g_Vars.currentplayer->vv_eyeheight * (1.0f / 159.0f) < 69.0f) {
 		g_Vars.currentplayer->crouchoffsetreal = g_Vars.currentplayer->crouchoffset * ((69.0f - g_Vars.currentplayer->vv_eyeheight) / -90.0f);
 	} else {
@@ -1831,6 +1988,12 @@ bool bwalkCanUncrouch(void)
 	} else if (g_Vars.currentplayer->crouchpos == CROUCHPOS_DUCK) {
 		targetoffset = -45;
 	}
+
+#ifndef PLATFORM_N64
+	if (bwalkGeEye() && targetoffset != 0) {
+		targetoffset = g_Vars.currentplayer->crouchpos == CROUCHPOS_SQUAT ? BWALK_GE_SQUAT : BWALK_GE_DUCK;
+	}
+#endif
 
 	if (targetoffset != g_Vars.currentplayer->crouchoffset) {
 		f32 prevcrouchoffset = g_Vars.currentplayer->crouchoffset;
@@ -1869,6 +2032,12 @@ void bwalkUpdateCrouchOffset(void)
 		// empty
 	}
 
+#ifndef PLATFORM_N64
+	if (bwalkGeEye() && targetoffset != 0) {
+		targetoffset = bmoveGetCrouchPos() == CROUCHPOS_SQUAT ? BWALK_GE_SQUAT : BWALK_GE_DUCK;
+	}
+#endif
+
 	if (targetoffset != g_Vars.currentplayer->crouchoffset) {
 		f32 prevcrouchoffset = g_Vars.currentplayer->crouchoffset;
 		f32 prevcrouchoffsetreal = g_Vars.currentplayer->crouchoffsetreal;
@@ -1896,7 +2065,12 @@ void bwalkUpdateCrouchOffset(void)
 		g_Vars.currentplayer->crouchspeed = 0;
 	}
 
+#ifndef PLATFORM_N64
+	// the gun's share of the squat, 0 standing and 1 all the way down
+	g_Vars.currentplayer->guncloseroffset = g_Vars.currentplayer->crouchoffset / bwalkSquatOffset();
+#else
 	g_Vars.currentplayer->guncloseroffset = g_Vars.currentplayer->crouchoffset / -90;
+#endif
 }
 
 void bwalkUpdateTheta(void)
@@ -1966,13 +2140,13 @@ void bwalk0f0c63bc(struct coord *arg0, u32 arg1, s32 types)
 		// looking along the outside of the duct (F3 report 20260926-171016).
 		// The hold gives way after a second and a half whatever happens, so
 		// a squat that cannot finish never leaves the player rooted
-		if (hold && g_Vars.currentplayer->crouchoffset > -89.5f
+		if (hold && g_Vars.currentplayer->crouchoffset > bwalkSquatOffset() + 0.5f
 				&& g_GeCrouchHoldTicks[g_Vars.currentplayernum] < TICKS(90)) {
 			g_GeCrouchHoldTicks[g_Vars.currentplayernum] += g_Vars.lvupdate60;
 			return;
 		}
 
-		if (!hold || g_Vars.currentplayer->crouchoffset <= -89.5f) {
+		if (!hold || g_Vars.currentplayer->crouchoffset <= bwalkSquatOffset() + 0.5f) {
 			g_GeCrouchHoldTicks[g_Vars.currentplayernum] = 0;
 		}
 
@@ -2007,6 +2181,7 @@ void bwalk0f0c63bc(struct coord *arg0, u32 arg1, s32 types)
 				g_Vars.currentplayer->vv_manground = floor;
 				g_Vars.currentplayer->vv_ground = floor;
 				g_Vars.currentplayer->sumground = floor / (PAL ? 0.054400026798248f : 0.045499980449677f);
+				g_GeClimbHold[g_Vars.currentplayernum] = floor;
 			}
 		}
 

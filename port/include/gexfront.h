@@ -19,6 +19,9 @@
 // are not there, and the caller shows Perfect Dark's GE Plus dialog instead.
 s32 gexFrontOpen(void);
 s32 gexFrontIsActive(void);
+// the stick GoldenEye's screens read: the further pushed of a pad's two
+s32 gexMenuStickX(s32 player);
+s32 gexMenuStickY(s32 player);
 // Opens the folder at Multiplayer Options after a GE Plus match. False when
 // it cannot be drawn, and the caller keeps Perfect Dark's Combat Simulator.
 s32 gexFrontOpenAfterMatch(void);
@@ -98,6 +101,9 @@ s32 gexFrontLoadText(void);
 
 // The mounted mod the conversion's files come from, or -1
 s32 gexFrontModDir(void);
+// the conversion whose fonts and names the folder holds (GoldenEye's, a ROM
+// hack's), or -1 while it holds none
+s32 gexFrontTextModDir(void);
 
 /**
  * A mission's briefing file, the text bank that file indexes and LtitleE's

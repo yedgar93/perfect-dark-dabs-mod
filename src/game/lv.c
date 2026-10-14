@@ -1,6 +1,7 @@
 #ifndef PLATFORM_N64
 #include "headfit.h"
 #include "trace.h"
+#include "statehash.h"
 #endif
 #include <ultra64.h>
 #include "constants.h"
@@ -125,18 +126,23 @@
 #include "gebeanstage.h"
 #include "gewater.h"
 #include "game/modrules.h"
+#include "game/modrun.h"
 #include <stdlib.h>
 #include "system.h"
 #ifndef PLATFORM_N64
 #include "getank.h"
 #include "sitchair.h"
+#include "simnav.h"
 #include "getexsurface.h"
 #include "geimpact.h"
+#include "gehitpuff.h"
 #include "game/camera.h"
 #include "gbiex.h"
+#include "hdpreload.h"
 #endif
 
 extern s32 g_ExitFrame;
+extern s32 g_AlarmAtFrame;
 extern s32 g_ShotFrame;
 #endif
 
@@ -362,6 +368,8 @@ void lvReset(s32 stagenum)
 	// what a shot does to a converted GoldenEye level's images is GoldenEye's
 	geTexSurfaceReset(stagenum);
 	geImpactStageStart(stagenum);
+	geHitPuffStageStart(stagenum);
+	traceNoteEvent("stage 0x%02x loading", stagenum);
 #endif
 
 	textReset();
@@ -394,6 +402,7 @@ void lvReset(s32 stagenum)
 #ifndef PLATFORM_N64
 		geTankReset();
 		sitChairReset();
+		simnavStageStart(stagenum); // Mod.SimNavDebug or Mod.SimBrain=modern only
 #endif
 
 #ifndef PLATFORM_N64
@@ -447,6 +456,11 @@ void lvReset(s32 stagenum)
 	vtxstoreReset();
 	modelmgrReset();
 	psReset();
+#ifndef PLATFORM_N64
+	// A GoldenEye stage's HD meshes are built as its models load, not on
+	// their first frame on screen (hdpreload.c)
+	hdPreloadBegin(stagenum);
+#endif
 	setupLoadFiles(stagenum);
 	scenarioReset();
 	varsReset();
@@ -472,7 +486,8 @@ void lvReset(s32 stagenum)
 			|| g_Vars.stagenum == modDataBgStage(STAGE_INFILTRATION)
 			|| g_Vars.stagenum == modDataBgStage(STAGE_DEFECTION)
 			|| g_Vars.stagenum == modDataBgStage(STAGE_ATTACKSHIP)
-			|| g_Vars.stagenum == modDataBgStage(STAGE_TEST_OLD)) {
+			|| g_Vars.stagenum == modDataBgStage(STAGE_TEST_OLD)
+			|| modRunWantsStars(g_Vars.stagenum)) {
 		starsReset();
 	}
 #else
@@ -554,6 +569,11 @@ void lvReset(s32 stagenum)
 	if (IS8MB()) {
 		pheadReset();
 	}
+
+#ifndef PLATFORM_N64
+	// and the first-person guns the stage has handed out
+	hdPreloadEnd();
+#endif
 
 	modelmgrSetLvResetting(false);
 	var80084018 = 1;
@@ -1204,6 +1224,23 @@ Gfx *lvRenderRecording(Gfx *gdl)
  * - random static in the Infiltration intro cutscene
  * - combat boost activation and reverting
  */
+#ifndef PLATFORM_N64
+/**
+ * Whether lvRender() holds the picture this frame and ticks no prop: the
+ * level's first five frames, while it settles (lockscreen below). Asked
+ * earlier in the frame, from lvTick(), which runs the background lists
+ * (chraTickBg()) whatever this says.
+ */
+bool lvHoldsLevelStart(void)
+{
+	return (g_Vars.stagenum != STAGE_CITRAINING || (var80087260 <= 0 && g_MenuData.root != MENUROOT_MPSETUP))
+		&& g_Vars.lvframenum <= 5
+		&& !g_Vars.normmplayerisrunning
+		&& g_Vars.tickmode != TICKMODE_CUTSCENE
+		&& var80084050 < 6;
+}
+#endif
+
 Gfx *lvRender(Gfx *gdl)
 {
 	gSPSegment(gdl++, SPSEGMENT_PHYSICAL, 0x00000000);
@@ -1559,8 +1596,11 @@ Gfx *lvRender(Gfx *gdl)
 						// returns true only when propFindForInteract() found
 						// nothing in front of the player to open or operate, so
 						// a press that reached a door - even a locked one - is
-						// spent on the door and never becomes a jump.
-						bwalkTryJump();
+						// spent on the door and never becomes a jump. Nor does
+						// the trigger of a gadget that fires to activate.
+						if (!(g_Vars.currentplayer->bondactivateorreload & JO_ACTION_FROMTRIGGER)) {
+							bwalkTryJump();
+						}
 					}
 #endif
 				} else if (g_Vars.currentplayer->eyespy
@@ -1585,6 +1625,9 @@ Gfx *lvRender(Gfx *gdl)
 				gdl = bgRender(gdl);
 				chr0f028498(var80075d68 == 15 || g_AnimHostEnabled);
 				gdl = propsRenderBeams(gdl);
+#ifndef PLATFORM_N64
+				gdl = geHitPuffRender(gdl);
+#endif
 				gdl = shardsRender(gdl);
 				gdl = sparksRender(gdl);
 				gdl = weatherRender(gdl);
@@ -2345,6 +2388,8 @@ s32 lvGetSlowMotionType(void)
 void lvTick(void)
 {
 #ifndef PLATFORM_N64
+	hdPreloadTick();
+
 	// A census a few seconds in, for the log: the chrs a stage has once its
 	// intro AI has run, which is where a mod's guards come from when its
 	// setup lists none (GE-X spawns them).
@@ -2516,6 +2561,17 @@ void lvTick(void)
 		if (g_ShotFrame > 0 && g_Vars.lvframenum == g_ShotFrame) {
 			sysLogPrintf(LOG_NOTE, "screenshot-frame %d reached", g_ShotFrame);
 			screenshotRequest();
+		}
+
+		// --state-hash: the state as this frame starts, before anything of
+		// it has run (statehash.c)
+		stateHashTick();
+
+		// --alarm-at: the alarm raised on a level frame, as if a guard had
+		// reached a panel, for a run nobody is playing
+		if (g_AlarmAtFrame > 0 && g_Vars.lvframenum == g_AlarmAtFrame) {
+			sysLogPrintf(LOG_NOTE, "alarm-at %d: raising the alarm", g_AlarmAtFrame);
+			alarmActivate();
 		}
 
 		// --exit-frame: a measured run ends on a level frame, not a clock
@@ -2744,6 +2800,9 @@ void lvTick(void)
 		casingsTick();
 		shardsTick();
 		sparksTick();
+#ifndef PLATFORM_N64
+		geHitPuffTick();
+#endif
 		wallhitsTick();
 		splatsTick();
 
@@ -2872,6 +2931,10 @@ void lvStop(void)
 	if (STAGE_IS_LEVEL(g_Vars.stagenum)) {
 		bgStop();
 	}
+
+#ifndef PLATFORM_N64
+	simnavStageStop();
+#endif
 
 	func00033dd8();
 

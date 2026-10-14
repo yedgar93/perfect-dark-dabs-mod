@@ -37,6 +37,7 @@
 #include "game/file.h"
 #include "game/lv.h"
 #include "game/modspectate.h"
+#include "game/modrun.h"
 #include "game/texdecompress.h"
 #include "game/wallhit.h"
 #include "bss.h"
@@ -67,6 +68,8 @@
 #include "modloader.h"
 #include "geroom.h"
 #include "gelights.h"
+#include "simnav.h"
+#include "roommesh.h"
 #endif
 #endif
 #endif
@@ -290,6 +293,13 @@ struct drawslotpointer *g_BgDrawSlotsByRoom;
  * level. See bgRoomIsPortalVisible().
  */
 static u8 *g_BgPortalSeen;
+
+/**
+ * GoldenEye's portal walk on a converted level (bgTickPortalsWalkGe()): per
+ * room, two bytes a frame - how often a portal into it was queued, and whether
+ * it was first reached through a special portal or is the camera's own.
+ */
+static u8 *g_BgGeWalkRooms;
 #endif
 struct portalcamcacheitem *g_PortalCameraCache;
 struct bgsnake g_BgSnake;
@@ -1266,6 +1276,19 @@ Gfx *bgRenderScene(Gfx *gdl)
 
 	gdl = bgScissorToViewport(gdl);
 
+#ifndef PLATFORM_N64
+	// A converted GoldenEye level in the N64 look is drawn as the RDP draws
+	// it where a render mode takes coverage for alpha (G_COVERAGE_ALPHA_EXT),
+	// its shade is carried across each triangle as the RDP carries it,
+	// linearly on the screen (G_SHADE_LINEAR_EXT), and a mipmapped texture
+	// draws the levels its data holds (G_TEX_OWN_LODS_EXT)
+	const bool rdpmodes = g_BgGePortals && !xblaStageDrawsEveryRoom();
+
+	if (rdpmodes) {
+		gSPSetExtraGeometryModeEXT(gdl++, G_COVERAGE_ALPHA_EXT | G_SHADE_LINEAR_EXT | G_TEX_OWN_LODS_EXT);
+	}
+#endif
+
 	// Render special "always on" rooms, such as the Defection moon,
 	// Attack Ship planet, and other sky tricks that are implemented as rooms
 	if (!USINGDEVICE(DEVICE_NIGHTVISION) && !USINGDEVICE(DEVICE_IRSCANNER)
@@ -1309,7 +1332,11 @@ Gfx *bgRenderScene(Gfx *gdl)
 					|| stagenum == MOD_BGSTAGE(STAGE_TEST_OLD)
 					|| stagenum == MOD_BGSTAGE(STAGE_INFILTRATION)
 					|| stagenum == MOD_BGSTAGE(STAGE_ESCAPE)
-					|| stagenum == MOD_BGSTAGE(STAGE_ATTACKSHIP))) {
+					|| stagenum == MOD_BGSTAGE(STAGE_ATTACKSHIP)
+#ifndef PLATFORM_N64
+					|| modRunWantsStars(stagenum)
+#endif
+					)) {
 			gdl = text0f153628(gdl);
 
 			gSPMatrix(gdl++, osVirtualToPhysical(camGetOrthogonalMtxL()), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION | CAM_PROJ_MTX_FLAGS);
@@ -1430,6 +1457,10 @@ Gfx *bgRenderScene(Gfx *gdl)
 		}
 	}
 
+#ifndef PLATFORM_N64
+	gdl = simnavRender(gdl); // Mod.SimNavDebug only
+#endif
+
 	if (1);
 
 #ifndef PLATFORM_N64
@@ -1511,6 +1542,12 @@ Gfx *bgRenderScene(Gfx *gdl)
 #ifdef DEBUG
 	debug0f119a80nb();
 #endif
+#endif
+
+#ifndef PLATFORM_N64
+	if (rdpmodes) {
+		gSPClearExtraGeometryModeEXT(gdl++, G_COVERAGE_ALPHA_EXT | G_SHADE_LINEAR_EXT | G_TEX_OWN_LODS_EXT);
+	}
 #endif
 
 	return gdl;
@@ -1991,6 +2028,7 @@ void bgBuildTables(s32 stagenum)
 #ifndef PLATFORM_N64
 	g_NumRoomsAllocated = g_Rooms ? g_Vars.roomcount : 0;
 	g_BgPortalSeen = mempAlloc(ALIGN16(g_Vars.roomcount), MEMPOOL_STAGE);
+	g_BgGeWalkRooms = mempAlloc(ALIGN16(g_Vars.roomcount * 2), MEMPOOL_STAGE);
 #endif
 
 	for (i = 0; i < g_Vars.roomcount; i++) {
@@ -3980,6 +4018,7 @@ void bgUnloadRoom(s32 roomnum)
 		size = g_Rooms[roomnum].gfxdatalen;
 		memaFree(g_Rooms[roomnum].gfxdata, size);
 #else
+		roomMeshForget(roomnum);
 		sysMemFree(g_Rooms[roomnum].gfxdata);
 #endif
 		g_Rooms[roomnum].gfxdata = NULL;
@@ -4203,9 +4242,19 @@ Gfx *bgRenderRoomOpaque(Gfx *gdl, s32 roomnum)
 
 	gdl = roomApplyMtx(gdl, roomnum);
 
+#ifdef PLATFORM_N64
 	gdl = lightsSetForRoom(gdl, roomnum);
-#ifndef PLATFORM_N64
-	gdl = roomSheenStockBegin(gdl);
+#else
+	// A converted GoldenEye level is lit as GoldenEye lights it, and its
+	// reflective surfaces stay where the cartridge has them: the level
+	// reflections' walk (Mod.LevelReflectFollow) is Perfect Dark's
+	if (g_BgGePortals) {
+		gdl = lightsSetForGeRoom(gdl);
+	} else {
+		gdl = lightsSetForRoom(gdl, roomnum);
+		gdl = roomSheenStockBegin(gdl);
+	}
+
 	gdl = bgSpectateDepthBiasBegin(gdl, roomnum);
 
 	// An HD room's opaque leaf leaves its culling to this (gebeanstage.c
@@ -4232,8 +4281,14 @@ Gfx *bgRenderRoomOpaque(Gfx *gdl, s32 roomnum)
 		gSPSetExtraGeometryModeEXT(gdl++, G_SEAL_SEAMS_EXT);
 	}
 #endif
+#ifndef PLATFORM_N64
+	if (g_Rooms[roomnum].gfxdata->opablocks) {
+		gdl = roomMeshBegin(gdl, roomnum);
+	}
+#endif
 	gdl = bgRenderRoomPass(gdl, roomnum, g_Rooms[roomnum].gfxdata->opablocks, true);
 #ifndef PLATFORM_N64
+	gdl = roomMeshEnd(gdl);
 	gSPClearExtraGeometryModeEXT(gdl++, G_SEAL_SEAMS_EXT);
 	gdl = bgRenderChicagoPane(gdl, roomnum);
 	gdl = bgSpectateDepthBiasEnd(gdl, roomnum);
@@ -4275,13 +4330,40 @@ Gfx *bgRenderRoomXlu(Gfx *gdl, s32 roomnum)
 
 		gdl = roomApplyMtx(gdl, roomnum);
 #ifndef PLATFORM_N64
-		gdl = roomSheenStockBegin(gdl);
+		if (g_BgGePortals) {
+			gdl = lightsSetForGeRoom(gdl);
+		} else {
+			gdl = roomSheenStockBegin(gdl);
+		}
+
 		gdl = bgSpectateDepthBiasBegin(gdl, roomnum);
+		gdl = roomMeshBegin(gdl, roomnum);
 #endif
 		gdl = bgRenderRoomPass(gdl, roomnum, g_Rooms[roomnum].gfxdata->xlublocks, true);
 #ifndef PLATFORM_N64
+		// The translucent layer writes no depth, and a room's translucent
+		// props are drawn after it (bgRender()'s last loop), so a pane of
+		// glass behind the Institute's metal-grating floors and ramps was
+		// blended over the grating's metal as if in front of it (F3
+		// 20261001-005918). The N64 draws it the same way. The layer is drawn
+		// again for its depth alone, where its texels are solid
+		// (G_DEPTH_PREPASS_EXT with G_ALPHA_CORE_EXT, gfx_pc.cpp): the metal
+		// then hides what is behind it and the holes and real glass do not.
+		// Not on a converted GoldenEye level, which is judged against the
+		// cartridge.
+		if (!g_BgGePortals) {
+			gSPSetExtraGeometryModeEXT(gdl++, G_DEPTH_PREPASS_EXT | G_ALPHA_CORE_EXT);
+			gdl = bgRenderRoomPass(gdl, roomnum, g_Rooms[roomnum].gfxdata->xlublocks, true);
+			gSPClearExtraGeometryModeEXT(gdl++, G_DEPTH_PREPASS_EXT | G_ALPHA_CORE_EXT);
+		}
+
+		gdl = roomMeshEnd(gdl);
 		gdl = bgSpectateDepthBiasEnd(gdl, roomnum);
 		gdl = roomSheenStockEnd(gdl);
+
+		if (g_BgGePortals) {
+			gdl = lightsSetDefault(gdl);
+		}
 #endif
 
 		g_Rooms[roomnum].loaded240 = 1;
@@ -5356,6 +5438,7 @@ bool bgTestHitInVtxBatch(struct coord *arg0, struct coord *arg1, struct coord *a
 										if (sqdist < lowestsqdist
 #ifndef PLATFORM_N64
 												&& !bgTriPassesShots(iter, gdl)
+												&& !geRoomTriPassesShots(roomnum, point1, point2, point3)
 #endif
 												) {
 											hit = true;
@@ -6983,6 +7066,18 @@ static void bgTickPortalsSpectate(struct screenbox *box)
 	// stand outside it - the canopy over Jungle's clearings
 	const bool everyroom = xblaStageDrawsEveryRoom();
 
+	// The level's visibility commands (GoldenEye's own, converted: "from the
+	// camera's room, rooms 60 to 80 cannot be seen") hide rooms by the N64
+	// geometry; the walk before this (bgTickPortalsEveryRoom()) has had them.
+	// Bean's mesh is dealt to rooms by position, not by what can see it: from
+	// Dam's gate yard they left triangles of the far mountain out of the view
+	// down the tunnel, holes in it onto the sky (F3 20260929-212942)
+	if (everyroom) {
+		for (room = 0; room < g_Vars.roomcount; room++) {
+			g_Rooms[room].flags &= ~ROOMFLAG_DISABLEDBYSCRIPT;
+		}
+	}
+
 	bgSetRoomOnscreen(g_CamRoom, 0, box);
 
 	for (room = 1; room < g_Vars.roomcount; room++) {
@@ -7003,6 +7098,14 @@ static void bgTickPortalsSpectate(struct screenbox *box)
 			continue;
 		}
 
+		// Two of the HD level's rooms that overlap are drawn only where the
+		// portal walk reaches them (Aztec's closet and the room whose wall
+		// runs through it)
+		if (everyroom && !modSpectateIsOn() && g_BgPortalSeen && !g_BgPortalSeen[room]
+				&& gebeanStageRoomByPortals(room)) {
+			continue;
+		}
+
 		x = (g_Rooms[room].bbmin[0] + g_Rooms[room].bbmax[0]) * 0.5f - campos->x;
 		y = (g_Rooms[room].bbmin[1] + g_Rooms[room].bbmax[1]) * 0.5f - campos->y;
 		z = (g_Rooms[room].bbmin[2] + g_Rooms[room].bbmax[2]) * 0.5f - campos->z;
@@ -7015,6 +7118,245 @@ static void bgTickPortalsSpectate(struct screenbox *box)
 		}
 
 		bgSetRoomOnscreen(room, draworder, box);
+	}
+}
+#endif
+
+#ifndef PLATFORM_N64
+/**
+ * GoldenEye's own portal walk (bg.c's bgDetermineVisibleRooms(),
+ * bgQueuePortalTraversal() and sub_GAME_7F0B7F84() "bgPortalDescend"), for a
+ * level converted from its ROM.
+ *
+ * Perfect Dark's walk (the snake) goes through a room's portals once, merged
+ * by the room beyond, and never back into the room it came from. GoldenEye's
+ * is a queue of single portals: from a room it goes on through every portal
+ * but the one it came in by, so it comes back into a room by another portal,
+ * and each time a room is reached its draw order is raised to that depth.
+ * Only a room's ninth queued portal (from the second step on), a depth past
+ * 15, and a room first reached through a special portal - the camera's own
+ * room counts as one - stop it. The draw order decides which room's
+ * translucent faces are blended first: on Surface the camera's room (16) is
+ * reached again through room 10 at depth 2, so its chain-link fence, which
+ * writes no depth, is blended before room 10's tree billboards and they cover
+ * it where they stand behind it - the cartridge's picture at pad 262, where
+ * ours, with the camera's room left at 0, drew the fence over the trees
+ * (tools/gefidelity view diff V2, "fewer diamonds on the cartridge").
+ *
+ * A room the level's visibility commands disable is not drawn but is walked
+ * through, as GoldenEye's room_loaded_mask is. The tests are the ones the
+ * snake makes for a converted level: the camera's side of a portal's slab,
+ * the special portal's whole screen, and the portal's box - and GoldenEye's
+ * own, a portal past nine tenths of the far plane has none.
+ */
+#define BG_GEWALK_QUEUE 500
+
+struct bggewalkitem {
+	RoomNum room;
+	s16 portal;
+	s16 depth;
+	struct screenbox box;
+};
+
+static struct bggewalkitem g_BgGeWalkQueue[BG_GEWALK_QUEUE];
+
+static void bgGeWalkQueue(s32 *head, RoomNum room, s32 portal, s32 depth, struct screenbox *box)
+{
+	struct bggewalkitem *item;
+
+	if (depth >= 2) {
+		const s32 into = g_BgPortals[portal].roomnum1 ^ g_BgPortals[portal].roomnum2 ^ room;
+		u8 *visits = &g_BgGeWalkRooms[into * 2];
+
+		if (*visits < 255) {
+			(*visits)++;
+		}
+
+		if (*visits >= 9) {
+			return;
+		}
+	}
+
+	if (*head >= BG_GEWALK_QUEUE) {
+		return;
+	}
+
+	item = &g_BgGeWalkQueue[(*head)++];
+	item->room = room;
+	item->portal = portal;
+	item->depth = depth;
+	item->box = *box;
+}
+
+/**
+ * Every portal of a room but the one the walk came in by, in the order of
+ * their numbers, as GoldenEye goes through its portal table: rooms reached at
+ * the same depth are added, and their translucent faces blended, in that
+ * order.
+ */
+static void bgGeWalkQueueRoom(s32 *head, RoomNum room, s32 except, s32 depth, struct screenbox *box)
+{
+	const s16 *list = &g_RoomPortals[g_Rooms[room].roomportallistoffset];
+	const s32 n = g_Rooms[room].numportals;
+	s32 last = -1;
+
+	while (true) {
+		s32 best = -1;
+		s32 i;
+
+		for (i = 0; i < n; i++) {
+			if (list[i] > last && (best < 0 || list[i] < best)) {
+				best = list[i];
+			}
+		}
+
+		if (best < 0) {
+			break;
+		}
+
+		if (best != except) {
+			bgGeWalkQueue(head, room, best, depth, box);
+		}
+
+		last = best;
+	}
+}
+
+/**
+ * sub_GAME_7F0B39BC(): the room on screen at this depth (raised to it if it
+ * is there already), and whether the walk stops at it - only where it was
+ * reached through a special portal before, or is the camera's.
+ */
+static bool bgGeWalkReach(s32 room, s32 depth, struct screenbox *box, bool special)
+{
+	u8 *next = &g_BgGeWalkRooms[room * 2 + 1];
+	bool stop;
+
+	if (g_Rooms[room].flags & ROOMFLAG_DISABLEDBYSCRIPT) {
+		return false;
+	}
+
+	stop = g_BgDrawSlotsByRoom[room].updatedframe == g_BgFrameCount && *next;
+
+	bgSetRoomOnscreen(room, depth, box);
+
+	if (special) {
+		*next = 1;
+	}
+
+	return stop;
+}
+
+/**
+ * sub_GAME_7F0B5528(): a portal all of whose points (moved its thickness
+ * along its normal both ways) lie past nine tenths of the far plane has no
+ * box, and the walk does not go through it.
+ */
+static bool bgGeWalkPortalTooFar(s32 portal, f32 thick)
+{
+	Mtxf *mtx = g_Vars.currentplayer->worldtoscreenmtx;
+	struct portalvertices *pvertices = (struct portalvertices *)((uintptr_t)g_BgPortals + g_BgPortals[portal].verticesoffset);
+	const struct coord *normal = &g_PortalMetrics[portal].normal;
+	const f32 limit = g_BgSnake.zrange.far * 0.9f;
+	s32 i;
+
+	for (i = 0; i < pvertices->count * 2; i++) {
+		const f32 by = (i & 1) ? -thick : thick;
+		const f32 x = pvertices->vertices[i / 2].x + normal->x * by;
+		const f32 y = pvertices->vertices[i / 2].y + normal->y * by;
+		const f32 z = pvertices->vertices[i / 2].z + normal->z * by;
+		const f32 depth = -(mtx->m[0][2] * x + mtx->m[1][2] * y + mtx->m[2][2] * z + mtx->m[3][2]);
+
+		if (depth < limit) {
+			return false;
+		}
+	}
+
+	return true;
+}
+
+static void bgTickPortalsWalkGe(struct screenbox *box)
+{
+	const struct coord *campos = &g_Vars.currentplayer->cam_pos;
+	struct screenbox screen;
+	s32 head = 0;
+	s32 tail = 0;
+	s32 i;
+
+	bgGetPlayerScreenBox(&screen);
+
+	for (i = 0; i < g_Vars.roomcount; i++) {
+		g_BgGeWalkRooms[i * 2] = 0;
+		g_BgGeWalkRooms[i * 2 + 1] = 0;
+	}
+
+	bgSetRoomOnscreen(g_CamRoom, 0, box);
+	g_BgGeWalkRooms[g_CamRoom * 2 + 1] = 1;
+
+	bgGeWalkQueueRoom(&head, g_CamRoom, -1, 1, &screen);
+
+	while (tail < head) {
+		struct bggewalkitem *item = &g_BgGeWalkQueue[tail++];
+		const s32 portal = item->portal;
+		const s32 depth = item->depth;
+		struct portalmetric *metric = &g_PortalMetrics[portal];
+		const f32 thick = geRoomPortalThickness(portal);
+		const f32 sum = metric->normal.x * campos->x + metric->normal.y * campos->y + metric->normal.z * campos->z;
+		const bool special = (g_BgPortals[portal].flags & PORTALFLAG_02) != 0;
+		struct screenbox newbox;
+		s32 other;
+
+		if (depth > 15 || PORTAL_IS_CLOSED(portal)) {
+			continue;
+		}
+
+		// the camera must not be wholly past the portal on its far side
+		if (g_BgPortals[portal].roomnum1 == item->room) {
+			other = g_BgPortals[portal].roomnum2;
+
+			if (sum > metric->max + thick) {
+				continue;
+			}
+		} else {
+			other = g_BgPortals[portal].roomnum1;
+
+			if (sum < metric->min - thick) {
+				continue;
+			}
+		}
+
+		if (sum >= metric->min - thick && sum <= metric->max + thick) {
+			// inside the portal's slab: the whole screen
+			newbox = screen;
+		} else if (special) {
+			if (bgGeWalkPortalTooFar(portal, thick)
+					|| !bgGetPortalScreenBbox(portal, &newbox) || !bgRoomIntersectsScreenBox(other, &newbox)) {
+				continue;
+			}
+
+			newbox = screen;
+		} else {
+			if (bgGeWalkPortalTooFar(portal, thick) || !bgGetPortalScreenBbox(portal, &newbox)) {
+				continue;
+			}
+
+			bgGetBoxIntersection(&newbox, &item->box);
+			bgGetBoxIntersection(&newbox, &screen);
+
+			if (newbox.xmax <= newbox.xmin || newbox.ymax <= newbox.ymin) {
+				continue;
+			}
+		}
+
+		if (newbox.xmax <= newbox.xmin || newbox.ymax <= newbox.ymin) {
+			continue;
+		}
+
+		if (bgGeWalkReach(other, depth, &newbox, special)) {
+			continue;
+		}
+
+		bgGeWalkQueueRoom(&head, other, portal, depth + 1, &newbox);
 	}
 }
 #endif
@@ -7033,6 +7375,10 @@ static void bgTickPortalsWalk(struct screenbox *box)
 				bgSetRoomOnscreen(room, 0, box);
 			}
 		}
+#ifndef PLATFORM_N64
+	} else if (g_BgGePortals && g_BgGeWalkRooms) {
+		bgTickPortalsWalkGe(box);
+#endif
 	} else {
 		bgSetRoomOnscreen(g_CamRoom, 0, box);
 

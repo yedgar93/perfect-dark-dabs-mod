@@ -280,7 +280,7 @@ struct missionrow {
 	const char *lang;
 };
 
-static const struct missionrow g_Missions[] = {
+static const struct missionrow g_GeMissionRows[] = {
 	{ "1",   120,   0, -1, NULL,               NULL },
 	{ "i",   121,   0,  0, "UbriefdamZ",       "LdamE" },
 	{ "ii",  122,   0,  1, "UbriefarkZ",       "LarkE" },
@@ -312,7 +312,26 @@ static const struct missionrow g_Missions[] = {
 	{ "i",   152, 153, 19, "UbriefcrypZ",      "LcrypE" },
 };
 
-#define NUM_MISSION_ROWS (sizeof(g_Missions) / sizeof(g_Missions[0]))
+/**
+ * The rows the folder shows: GoldenEye's, or a GoldenEye ROM hack's own folder
+ * out of its conversion (menu/missionfolder.bin, geconvert.c's
+ * writeMissionFolder()) - Goldfinger 64 keeps GoldenEye's twenty mission
+ * numbers, briefings and text banks and renames and regroups them under nine
+ * chapters of its own.
+ */
+#define MAX_MISSION_ROWS 40
+static struct missionrow g_HackMissionRows[MAX_MISSION_ROWS];
+static char g_HackMissionText[MAX_MISSION_ROWS][3][24];
+static const struct missionrow *g_Missions = g_GeMissionRows;
+static s32 g_NumMissionRows = ARRAYCOUNT(g_GeMissionRows);
+#define NUM_MISSION_ROWS g_NumMissionRows
+
+// whether the folder is a ROM hack's (the Perfect Menu's row for it set
+// g_GexPlusVariant), not GoldenEye's own
+static s32 frontIsHack(void)
+{
+	return g_GexPlusVariant != NULL;
+}
 
 // cursor_xpos_table_mission_select and cursor_ypos_table_mission_select
 static const s32 g_MissionX[MISSION_COLS] = { 73, 142, 212, 282, 352 };
@@ -545,8 +564,9 @@ static const char *frontString(s32 index)
 {
 	u32 at;
 
-	// the selected language's, keyed ge.title.<slot> (langpack.h)
-	if (langpackActive()) {
+	// the selected language's, keyed ge.title.<slot> (langpack.h) - a
+	// translation of GoldenEye's own strings, which a ROM hack's are not
+	if (langpackActive() && g_Missions == g_GeMissionRows) {
 		const char *tr = langpackGeFile("LtitleE", index);
 
 		if (tr) {
@@ -572,7 +592,7 @@ static const char *frontLangString(s32 id)
 	const u32 index = (u32)id & 0x3ff;
 	u32 at;
 
-	if (langpackActive() && g_Front.lang) {
+	if (langpackActive() && g_Front.lang && g_Missions == g_GeMissionRows) {
 		const char *tr = langpackGeFile(g_FrontLangFile, index);
 
 		if (tr) {
@@ -646,7 +666,9 @@ static const char *frontMissionName(s32 mission, char *buf, size_t len)
  */
 static s32 frontMissionsAreOwn(void)
 {
-	return modloaderNumMissions() >= NUM_MISSIONS;
+	// a ROM hack's level its conversion could not make is left out (its
+	// mission grey on the grid), and the rest still play
+	return modloaderNumMissions() >= (frontIsHack() ? 1 : NUM_MISSIONS);
 }
 
 static s32 frontMissionsAvailable(void)
@@ -899,11 +921,14 @@ static s32 frontHighestDifficulty(s32 mission)
 	return -1;
 }
 
-/** The first of the remake's arenas, or -1 when the conversion has not run. */
+/**
+ * The first of the remake's arenas - GoldenEye's, or the ROM hack's whose
+ * mode is chosen (g_GexPlusVariant) - or -1 when the conversion has not run.
+ */
 static s32 frontFirstArena(void)
 {
 	for (s32 i = 0; i < mpGetNumStages(); i++) {
-		if (modloaderStageIsRemake(g_MpArenas[i].stagenum)) {
+		if (modloaderStageInGexPlusList(g_MpArenas[i].stagenum)) {
 			return i;
 		}
 	}
@@ -1131,20 +1156,52 @@ static const s16 g_TargetTimes[NUM_MISSIONS][3] = {
 #define BESTTIMES_FILE "$S/geplus-times.txt"
 #define BESTTIME_MAX 0x3ff
 
-static s32 g_BestTimesLoaded;
+// the set the table holds: "" for none yet, else its file
+static char g_BestTimesLoaded[FS_MAXPATH + 1];
+
+/**
+ * GoldenEye's in BESTTIMES_FILE, a ROM hack's beside it under its own name
+ * ("$S/goldfinger64-times.txt"): the hack's missions keep GoldenEye's numbers,
+ * and in one file each would be filed over GoldenEye's own.
+ */
+static const char *frontBestTimesFile(void)
+{
+	static char path[FS_MAXPATH + 1];
+	char slug[64];
+	s32 n = 0;
+
+	if (!frontIsHack()) {
+		return BESTTIMES_FILE;
+	}
+
+	for (const char *c = g_GexPlusVariant; *c && n < (s32)sizeof(slug) - 1; c++) {
+		if ((*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9')) {
+			slug[n++] = *c;
+		} else if (*c >= 'A' && *c <= 'Z') {
+			slug[n++] = *c - 'A' + 'a';
+		}
+	}
+
+	slug[n] = '\0';
+	snprintf(path, sizeof(path), "$S/%s-times.txt", n ? slug : "romhack");
+
+	return path;
+}
 
 static void frontLoadBestTimes(void)
 {
+	const char *file = frontBestTimesFile();
 	FILE *f;
 	s32 mission, difficulty, secs;
 
-	if (g_BestTimesLoaded) {
+	if (strcmp(g_BestTimesLoaded, file) == 0) {
 		return;
 	}
 
-	g_BestTimesLoaded = 1;
+	snprintf(g_BestTimesLoaded, sizeof(g_BestTimesLoaded), "%s", file);
+	memset(g_BestTimes, 0, sizeof(g_BestTimes));
 
-	if (fsFileSize(BESTTIMES_FILE) <= 0 || !(f = fsFileOpenRead(BESTTIMES_FILE))) {
+	if (fsFileSize(file) <= 0 || !(f = fsFileOpenRead(file))) {
 		return;
 	}
 
@@ -1160,10 +1217,18 @@ static void frontLoadBestTimes(void)
 
 static void frontSaveBestTimes(void)
 {
-	FILE *f = fsFileOpenWrite(BESTTIMES_FILE);
+	const char *file = frontBestTimesFile();
+	FILE *f;
+
+	// the table is the set's it was read for
+	if (strcmp(g_BestTimesLoaded, file) != 0) {
+		return;
+	}
+
+	f = fsFileOpenWrite(file);
 
 	if (!f) {
-		sysLogPrintf(LOG_WARNING, "gexfront: could not write %s", fsFullPath(BESTTIMES_FILE));
+		sysLogPrintf(LOG_WARNING, "gexfront: could not write %s", fsFullPath(file));
 		return;
 	}
 
@@ -1191,6 +1256,8 @@ static void frontUnload(void)
 	g_Front.gothic.hd = NULL;
 	g_Front.title = NULL;
 	g_Front.loaded = 0;
+	g_Missions = g_GeMissionRows;
+	g_NumMissionRows = ARRAYCOUNT(g_GeMissionRows);
 }
 
 /**
@@ -1199,26 +1266,126 @@ static void frontUnload(void)
  * this in a level, where the folder itself is closed and its model would be
  * half a megabyte of nothing.
  */
+/**
+ * The conversion the folder's text is read out of: in a level the stage's own
+ * (a ROM hack's mission draws the hack's names in its watch and its HUD),
+ * elsewhere that of the mode chosen - GoldenEye's, or the ROM hack's.
+ */
+static s32 frontWantDir(void)
+{
+	s32 first;
+
+	if (modloaderStageIsRemake(g_Vars.stagenum)) {
+		return modloaderGetStageModDirIndex(g_Vars.stagenum);
+	}
+
+	first = frontFirstArena();
+
+	return first >= 0 ? modloaderGetStageModDirIndex(g_MpArenas[first].stagenum) : -1;
+}
+
+/**
+ * A ROM hack's own folder, where its conversion wrote one: "GEF1", u16 rows,
+ * u16 0, then 48 bytes a row - its numeral (8), the LtitleE slots of its name
+ * and its shorter name (u16 each), the mission (s16, -1 for a chapter heading),
+ * u16 0, its briefing file (20) and the text bank that file indexes (12).
+ * GoldenEye's own conversion writes none, and its rows are g_GeMissionRows.
+ */
+static void frontLoadMissionRows(void)
+{
+	u32 len = 0;
+	u8 *d;
+	s32 n;
+
+	g_Missions = g_GeMissionRows;
+	g_NumMissionRows = ARRAYCOUNT(g_GeMissionRows);
+
+	{
+		char path[FS_MAXPATH + 1];
+		const char *dir = fsGetModDirAt(g_Front.moddir);
+
+		if (!dir) {
+			return;
+		}
+
+		snprintf(path, sizeof(path), "%s/menu/missionfolder.bin", dir);
+
+		if (fsFileSize(path) <= 0) {
+			return;
+		}
+	}
+
+	d = frontLoad("missionfolder.bin", &len);
+
+	if (!d || len < 8 || memcmp(d, "GEF1", 4) != 0) {
+		sysMemFree(d);
+		return;
+	}
+
+	n = (d[4] << 8) | d[5];
+
+	if (n > MAX_MISSION_ROWS) {
+		n = MAX_MISSION_ROWS;
+	}
+
+	if (len < 8 + 48 * (u32)n) {
+		n = (len - 8) / 48;
+	}
+
+	for (s32 i = 0; i < n; i++) {
+		const u8 *row = d + 8 + 48 * i;
+		struct missionrow *r = &g_HackMissionRows[i];
+		const s16 mission = (s16)((row[12] << 8) | row[13]);
+
+		memcpy(g_HackMissionText[i][0], row, 8);
+		g_HackMissionText[i][0][8] = '\0';
+		memcpy(g_HackMissionText[i][1], row + 16, 20);
+		g_HackMissionText[i][1][20] = '\0';
+		memcpy(g_HackMissionText[i][2], row + 36, 12);
+		g_HackMissionText[i][2][12] = '\0';
+
+		r->numeral = g_HackMissionText[i][0];
+		r->name = (row[8] << 8) | row[9];
+		r->icon = (row[10] << 8) | row[11];
+		r->mission = mission >= 0 && mission < NUM_MISSIONS ? mission : -1;
+		r->brief = r->mission >= 0 && g_HackMissionText[i][1][0] ? g_HackMissionText[i][1] : NULL;
+		r->lang = r->mission >= 0 && g_HackMissionText[i][2][0] ? g_HackMissionText[i][2] : NULL;
+	}
+
+	sysMemFree(d);
+
+	if (n > 0) {
+		g_Missions = g_HackMissionRows;
+		g_NumMissionRows = n;
+	}
+}
+
 static s32 frontLoadText(void)
 {
-	const s32 first = frontFirstArena();
+	const s32 want = frontWantDir();
 
-	if (g_Front.zurich.data && g_Front.gothic.data && g_Front.title) {
+	if (g_Front.zurich.data && g_Front.gothic.data && g_Front.title && g_Front.moddir == want) {
 		return 1;
 	}
 
-	if (first < 0) {
+	if (want < 0) {
 		return 0;
 	}
 
-	g_Front.moddir = modloaderGetStageModDirIndex(g_MpArenas[first].stagenum);
+	// another conversion's: its own fonts, names and folder
+	if (g_Front.zurich.data || g_Front.gothic.data || g_Front.title) {
+		frontUnload();
+	}
 
-	if (g_Front.moddir < 0
-			|| !frontLoadFont(&g_Front.zurich, "fontzurichbold.bin")
+	g_Front.moddir = want;
+
+	if (!frontLoadFont(&g_Front.zurich, "fontzurichbold.bin")
 			|| !frontLoadFont(&g_Front.gothic, "fontbankgothic.bin")
 			|| !(g_Front.title = frontLoad("LtitleE", &g_Front.titlelen))) {
 		return 0;
 	}
+
+	frontLoadMissionRows();
 
 	return 1;
 }
@@ -1298,6 +1465,11 @@ static s32 frontStageImage(s32 stagenum)
 {
 	const char *name = stagenum == STAGE_MP_RANDOM ? NULL : modloaderGetStageMapName(stagenum);
 
+	// the one its line names: a ROM hack's own (Goldfinger's arena table)
+	if (stagenum != STAGE_MP_RANDOM && modloaderGetStagePicture(stagenum) > 0) {
+		return modloaderGetStagePicture(stagenum);
+	}
+
 	for (s32 i = 0; name && i < ARRAYCOUNT(g_FrontStages); i++) {
 		if (strcmp(g_FrontStages[i].name, name) == 0) {
 			return g_FrontStages[i].image;
@@ -1350,7 +1522,7 @@ static void frontBuildLevels(void)
 		for (s32 i = 0; i < num && g_Front.numlevels < MAX_LEVELS; i++) {
 			const char *name = modloaderGetStageMapName(g_MpArenas[i].stagenum);
 
-			if (used[i] || !modloaderStageIsRemake(g_MpArenas[i].stagenum)) {
+			if (used[i] || !modloaderStageInGexPlusList(g_MpArenas[i].stagenum)) {
 				continue;
 			}
 
@@ -1486,6 +1658,25 @@ static void frontBuildCharacters(void)
 	for (s32 i = 0; i < g_MpListCounts.bodies && g_Front.numcharacters < MAX_CHARACTERS; i++) {
 		if (gebeanIsGoldenEyeBody(g_MpBodies[i].bodynum)) {
 			g_Front.characters[g_Front.numcharacters++] = i;
+		}
+	}
+
+	// Bond first, as GoldenEye's own list has him (front.c's mp_chr_setup):
+	// the Combat Simulator's bodies put the Bonds after the cast and two
+	// guards (F3 20260930-011623). His outfits follow him, the tuxedo first,
+	// and everyone else keeps their order.
+	{
+		s32 bonds = 0;
+
+		for (s32 k = 0; k < g_Front.numcharacters; k++) {
+			const char *name = frontCharacterName(g_Front.characters[k]);
+
+			if (name && strncmp(name, "Bond", 4) == 0) {
+				const s32 body = g_Front.characters[k];
+
+				memmove(&g_Front.characters[bonds + 1], &g_Front.characters[bonds], (k - bonds) * sizeof(g_Front.characters[0]));
+				g_Front.characters[bonds++] = body;
+			}
 		}
 	}
 
@@ -1689,8 +1880,9 @@ static void frontNextWeaponSet(void)
 	const s32 num = gexPlusWeaponSets(&first);
 
 	if (num <= 0) {
-		// Perfect Dark's guns asked for as well (Mod.GePlusPdGuns): the whole list
-		if (gexPlusGetPdGuns() && g_MpNumWeaponSets > 0) {
+		// Perfect Dark's guns asked for as well (Mod.GePlusPdGuns), or a mod's
+		// own weapon list loaded: the whole list
+		if ((gexPlusGetPdGuns() || modDataMpWeaponsImported()) && g_MpNumWeaponSets > 0) {
 			g_MpWeaponSetNum = g_MpWeaponSetNum + 1 < g_MpNumWeaponSets ? g_MpWeaponSetNum + 1 : 0;
 			mpApplyWeaponSet();
 		}
@@ -1846,9 +2038,10 @@ static void frontEnterSetup(void)
 
 	frontApplyMenuCharacter();
 
+	// GE Plus's arenas, or the ROM hack's whose folder this is
 	mpSetGexPlusMode(true);
 
-	if (first >= 0 && !modloaderStageIsRemake(g_MpSetup.stagenum)) {
+	if (first >= 0 && !modloaderStageInGexPlusList(g_MpSetup.stagenum)) {
 		g_MpSetup.stagenum = g_MpArenas[first].stagenum;
 	}
 
@@ -2046,11 +2239,48 @@ static void frontCursorToMouse(s32 mx, s32 my)
 	if (g_Front.cursory < 20) g_Front.cursory = 20;
 }
 
+/**
+ * The stick GoldenEye's screens read, as the port's own menus read it
+ * (menu.c): whichever of the pad's two sticks is pushed further. The port's
+ * default Swap Sticks puts a pad's left stick on the second stick, which
+ * walks in play, so reading the first alone moved GoldenEye's cursor by the
+ * right stick only (F3 20260930-012504).
+ */
+static s32 frontBiggerStick(s32 a, s32 b)
+{
+	return (a < 0 ? -a : a) >= (b < 0 ? -b : b) ? a : b;
+}
+
+s32 gexMenuStickX(s32 player)
+{
+	return frontBiggerStick(joyGetStickX(player), joyGetRStickX(player));
+}
+
+s32 gexMenuStickY(s32 player)
+{
+	return frontBiggerStick(joyGetStickY(player), joyGetRStickY(player));
+}
+
 static void frontMoveCursor(void)
 {
 	// frontUpdateControlStickPosition(): a 5 dead zone, 70 at most
-	s32 stickx = joyGetStickX(0);
-	s32 sticky = -joyGetStickY(0);
+	s32 stickx = gexMenuStickX(0);
+	s32 sticky = -gexMenuStickY(0);
+	// and the D-pad, which the default binds put on the C buttons (the
+	// keyboard's WASD beside it), as the stick pushed all the way
+	const u32 dpad = joyGetButtons(0, U_CBUTTONS | D_CBUTTONS | L_CBUTTONS | R_CBUTTONS);
+
+	if (dpad & L_CBUTTONS) {
+		stickx = -80;
+	} else if (dpad & R_CBUTTONS) {
+		stickx = 80;
+	}
+
+	if (dpad & U_CBUTTONS) {
+		sticky = -80;
+	} else if (dpad & D_CBUTTONS) {
+		sticky = 80;
+	}
 	const f32 frames = g_Vars.diffframe60freal;
 	s32 mx;
 	s32 my;
@@ -2318,10 +2548,18 @@ static volatile f32 g_TvYaw = 0.0f;
 static volatile f32 g_TvPitch = 0.0f;
 static volatile f32 g_TvZ = 0.0f;
 static volatile f32 g_TvLift = 0.0f;
-// a menu pixel across the folder's plane, measured off the page: the frame the
-// 2-D layer is held in is not the window's own shape (frontX())
-static volatile f32 g_TvSpreadX = 0.9327f;   // 0.855 * 12 / 11: measured inside the 2-D frame on 4:3, drawn outside it
-static volatile f32 g_TvSpreadY = 0.96f;
+
+// GoldenEye's own set's box (Pgx075Z, PROP_TV1: 408 across, 386 high), which
+// g_TvScale was fitted to; another conversion's set is sized to the same
+// (frontLoadTvs())
+#define TV_FIT_W 408.0f
+#define TV_FIT_H 386.0f
+
+// the set's own size against GoldenEye's, and the middle of its front taken
+// to the origin, so that any conversion's set fills its cell as GoldenEye's
+static f32 g_TvFit = 1.0f;
+static f32 g_TvMidX = 0.0f;
+static f32 g_TvMidY = 0.0f;
 
 static void frontUnloadTvs(void)
 {
@@ -2385,6 +2623,28 @@ static s32 frontLoadTvs(void)
 		}
 
 		modelSetScale(g_Front.tvmodels[i], 1);
+	}
+
+	// Goldfinger 64's set is a model of its own, 1250 across and 1000 high,
+	// three times GoldenEye's: at GoldenEye's scale it stood over its
+	// neighbours and out of its cell (F3 20261003-123824). Sized by the box
+	// to fit where GoldenEye's does - GoldenEye's own comes out at 1 - and
+	// centred on its middle across and up
+	{
+		struct modelrodata_bbox *bbox = modelFindBboxRodata(g_Front.tvmodels[0]);
+
+		g_TvFit = 1.0f;
+		g_TvMidX = 0.0f;
+		g_TvMidY = 0.0f;
+
+		if (bbox && bbox->xmax - bbox->xmin > 1.0f && bbox->ymax - bbox->ymin > 1.0f) {
+			const f32 kw = TV_FIT_W / (bbox->xmax - bbox->xmin);
+			const f32 kh = TV_FIT_H / (bbox->ymax - bbox->ymin);
+
+			g_TvFit = kw < kh ? kw : kh;
+			g_TvMidX = (bbox->xmin + bbox->xmax) * 0.5f;
+			g_TvMidY = (bbox->ymin + bbox->ymax) * 0.5f;
+		}
 	}
 
 	return 1;
@@ -2676,7 +2936,7 @@ static void frontTickPlayerPanels(void)
 	s32 ready = 0;
 
 	for (s32 i = 0; i < numplayers; i++) {
-		const s32 stickx = joyGetStickX(i);
+		const s32 stickx = gexMenuStickX(i);
 		const s32 left = joyGetButtonsPressedThisFrame(i, L_JPAD | L_CBUTTONS) || (stickx < -30 && g_Front.stickarmed[i]);
 		const s32 right = joyGetButtonsPressedThisFrame(i, R_JPAD | R_CBUTTONS) || (stickx > 30 && g_Front.stickarmed[i]);
 		const s32 pick = joyGetButtonsPressedThisFrame(i, A_BUTTON | Z_TRIG | START_BUTTON | (i == 0 ? BUTTON_UI_ACCEPT : 0))
@@ -2746,7 +3006,7 @@ static void frontTickCharacters(void)
 	s32 ready = 0;
 
 	for (s32 i = 0; i < numplayers; i++) {
-		const s32 stickx = joyGetStickX(i);
+		const s32 stickx = gexMenuStickX(i);
 		const s32 left = joyGetButtonsPressedThisFrame(i, L_JPAD | L_CBUTTONS) || (stickx < -30 && g_Front.stickarmed[i]);
 		const s32 right = joyGetButtonsPressedThisFrame(i, R_JPAD | R_CBUTTONS) || (stickx > 30 && g_Front.stickarmed[i]);
 		const s32 pick = joyGetButtonsPressedThisFrame(i, A_BUTTON | Z_TRIG | START_BUTTON | (i == 0 ? BUTTON_UI_ACCEPT : 0))
@@ -2961,7 +3221,12 @@ static void frontTick007(s32 pick, s32 back, s32 held)
 {
 	if (!held) {
 		g_Front.sliderheld = -1;
+	}
 
+	// frontTickScreen() clears the highlight every frame, so it is found
+	// again on the press's own frame too, or the press took no slider and
+	// none of them could be dragged (F3 20260930-010020)
+	if (g_Front.sliderheld < 0) {
 		if (!g_Front.tabprev && !g_Front.tabnext && !g_Front.tabstart) {
 			const s32 y = (s32)g_Front.cursory;
 
@@ -3300,6 +3565,11 @@ s32 gexFrontOpen(void)
 	// convert itself would be its
 	if (modBorrowLoadedIsGoldenEyeX()) {
 		return 0;
+	}
+
+	// another conversion's folder loaded (GoldenEye's, a ROM hack's): this one's
+	if (g_Front.loaded && g_Front.moddir != frontWantDir()) {
+		frontUnload();
 	}
 
 	if (!g_Front.loaded && !frontLoadAll()) {
@@ -3735,12 +4005,17 @@ s32 gexFrontLoadShared(void)
 
 s32 gexFrontLoadText(void)
 {
-	return g_Front.loaded || frontLoadText();
+	return (g_Front.loaded && g_Front.moddir == frontWantDir()) || frontLoadText();
 }
 
 s32 gexFrontModDir(void)
 {
 	return g_Front.moddir;
+}
+
+s32 gexFrontTextModDir(void)
+{
+	return g_Front.title ? g_Front.moddir : -1;
 }
 
 s32 gexFrontMissionFiles(s32 mission, const char **brief, const char **lang, s32 *nameid)
@@ -4891,6 +5166,10 @@ static Gfx *frontImageOrRelease(Gfx *gdl, const char *name, s32 num, s32 width, 
 
 		texSelect(&gdl, &tex, 1, 0, 2, 1, NULL);
 
+		// A negative theight turns the picture over, as GoldenEye's flipY
+		// does (display_image_at_position()): the caller says so for both
+		// pictures, the ROM's and the release's, which are stored the same
+		// way up.
 		return frontImageRect(gdl, cx, cy, hw, hh, twidth * FRONT_PICTURE_TEXELS / width,
 				theight * FRONT_PICTURE_TEXELS / height, colour, translucent, true);
 	}
@@ -5423,8 +5702,12 @@ static Gfx *frontDrawLevel(Gfx *gdl)
 
 		const s32 image = frontStageImage(g_Front.levels[first + n]);
 
+		// flipY, as GoldenEye draws them (constructor_menu12_mpstage()): the
+		// ROM's pictures are stored bottom row first like the release's, and
+		// only the release's were turned over (F3 20260930-011519), so in the
+		// N64 look every one stood on its head (F3 20261002-140415)
 		gdl = frontImageOrRelease(gdl, frontStageRelease(image), image, STAGE_IMAGE_W, STAGE_IMAGE_H, G_IM_FMT_I, false,
-				86 + 85 * col, 134 + 70 * row, 34, 22, STAGE_IMAGE_W, STAGE_IMAGE_H, colour, false);
+				86 + 85 * col, 134 + 70 * row, 34, 22, STAGE_IMAGE_W, -STAGE_IMAGE_H, colour, false);
 	}
 
 	gdl = frontTextSetup(gdl);
@@ -5897,7 +6180,7 @@ static Gfx *frontDrawMission(Gfx *gdl)
 /** EXTRA: the difficulty page's rows again, with no mission over them. */
 static Gfx *frontDrawExtra(Gfx *gdl)
 {
-	static const char *rows[NUM_EXTRA_ROWS] = { LANG_N("Cinema\n"), LANG_N("Monitor Programmes\n") };
+	static const char *rows[NUM_EXTRA_ROWS] = { LANG_N("Cinema\n"), LANG_N("Monitor Programs\n") };
 
 	gdl = frontPrint(gdl, 0x37, 0x8f, langTr("EXTRA:\n"), COLOUR_ON);
 
@@ -5937,8 +6220,22 @@ static const char *g_MonitorNames[] = {
 	LANG_N("Tint: one of four"), LANG_N("Tint: red"), LANG_N("Tint: green"), LANG_N("Tint: blue"), LANG_N("Effect: one of five"),
 	LANG_N("Effect: scroll right"), LANG_N("Effect: scroll up, fast"), LANG_N("Effect: scroll up"), LANG_N("Effect: scroll and zoom 1"),
 	LANG_N("Effect: scroll and zoom 2"), LANG_N("Effect: wait and route"), LANG_N("Effect: flash"),
-	LANG_N("Red, brightening"), LANG_N("Green, brightening"), LANG_N("Solid grey"), LANG_N("Solid red"), LANG_N("Solid green"), LANG_N("Solid black"),
+	LANG_N("Red, brightening"), LANG_N("Green, brightening"), LANG_N("Solid gray"), LANG_N("Solid red"), LANG_N("Solid green"), LANG_N("Solid black"),
 };
+
+/**
+ * A programme's line on the page: its number and, on GoldenEye's own, what it
+ * is. A ROM hack's programmes are its own under GoldenEye's numbers (converter
+ * 109), and GoldenEye's names would misname them.
+ */
+static void frontMonitorLine(char *line, size_t len, s32 n)
+{
+	if (frontIsHack() || n >= ARRAYCOUNT(g_MonitorNames)) {
+		snprintf(line, len, langTr("%d of %d\n"), n + 1, g_Front.nummonitors);
+	} else {
+		snprintf(line, len, langTr("%d of %d: %s\n"), n + 1, g_Front.nummonitors, langTr(g_MonitorNames[n]));
+	}
+}
 
 #define MONITOR_CX 220.0f
 #define MONITOR_CY 226.0f
@@ -6017,8 +6314,7 @@ static Gfx *frontDrawMonitorView(Gfx *gdl)
 		return frontPrint(gdl, 0x37, 0x8f, langTr("None in this conversion.\n"), COLOUR_ON);
 	}
 
-	snprintf(line, sizeof(line), langTr("%d of %d: %s\n"), g_Front.monitor + 1, g_Front.nummonitors,
-			g_Front.monitor < ARRAYCOUNT(g_MonitorNames) ? langTr(g_MonitorNames[g_Front.monitor]) : "");
+	frontMonitorLine(line, sizeof(line), g_Front.monitor);
 	gdl = frontPrint(gdl, 0x37, 0x8f, line, COLOUR_ON);
 
 	// the tube it is shown on
@@ -6139,8 +6435,9 @@ static Gfx *frontDrawMonitorView(Gfx *gdl)
 static Gfx *frontDrawTvs(Gfx *gdl)
 {
 	const s32 first = g_Front.monitorpage * TVS_PER_PAGE;
-	const f32 perpixel = FOLDER_PERPIXEL;
 	Mtxf camera;
+	Mtxf persp;
+	u16 perspnorm;
 	s32 lvupdate60;
 	f32 lvupdate60f;
 	s32 prevsrc;
@@ -6152,6 +6449,14 @@ static Gfx *frontDrawTvs(Gfx *gdl)
 	gdl = frontTvCamera(gdl, &camera);
 	gdl = zbufClear(gdl);
 	gSPSetGeometryMode(gdl++, G_ZBUFFER);
+
+	// Every set is drawn on the camera's own axis, square to it, and its
+	// picture moved across the screen to its place on the strip after the
+	// projection - so each looks as the next does. Placed in the scene under
+	// the one camera, the sets at the strip's ends and rows were seen from the
+	// side, above or below and stood off their cells by as much, and the
+	// numbers beside them read as scattered (F3 20261002-082638, 082808).
+	guPerspectiveF(persp.m, &perspnorm, FOLDER_FOVY, videoGetAspect(), 100.0f, 10000.0f, 1.0f);
 
 	frontMonitorClock(1, &lvupdate60, &lvupdate60f);
 	prevsrc = modSetTextureSourceMod(g_Front.moddir);
@@ -6168,11 +6473,35 @@ static Gfx *frontDrawTvs(Gfx *gdl)
 		mtx4LoadYRotation(g_TvYaw, &world);
 		mtx4LoadXRotation(g_TvPitch, &turn);
 		mtx4MultMtx4InPlace(&turn, &world);
-		mtx00015f04(g_TvScale * (n == g_Front.highlight ? 1.12f : 1.0f), &world);
-		world.m[3][0] = -900.0f + (px - 220.0f) * perpixel * g_TvSpreadX;
-		world.m[3][1] = 990.0f - (py - 165.0f) * perpixel * g_TvSpreadY + g_TvLift;
-		world.m[3][2] = g_TvZ;
+		mtx00015f04(g_TvScale * g_TvFit * (n == g_Front.highlight ? 1.12f : 1.0f), &world);
+
+		// the set's middle onto the axis: its offset through the turn and
+		// the scale (the rows of `world` now carry both)
+		world.m[3][0] = -900.0f - (g_TvMidX * world.m[0][0] + g_TvMidY * world.m[1][0]);
+		world.m[3][1] = 990.0f + g_TvLift - (g_TvMidX * world.m[0][1] + g_TvMidY * world.m[1][1]);
+		world.m[3][2] = g_TvZ - (g_TvMidX * world.m[0][2] + g_TvMidY * world.m[1][2]);
 		mtx4MultMtx4InPlace(&camera, &world);
+
+		{
+			// the menu's point (px, py) as the 2-D layer puts it on the
+			// screen, where G_ASPECT_CENTER_EXT narrows it to the native frame's shape
+			const f32 halfw = viGetWidth() * 0.5f;
+			const f32 halfh = viGetHeight() * 0.5f;
+			const f32 dx = (frontX(px) - halfw) / halfw * ((f32)videoGetNativeWidth() / (f32)videoGetNativeHeight()) / videoGetAspect();
+			const f32 dy = -(frontY(py) - halfh) / halfh;
+			Mtx *projection = gfxAllocateMatrix();
+			Mtxf moved;
+
+			mtx4Copy(&persp, &moved);
+
+			for (s32 i = 0; i < 4; i++) {
+				moved.m[i][0] += dx * moved.m[i][3];
+				moved.m[i][1] += dy * moved.m[i][3];
+			}
+
+			guMtxF2L(moved.m, projection);
+			gSPMatrix(gdl++, projection, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
+		}
 
 		renderdata.unk00 = &world;
 		renderdata.unk10 = gfxAllocate(g_Front.tvdef->nummatrices * sizeof(Mtxf));
@@ -6207,6 +6536,14 @@ static Gfx *frontDrawTvs(Gfx *gdl)
 	modSetTextureSourceMod(prevsrc);
 	frontMonitorClock(0, &lvupdate60, &lvupdate60f);
 
+	{
+		// the camera's own projection back, unshifted, for whatever follows
+		Mtx *projection = gfxAllocateMatrix();
+
+		guMtxF2L(persp.m, projection);
+		gSPMatrix(gdl++, projection, G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_PROJECTION);
+	}
+
 	gSPClearGeometryMode(gdl++, G_ZBUFFER);
 	gSPSetExtraGeometryModeEXT(gdl++, G_ASPECT_CENTER_EXT);
 
@@ -6230,7 +6567,7 @@ static Gfx *frontDrawMonitors(Gfx *gdl)
 
 	if (g_Front.nummonitors <= 0 || !g_Front.tvdef) {
 		gdl = frontTextSetup(gdl);
-		return frontPrint(gdl, 0x37, 0x57, langTr("No monitor programmes in this conversion.\n"), COLOUR_ON);
+		return frontPrint(gdl, 0x37, 0x57, langTr("No monitor programs in this conversion.\n"), COLOUR_ON);
 	}
 
 	gdl = frontDrawTvs(gdl);
@@ -6255,8 +6592,7 @@ static Gfx *frontDrawMonitors(Gfx *gdl)
 	if (g_Front.highlight >= 0 && first + g_Front.highlight < g_Front.nummonitors) {
 		const s32 n = first + g_Front.highlight;
 
-		snprintf(line, sizeof(line), "%d of %d: %s\n", n + 1, g_Front.nummonitors,
-				n < ARRAYCOUNT(g_MonitorNames) ? g_MonitorNames[n] : "");
+		frontMonitorLine(line, sizeof(line), n);
 		gdl = frontPrint(gdl, 0x37, 0x57, line, COLOUR_ON);
 	}
 

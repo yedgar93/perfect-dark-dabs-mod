@@ -21,6 +21,8 @@ s32 modloaderGetStageModelScale(s32 stagenum, s32 modelnum, s32 fileid, s32 scal
 const char *modloaderGetStageAllocation(s32 stagenum);
 // A Stage Loader map's own name, as its mod calls it, or NULL for a stock stage.
 const char *modloaderGetStageMapName(s32 stagenum);
+// the GoldenEye image an arena's map line names as its picture (`picture`), or 0
+s32 modloaderGetStagePicture(s32 stagenum);
 struct fogenvironment;
 
 // Before a stage's setup loads: the remake's model states, from the stage's
@@ -31,6 +33,26 @@ void modloaderApplyStageModels(s32 stagenum);
 // is the remake's arenas only.
 extern s32 g_GexPlusMode;
 s32 modloaderStageIsRemake(s32 stagenum);
+// a remake arena of the GoldenEye ROM's conversion itself (not a ROM hack's)
+s32 modloaderStageIsGexPlus(s32 stagenum);
+// whether that arena or mission is the GoldenEye level GoldenEye keys `key`
+// ("ark" = Facility): its file is bg_gx<key>.seg (geconvert.c), arena and
+// mission alike; never a ROM hack's level, which gets keys of its own
+s32 modloaderStageIsGeLevel(s32 stagenum, const char *key);
+
+/**
+ * GE Plus's Combat Simulator (g_GexPlusMode) for a GoldenEye ROM hack's arenas
+ * in place of GoldenEye's: the hack's name (gexPlusRomGetVariant(), the folder
+ * its conversion is in), or NULL for GoldenEye's own. The arena list and the
+ * random arena take the stages modloaderStageInGexPlusList() answers for.
+ */
+extern const char *g_GexPlusVariant;
+s32 modloaderStageInGexPlusList(s32 stagenum);
+// the GoldenEye conversion's mounted dir (GEXPLUSROM_DIR), and whether a dir index is it
+s32 modloaderGexPlusDirIndex(void);
+s32 modloaderGexPlusVariantDirIndex(void); // the chosen ROM hack's (g_GexPlusVariant), or -1
+s32 modloaderDirIndexIsGexPlus(s32 moddir);
+s32 modloaderDirIndexIsConversion(s32 moddir);
 // One of the remake's models (MODEL_REMAKE_FIRST + slot) on a stage of
 // Perfect Dark's, from the mod that brings it, until the next stage; -1 where
 // no mod has it or the stage is one of the remake's own
@@ -66,6 +88,13 @@ s32 modloaderGetStageMusic(s32 stagenum, s32 *tracks);
 // did not change it; and their portal thickness codes, the count with each
 // portal's number and code. The caller asks gexFrontGetRevisionFixes() first.
 s32 modloaderGetStageRevisionSetup(s32 stagenum, s32 filenum);
+
+/**
+ * The Community Edition's copy of one of a converted stage's files (its line's
+ * `ce`), or filenum when it has none. The caller asks only while the HD look
+ * and the Community Edition are on (geRoomCeData()).
+ */
+s32 modloaderGetStageCeFile(s32 stagenum, s32 filenum);
 s32 modloaderGetStageRevisionPortals(s32 stagenum, const u16 **portals, const u8 **codes);
 
 #endif

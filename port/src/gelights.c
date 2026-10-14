@@ -7,6 +7,7 @@
 #include "modloader.h"
 #include "xblastage.h"
 #include "gelights.h"
+#include "roommesh.h"
 #include "system.h"
 #include "game/dlights.h"
 #include "game/propsnd.h"
@@ -273,6 +274,12 @@ static s32 geLightsDarken(s32 roomnum, s32 lightnum)
 		num++;
 	}
 
+	// A vertex's colour byte is part of what the GPU's copy of the room
+	// learnt from its lists (roommesh.c)
+	if (num && palette) {
+		roomMeshForget(roomnum);
+	}
+
 	return num;
 }
 
@@ -354,14 +361,9 @@ bool geLightsHandleHit(struct coord *gunpos, struct coord *hitpos, s32 roomnum)
 
 	{
 		struct light *first = geLight(roomnum, hit);
-		struct coord soundpos;
 		f32 c[3];
 
 		geLightCentre(first, c);
-
-		soundpos.x = c[0] + g_BgRooms[roomnum].pos.x;
-		soundpos.y = c[1] + g_BgRooms[roomnum].pos.y;
-		soundpos.z = c[2] + g_BgRooms[roomnum].pos.z;
 
 		// the whole fixture: GoldenEye darkens every one of its triangles
 		// within 100 units of one it has darkened
@@ -381,7 +383,9 @@ bool geLightsHandleHit(struct coord *gunpos, struct coord *hitpos, s32 roomnum)
 			}
 		}
 
-		psCreate(0, 0, SFX_HIT_GLASS, -1, -1, PSFLAG_0400, 0, PSTYPE_NONE, &soundpos, -1.0f, 0, roomnum, -1.0f, -1.0f, -1.0f);
+		// No sound of its own: GoldenEye's lightFixtureBreak() plays none
+		// (glassCreateShard() neither), only the bullet's impact on the
+		// fixture's surface, which prop.c still plays (bgunPlayBgHitSound())
 	}
 
 	return true;

@@ -1,5 +1,14 @@
 # The third person camera, and everything that measures from the camera
 
+## Digest (moved from CLAUDE.md, 2026-09-30)
+
+The entries CLAUDE.md carried for this note, verbatim. The sections below are
+the long form.
+
+- **The third person camera, and why melee, rockets and beams came out of it** — [third-person.md](CLAUDE-notes/third-person.md): (2026-09-26: a hit's rebuilt position, the body's held gun in "weapon landed", its crouch on converted levels) (2026-09-27: a wall never cuts to first person - the camera goes onto the eye with `thirdpersondist` 0.01 and the player's own body fades by the camera's distance from it, drawn depth-first so it is one surface, `G_DEPTH_PREPASS_EXT`/`G_DEPTH_FRONT_EXT`; Camera Body Fade replaced Minimum Distance) the player's shot is fired from the camera and not the eye, so the crosshair is honest at any offset but everything that measures *from* the origin was two metres out; the two halves of the fix and the melee site that does not go through the shot path; the floor flags the camera trace needs; driving the camera from gdb; **Camera Tether** (`Mod.ThirdPersonTether`), a rod that pivots about `bond2.unk10` and not the shaken copy, and the game's `atan2f()` answering in 0 to tau; light glares are depth-less sprites, drawn before the gun, and whether a glare or the sun is seen is the GPU's occlusion query at each point (`artifactsTestOcclusion()`, `G_OCCLUSIONTEST_EXT`; `shotTestLos()` only as a fallback, it walked the camera's room alone and missed hills and translucent streets), and **Glare Clipping** (`Mod.GlareClip`) depth-tests their halos at draw time (`G_SETRECTDEPTH_EXT`), since the check misses props, is a frame or two stale, and passes a whole halo for a sliver of light; the player's footsteps are `bmoveTick()`'s alone, since the animated body's `footstepCheckDefault()` read the head bob's frame out of `oldframe` and played them in bursts
+- **Sitting in the Institute's chairs** — third-person.md, "Sitting in the Institute's chairs": `port/src/sitchair.c`, `Mod.SitInChairs`, office chairs and two-seater sofas (`g_SeatModels`); sitting down is `ANIM_STAND_UP_FROM_SITTING` backwards; a chair's +z is its front; the nearer of a chair and its desk's terminal wins, and seated the use button is the terminal's; anyone near the third person camera fades (`playerGetNearChrAlphaFrac()`)
+
+
 The fork's playable third person is one function, `playerPullBackCamera()` in
 `src/game/player.c`, called from the normal tick's camera block. It moves the
 copy of the eye that the camera matrix is built from and leaves `bond2`'s own
@@ -714,6 +723,19 @@ Sideways, Forward/Back, Height -> `optionsMenuCameraAdjusted()`) fades it to
 palettes back; out at 8/s, back at 3/s once the slider has been still 0.7 s.
 The slider bars and the cable keep their own colours and stay visible, which
 leaves the row being dragged readable.
+
+F3 20260930-212705 ("no longer shows live changes"): 272895ff7 (the camera
+eases off walls) made every change of the camera's offset ease at
+`THIRDPERSON_EASE_RATE * lvupdate60freal`, and over the paused level behind
+Mods: Camera `lvupdate60freal` is 0, so the camera never moved off last
+frame's offset until the menu closed. Under `optionsMenuWantsLiveWorld()` the
+ease rate is 1: the camera goes straight to the new settings. Probe: gdb
+`call playerPause(2)` (the real pause, `lvIsPaused()` true; a bare
+`menuPushRootDialog()` leaves the level running and the ease hides the bug),
+then `menuPushDialog(&g_ExtendedDabsModCameraMenuDialog)`, write
+`g_ModOptions.camdist`/`camside` and read `thirdpersondist`
+(~/wt/f3-1001-tpcam-run/cam.py; gdb Python `stop()` cannot call inferior
+functions - return True and call from the main loop).
 
 Probe: ~/wt/f3-0927-options-run/cam.py (Villa, cutscene skipped at 600,
 `menuPushRootDialog(&g_SoloMissionPauseMenuDialog, 2)` then

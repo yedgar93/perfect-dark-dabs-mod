@@ -210,10 +210,12 @@
 #define G_SETFOGLINE_EXT             0x4b
 #define G_OCCLUSIONTEST_EXT          0x4c
 #define G_SETTILEOFFSET_EXT          0x4d
+#define G_MESH_EXT                   0x4e
 
 /* G_EXTRAGEOMETRYMODE flags */
 
 #define G_INVERT_CULLING_EXT     0x00000001
+#define G_TEX_OWN_LODS_EXT       0x00000002 // a mipmapped texture (G_TL_LOD) draws its own levels of detail, the tiles' images under the first as the RDP samples them, not levels the renderer makes from the first: a level converted from GoldenEye's ROM in the N64 look (bgRenderScene()), whose CI textures' levels GoldenEye's shrink made (getexshrink.c) - Crab Key's wall grille is a white mesh at a distance on the cartridge because of what they hold
 #define G_ASPECT_LEFT_EXT        0x00000010
 #define G_ASPECT_RIGHT_EXT       0x00000020
 #define G_ASPECT_WIDE_EXT        0x00000040
@@ -231,6 +233,10 @@
 #define G_DEPTH_PREPASS_EXT      0x00020000 // what follows writes depth and no colour, whatever the render mode says: the first of a faded body's two passes (chrRender())
 #define G_DEPTH_FRONT_EXT        0x00040000 // what follows compares less-or-equal and writes no depth, whatever the render mode says: the second pass, which then draws only the surface the first left nearest
 #define G_SEAL_SEAMS_EXT         0x00080000 // opaque triangles that follow are grown half a pixel on screen, their corners slid along their own plane: a room's cracks between faces that do not quite meet (gfx_seal_seams(), gfx_pc.cpp)
+#define G_ALPHA_CORE_EXT         0x00100000 // with a texture-edge cutout (CVG_X_ALPHA): only texels of at least three quarters alpha are kept, drawn solid - the core of a soft picture, whose fringe is blended over it in a second draw (a character's hair, xblamesh.c)
+#define G_FOG_VERTEX_EXT         0x00200000 // fog is worked out at each vertex and clamped there, then carried across the triangle linearly on the screen, as the N64's RSP and its shade alpha do - not at each pixel from its own depth. A GoldenEye level's big floor triangles take the fog of their far corners well inside the fog's start (envStartFog() on a converted level)
+#define G_COVERAGE_ALPHA_EXT     0x00400000 // under a render mode that takes coverage for alpha (ALPHA_CVG_SEL) without FORCE_BL, CVG_X_ALPHA or an alpha compare, a covered pixel is drawn solid whatever alpha the combiner hands on, as the RDP draws it: a level converted from GoldenEye's ROM in the N64 look (bgRenderScene()), where GE Editor's grey I4 walls handed on their texels' intensity for alpha and were blended by it to half their brightness
+#define G_SHADE_LINEAR_EXT       0x00800000 // vertex colours are carried across a triangle linearly on the screen, as the RDP carries its shade, not with perspective, and a triangle crossing the RSP's clip volume is first cut where the RSP cuts it (as under G_FOG_VERTEX_EXT): a level converted from GoldenEye's ROM in the N64 look (bgRenderScene()), where Caverns' lake is one huge triangle with a black corner far off that the cartridge darkens across most of the screen
 
 /* Extra texture filtering mode */
 
@@ -453,6 +459,40 @@
     _g->words.w0 = _SHIFTL(G_TAA_EXT, 24, 8) | _SHIFTL((begin), 8, 1) \
         | _SHIFTL((slot), 0, 8);                                       \
     _g->words.w1 = (uintptr_t)(mtx);                                   \
+}
+
+/*
+ * G_MESH_EXT: the lists that follow draw one of the meshes in gfxmesh.h - the
+ * XBLA release's and GoldenEye XBLA's (xblamesh.c) - until a gSPMeshEXT() of
+ * NULL. The renderer draws them from a copy of the mesh it keeps on the GPU,
+ * posed by the draw's palette in the vertex shader, instead of transforming
+ * every vertex the lists load. draw is a struct gfxmeshdraw in memory that
+ * lives until the frame is drawn.
+ */
+#define gSPMeshEXT(pkt, draw)                                          \
+{                                                                      \
+    Gfx *_g = (Gfx *)(pkt);                                            \
+                                                                       \
+    _g->words.w0 = _SHIFTL(G_MESH_EXT, 24, 8);                         \
+    _g->words.w1 = (uintptr_t)(draw);                                  \
+}
+
+/*
+ * G_MESH_EXT for one node of a model (modelmesh.c): the lists that follow
+ * load the node's `count` vertices from `vertices`, each under one of the
+ * model's matrices in segment 3, until a gSPMeshEXT() of NULL. The renderer
+ * keeps a copy of the vertices on the GPU and draws the lists' runs from it,
+ * every vertex transformed by the matrix it was loaded under.
+ */
+#define G_MESH_MODEL_EXT 0x00800000
+
+#define gSPModelMeshEXT(pkt, vertices, count)                          \
+{                                                                      \
+    Gfx *_g = (Gfx *)(pkt);                                            \
+                                                                       \
+    _g->words.w0 = _SHIFTL(G_MESH_EXT, 24, 8) | G_MESH_MODEL_EXT       \
+        | _SHIFTL((count), 0, 16);                                     \
+    _g->words.w1 = (uintptr_t)(vertices);                              \
 }
 
 #define gSPSetExtraGeometryModeEXT(pkt, word) gSPExtraGeometryModeEXT((pkt), 0, word)

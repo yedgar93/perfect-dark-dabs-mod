@@ -65,6 +65,7 @@
 #include "gexfront.h"
 #include "gexplus.h"
 #include "gebean.h"
+#include "geguns.h"
 #include "geanimtable.h"
 #include "game/bondmove.h"
 #include "game/body.h"
@@ -171,9 +172,9 @@ enum {
 };
 
 // the colours GoldenEye's own screens are drawn in, RGBA
-#define COL_GREEN     0x00ff00b0
-#define COL_HIGHLIGHT 0xa0ffa0f0
-#define COL_DIM       0x00800080
+#define COL_GREEN     watchTint(0x00ff00b0)
+#define COL_HIGHLIGHT watchTint(0xa0ffa0f0)
+#define COL_DIM       watchTint(0x00800080)
 #define COL_WHITE     0xffffffff
 
 // the watch face: 30 vertices round a disc of radius 520, the green fill just
@@ -388,6 +389,7 @@ struct gewatch {
 
 	// the interference (g_WatchBackgroundGreen, g_WatchStaticScanlineY)
 	s32 bggreen;     // 0xe0 when the face is clear, 0x80 as static strikes
+	s32 tint;        // the conversion's menu/gewatch.bin: 1 yellow (watchTint())
 	s32 scany;       // the scanline's place up the face, -0x156 to 0x156
 	f32 staticacc;   // 60ths owed to watchTickStatic()
 	f32 gunangle;    // D_80040B14, the inventory's gun's turn
@@ -486,6 +488,35 @@ static s32 watchIsMp(void);
 static u32 watchBe32(const u8 *p)
 {
 	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+
+/**
+ * A ROM hack's watch colours. Goldfinger 64's is yellow: its code has every
+ * green GoldenEye's watch draws (the face's ramp, the page rectangles, the
+ * text, the pulses, the multiplayer pause and the watch's ammunition) patched
+ * to the same with its red raised to its green - 0x00ff00b0 to 0xffff00b0,
+ * 0xa0ffa0f0 to 0xffffa0f0 (F3 20261003-050712). The conversion says which
+ * (menu/gewatch.bin, romlayout.watchtint); GoldenEye's own writes none.
+ */
+static u32 watchTint(u32 colour)
+{
+	if (g_Watch.tint == 1) {
+		colour = (colour & 0x00ffffff) | (colour & 0x00ff0000) << 8;
+	}
+
+	return colour;
+}
+
+static void watchTintCols(Col *c, s32 n)
+{
+	for (s32 i = 0; g_Watch.tint == 1 && i < n; i++) {
+		c[i].r = c[i].g;
+	}
+}
+
+u32 geWatchTint(u32 colour)
+{
+	return g_Watch.loaded ? watchTint(colour) : colour;
 }
 
 static u8 *watchLoad(const char *rel, u32 *len)
@@ -1145,6 +1176,14 @@ void geWatchStageStart(s32 stagenum)
 
 	g_Watch.animnum = watchLoadAnim();
 
+	{
+		u8 *tint = watchLoad("gewatch.bin", &len);
+
+		g_Watch.tint = tint && len >= 5 && memcmp(tint, "GEW1", 4) == 0 ? tint[4] : 0;
+		sysMemFree(tint);
+		len = 0;
+	}
+
 	// a converted mission's briefing, for the screen that shows it. An arena
 	// has none, and its briefing screen is its objectives alone.
 	g_Watch.mission = modloaderStageMission(stagenum);
@@ -1308,7 +1347,7 @@ static void watchTickStatic(void)
 		// frames after they let go of it eases back to rest
 		{
 			const s32 held = g_Watch.page == PAGE_CONTROL && g_Watch.selected && g_Watch.controlrow == 1;
-			const s32 stickx = joyGetStickX(0);
+			const s32 stickx = gexMenuStickX(0);
 
 			if (held && (stickx >= 10 || stickx < -9)) {
 				g_Watch.padidle = 0;
@@ -1335,7 +1374,7 @@ static void watchTickStatic(void)
 		// while they have hold of it, and back when they let go
 		{
 			const s32 held = g_Watch.page == PAGE_CONTROL && g_Watch.selected && g_Watch.controlrow == 1;
-			const f32 target = held ? (f32)joyGetStickY(0) * M_BADTAU / 360.0f : 0.0f;
+			const f32 target = held ? (f32)gexMenuStickY(0) * M_BADTAU / 360.0f : 0.0f;
 
 			g_Watch.padpitch += (target - g_Watch.padpitch) / 4.0f;
 		}
@@ -1843,8 +1882,8 @@ s32 geWatchPause(void)
  */
 static void watchTickLatches(void)
 {
-	const s32 x = joyGetStickX(0);
-	const s32 y = joyGetStickY(0);
+	const s32 x = gexMenuStickX(0);
+	const s32 y = gexMenuStickY(0);
 
 	if (x >= -0xa && x < 0xb) {
 		g_Watch.lrready = 1;
@@ -1857,22 +1896,22 @@ static void watchTickLatches(void)
 
 static s32 watchStickLeft(void)
 {
-	return joyGetStickX(0) < -0x2d && g_Watch.lrready;
+	return gexMenuStickX(0) < -0x2d && g_Watch.lrready;
 }
 
 static s32 watchStickRight(void)
 {
-	return joyGetStickX(0) >= 0x2e && g_Watch.lrready;
+	return gexMenuStickX(0) >= 0x2e && g_Watch.lrready;
 }
 
 static s32 watchStickUp(void)
 {
-	return joyGetStickY(0) >= 0x2e && g_Watch.yready;
+	return gexMenuStickY(0) >= 0x2e && g_Watch.yready;
 }
 
 static s32 watchStickDown(void)
 {
-	return joyGetStickY(0) < -0x2d && g_Watch.yready;
+	return gexMenuStickY(0) < -0x2d && g_Watch.yready;
 }
 
 static s32 watchPressedUp(void)
@@ -1923,7 +1962,7 @@ static s32 watchPressedStart(void)
 
 static void watchListNav(f32 *cursor, s32 *index, s32 count, s32 *texty, s32 top, s32 line, s32 *settled)
 {
-	const s32 sticky = joyGetStickY(0);
+	const s32 sticky = gexMenuStickY(0);
 	s32 target;
 	s32 ticks = 0;
 
@@ -2040,7 +2079,12 @@ static const struct watchoption g_Options[] = {
 	{ STR_LOOKAHEAD,      { STR_OFF, STR_ON, 0 },                2 },
 	{ STR_AMMOONSCREEN,   { STR_OFF, STR_ON, 0 },                2 },
 	{ STR_SCREEN,         { STR_FULL, STR_WIDE, STR_CINEMA },    3 },
+#ifdef PLATFORM_N64
+	// Not on the PC: the picture follows the window, optionsSetScreenRatio()
+	// holds Normal, and Perfect Dark's own Video menu leaves Ratio out too
+	// (F3 20260930-012556-2776a295, a row that never moved)
 	{ STR_RATIO,          { STR_NORMAL, STR_169, 0 },            2 },
+#endif
 };
 
 #define NUM_OPTIONS ((s32)(sizeof(g_Options) / sizeof(g_Options[0])))
@@ -2094,7 +2138,7 @@ static void watchAdjustVolume(s32 row)
 {
 	s32 v = row == 0 ? (s32)optionsGetMusicVolume() : (s32)VOLUME(g_SfxVolume);
 	const s32 old = v;
-	s32 x = joyGetStickX(0);
+	s32 x = gexMenuStickX(0);
 
 	if (joyGetButtons(0, R_CBUTTONS | R_TRIG | R_JPAD)) {
 		v += (s32)(1024 * VOL_SCALE);
@@ -2192,7 +2236,9 @@ static void watchInventoryTake(s32 start)
 {
 	const s32 weaponnum = invGetWeaponNumByIndex(g_Watch.invrow);
 
-	if (weaponnum <= 0) {
+	// a mission's collectable is carried and never held (gegadgets.c): its
+	// key card's model is no GoldenEye item's
+	if (weaponnum <= 0 || gegadgetsIsCollectable(weaponnum)) {
 		return;
 	}
 
@@ -2244,9 +2290,9 @@ static void watchTickInput(void)
 		if (g_Watch.selected) {
 			// held, not pressed: the stick or a right button to CONFIRM, the
 			// left ones back to CANCEL (draw_abort_cancel_confirm())
-			if (!g_Watch.confirm && (joyGetStickX(0) >= 0x2e || joyGetButtons(0, R_JPAD | R_TRIG | R_CBUTTONS))) {
+			if (!g_Watch.confirm && (gexMenuStickX(0) >= 0x2e || joyGetButtons(0, R_JPAD | R_TRIG | R_CBUTTONS))) {
 				g_Watch.confirm = 1;
-			} else if (g_Watch.confirm && (joyGetStickX(0) < -0x2d || joyGetButtons(0, L_JPAD | L_TRIG | L_CBUTTONS))) {
+			} else if (g_Watch.confirm && (gexMenuStickX(0) < -0x2d || joyGetButtons(0, L_JPAD | L_TRIG | L_CBUTTONS))) {
 				g_Watch.confirm = 0;
 			}
 
@@ -2294,7 +2340,7 @@ static void watchTickInput(void)
 	case PAGE_OPTIONS:
 		if (g_Watch.optionrow < 2) {
 			if (watchPressedUp() || watchPressedDown()) {
-				g_Watch.optionrow = watchPressedUp() ? (g_Watch.optionrow == 0 ? 9 : 0) : (g_Watch.optionrow == 0 ? 1 : 2);
+				g_Watch.optionrow = watchPressedUp() ? (g_Watch.optionrow == 0 ? NUM_OPTIONS + 1 : 0) : (g_Watch.optionrow == 0 ? 1 : 2);
 				g_Watch.yready = 0;
 				g_Watch.selected = 0;
 			} else if (g_Watch.selected) {
@@ -2306,7 +2352,7 @@ static void watchTickInput(void)
 				g_Watch.yready = 0;
 				g_Watch.selected = 0;
 
-				if (g_Watch.optionrow >= 10) {
+				if (g_Watch.optionrow >= NUM_OPTIONS + 2) {
 					g_Watch.optionrow = 0;
 				}
 			} else if (g_Watch.selected) {
@@ -2424,6 +2470,11 @@ void geWatchTick(void)
 	case WS_TILT:
 		if (g_Watch.statetime == 1) {
 			watchStartTilt(1);
+
+			// bondview2.c's WATCH_ANIMATION_0x2: never under 30
+			if (g_Watch.tiltduration < 30.0f) {
+				g_Watch.tiltduration = 30.0f;
+			}
 		}
 
 		if (g_Watch.tiltduration - g_Watch.tilttime < 30.0f) {
@@ -2480,6 +2531,16 @@ void geWatchTick(void)
 		if (g_Watch.statetime == 1) {
 			watchStartArm(0, ARM_DURATION);
 			watchStartTilt(0);
+
+			// bondview2.c's WATCH_ANIMATION_0x7: the view goes back over
+			// the arm's time and 20 frames more, so the arm is down before
+			// the view is where the player was looking. Taken at the tilt's
+			// own pace, a pause opened looking at the floor (-72.7 back
+			// from -40, 33 frames) had the view there with the arm still
+			// standing up in the middle of it (F3 20261003-055428)
+			if (g_Watch.tiltduration < ARM_DURATION + 20.0f) {
+				g_Watch.tiltduration = ARM_DURATION + 20.0f;
+			}
 		}
 
 		if (g_Watch.armstep == 0) {
@@ -2676,6 +2737,7 @@ static s32 watchFaceVertices(Vtx *v, Col *c, s32 numverts, f32 scale, s32 centre
 /** draw_watch_background(): the ring as strips, or the fill as a fan. */
 static Gfx *watchDrawFace(Gfx *gdl, Vtx *v, Col *c, s32 n, s32 fan)
 {
+	watchTintCols(c, n);
 	gDma1p(gdl++, G_COL, c, n * 4, (n - 1) << 2);
 
 	if (fan) {
@@ -2743,6 +2805,7 @@ static Gfx *watchDrawSelect(Gfx *gdl)
 		}
 	}
 
+	watchTintCols(c, n);
 	gDma1p(gdl++, G_COL, c, n * 4, (n - 1) << 2);
 
 	for (s32 r = 0; r < SELECT_RECTS; r++) {
@@ -2868,6 +2931,7 @@ static Gfx *watchDrawSlider(Gfx *gdl, s32 top, f32 fill)
 	}
 
 	gDPSetRenderMode(gdl++, G_RM_XLU_SURF, G_RM_XLU_SURF2);
+	watchTintCols(c, 12);
 	gDma1p(gdl++, G_COL, c, 12 * 4, 11 << 2);
 
 	for (s32 q = 0; q < 3; q++) {
@@ -3149,13 +3213,26 @@ static void watchSetCuff(void)
  * those fields (`bond2.unk00` is GoldenEye's `theta_transform`, its look
  * vector, and `headbodyoffset` is the same field under the same name), so this
  * is GoldenEye's own three lines.
+ *
+ * GoldenEye's position is `collision_position`, the body's, which is the
+ * player's prop position here - not `bond2.unk10`, the eye, which drops below
+ * it as the view pitches down (11 units at -75 on Train, the same on both).
+ *
+ * No scale goes on here: the arm's own scale (modelSetScale(), GoldenEye's
+ * 0.01) is put on its root by the pose, as GoldenEye's subcalcmatrices() does.
+ * This matrix once carried the scale as well, so the arm was posed at a
+ * hundredth of its size: invisible at the wrist, and only grown to its size by
+ * the move to the eye - it came up out of nothing below the middle of the
+ * screen and shrank away there again, where GoldenEye's swings in and out at
+ * the lower left (F3 20261003-133024, "the watch shrinks down instead of being
+ * to the left of the screen").
  */
 static void watchWristMatrix(Mtxf *out)
 {
 	struct player *player = g_Vars.currentplayer;
 	const struct coord *look = &player->bond2.unk00;
 	const struct coord *hbo = &player->headbodyoffset;
-	const struct coord *pos = &player->bond2.unk10;
+	const struct coord *pos = player->prop ? &player->prop->pos : &player->bond2.unk10;
 	struct coord wrist;
 
 	wrist.x = look->x * (hbo->z - 12.0f) + pos->x + hbo->x * -look->z;
@@ -3164,7 +3241,6 @@ static void watchWristMatrix(Mtxf *out)
 
 	mtx4LoadYRotationWithTranslation(&wrist, (360.0f - player->vv_theta) * (M_PI / 180.0f), out);
 	mtx4MultMtx4InPlace(camGetWorldToScreenMtxf(), out);
-	mtx00015f04(g_Watch.chrscale, out);
 }
 
 /**
@@ -3733,37 +3809,14 @@ static s32 g_WatchHdWeapon;
 static struct watchitem g_WatchGun = { .item = -1, .failed = -1 };
 static struct watchitem g_WatchPad = { .item = -1, .failed = -1 };
 
-/** GoldenEye's ITEM_IDS for one of the remake's guns, -1 for anything else. */
+/**
+ * GoldenEye's ITEM_IDS for one of the remake's guns, -1 for anything else:
+ * the gun set's (geguns.c), which on a ROM hack's stage are the hack's own
+ * item numbers - Goldfinger 64's AK47 is its item 9, Igx009Z beside its
+ * geitems.bin row 9.
+ */
 static s32 watchGunItem(s32 weaponnum)
 {
-	static const s8 items[NUM_GE_WEAPONS] = {
-		[WEAPON_GE_PP7 - WEAPON_GE_FIRST] = 4,
-		[WEAPON_GE_PP7SILENCED - WEAPON_GE_FIRST] = 5,
-		[WEAPON_GE_DD44 - WEAPON_GE_FIRST] = 6,
-		[WEAPON_GE_KLOBB - WEAPON_GE_FIRST] = 7,
-		[WEAPON_GE_KF7SOVIET - WEAPON_GE_FIRST] = 8,
-		[WEAPON_GE_ZMG - WEAPON_GE_FIRST] = 9,
-		[WEAPON_GE_D5K - WEAPON_GE_FIRST] = 10,
-		[WEAPON_GE_D5KSILENCED - WEAPON_GE_FIRST] = 11,
-		[WEAPON_GE_PHANTOM - WEAPON_GE_FIRST] = 12,
-		[WEAPON_GE_AR33 - WEAPON_GE_FIRST] = 13,
-		[WEAPON_GE_RCP90 - WEAPON_GE_FIRST] = 14,
-		[WEAPON_GE_SHOTGUN - WEAPON_GE_FIRST] = 15,
-		[WEAPON_GE_AUTOSHOTGUN - WEAPON_GE_FIRST] = 16,
-		[WEAPON_GE_SNIPERRIFLE - WEAPON_GE_FIRST] = 17,
-		[WEAPON_GE_COUGARMAGNUM - WEAPON_GE_FIRST] = 18,
-		[WEAPON_GE_GOLDENGUN - WEAPON_GE_FIRST] = 19,
-		[WEAPON_GE_MOONRAKER - WEAPON_GE_FIRST] = 22,
-		[WEAPON_GE_GRENADELAUNCHER - WEAPON_GE_FIRST] = 24,
-		[WEAPON_GE_ROCKETLAUNCHER - WEAPON_GE_FIRST] = 25,
-		[WEAPON_GE_HUNTINGKNIFE - WEAPON_GE_FIRST] = 2,
-		[WEAPON_GE_THROWINGKNIFE - WEAPON_GE_FIRST] = 3,
-		[WEAPON_GE_GRENADE - WEAPON_GE_FIRST] = 26,
-		[WEAPON_GE_TIMEDMINE - WEAPON_GE_FIRST] = 27,
-		[WEAPON_GE_PROXIMITYMINE - WEAPON_GE_FIRST] = 28,
-		[WEAPON_GE_REMOTEMINE - WEAPON_GE_FIRST] = 29,
-	};
-
 	if (weaponnum < WEAPON_GE_FIRST || weaponnum >= NUM_WEAPONS) {
 		return -1;
 	}
@@ -3775,7 +3828,14 @@ static s32 watchGunItem(s32 weaponnum)
 		return gegadgetsItem(weaponnum) > 0 ? gegadgetsItem(weaponnum) : -1;
 	}
 
-	return items[weaponnum - WEAPON_GE_FIRST];
+	// and the Moonraker's number on Train is GoldenEye's watch laser, which
+	// the face shows as GoldenEye does (watchDrawGun()): not the Moonraker,
+	// which the face drew in its place (F3 20260929-221051)
+	if (gegadgetsWatchLaserActive(weaponnum)) {
+		return GEITEM_WATCHLASER;
+	}
+
+	return gegunsItemNumber(weaponnum - WEAPON_GE_FIRST);
 }
 
 static f32 watchGunFloat(s32 item, s32 offset)
@@ -3905,11 +3965,37 @@ static s32 watchGunLoad(s32 item)
 	return watchGunLoadKey(item);
 }
 
-static s32 watchGunLoadKey(s32 key)
+static void watchOwnBoxesForget(void);
+
+/** The conversion's gitem_struct rows, for the stage's own conversion. */
+static void watchGunItemsEnsure(void)
 {
+	static s32 itemsmoddir = -1;
+
+	// The rows are the conversion's, and a ROM hack's are its own: Goldfinger
+	// 64's M1 Garand (its item 19) is 1950 from the camera where GoldenEye's
+	// item 19 is 629. Kept from the first stage of a session, a hack's guns
+	// were placed by GoldenEye's rows after any GE Plus stage - the Garand
+	// across the whole face and off its side (F3 20261003-103819) - and
+	// GoldenEye's by the hack's after one of its stages
+	if (g_WatchGun.items && itemsmoddir != g_Watch.moddir) {
+		sysMemFree(g_WatchGun.items);
+		g_WatchGun.items = NULL;
+		g_WatchGun.itemslen = 0;
+		watchItemUnload(&g_WatchGun);
+		watchItemUnload(&g_WatchPad);
+		watchOwnBoxesForget();
+	}
+
 	if (!g_WatchGun.items) {
 		g_WatchGun.items = watchLoad("geitems.bin", &g_WatchGun.itemslen);
+		itemsmoddir = g_Watch.moddir;
 	}
+}
+
+static s32 watchGunLoadKey(s32 key)
+{
+	watchGunItemsEnsure();
 
 	if (!g_WatchGun.items || g_WatchGun.itemslen < GUN_ITEM_ROW * GUN_NUM_ITEMS) {
 		return 0;
@@ -4110,6 +4196,7 @@ static Gfx *watchRenderGun(Gfx *gdl, Mtxf *base, u32 envcolour)
 #define PDGUN_SPAN_STILL   0.46f
 
 static s32 watchPdGunBox(s32 weaponnum, f32 *lo, f32 *hi);
+static void watchGunNoFlash(s32 weaponnum);
 
 static Gfx *watchDrawPdGun(Gfx *gdl, s32 weaponnum, s32 turning)
 {
@@ -4136,6 +4223,9 @@ static Gfx *watchDrawPdGun(Gfx *gdl, s32 weaponnum, s32 turning)
 			}
 		}
 	}
+
+	// a menu's pieces can leave a flash shown, and the face never fires
+	watchGunNoFlash(weaponnum);
 
 	if (!watchPdGunBox(weaponnum, lo, hi)) {
 		return gdl;
@@ -4205,6 +4295,44 @@ static void watchGunParts(s32 item)
 	watchGunSetPart(1, 0);
 }
 
+/**
+ * Nothing on the face is ever firing, and no hand holds it: GoldenEye's own
+ * watch draws every item with its flash and its hand put away. Whatever model
+ * the slot has, its flash switches are turned off before it is drawn:
+ *
+ * - GoldenEye's own model (the N64 look, and since the release's guns moved
+ *   onto GoldenEye's models the HD look too, gebean.c's fpOnOwn) has one flash
+ *   switch, part 1, over the flash's lists and its stars, and Bond's hand and
+ *   cuff as parts 8-13 and 35 (geguns.c's gegunsOwnModelMenuParts(), the same
+ *   switches Perfect Dark's inventory sets). The HD face only turned off a
+ *   host's three flash parts, which on GoldenEye's model name nothing, so the
+ *   PP7, the ZMG, the D5K, the Uzi-like doubled quads, the grenade launcher
+ *   and the Moonraker's star all showed their flash on the face (F3
+ *   20260929-210248, 215125, 220248, 222718, 223229, 223841, 20260930-012405,
+ *   041614).
+ * - A Perfect Dark host (the release's gun on its host, or one of Perfect
+ *   Dark's own guns) has MODELPART_GUN_MUZZLEFLASH1-3, toggles that start out
+ *   shown (F3 20260927-233302, the AR33).
+ */
+static void watchGunNoFlash(s32 weaponnum)
+{
+	if (weaponnum >= WEAPON_GE_FIRST && gegunsOwnModelInUse(weaponnum)) {
+		gegunsOwnModelMenuParts(weaponnum, &g_WatchGun.model);
+
+		// the DD44's part 11 is the bore at the end of its slide, not a hand
+		// (watchGunParts())
+		if (weaponnum == WEAPON_GE_DD44) {
+			watchGunSetPart(11, 1);
+		}
+
+		return;
+	}
+
+	watchGunSetPart(MODELPART_GUN_MUZZLEFLASH1, 0);
+	watchGunSetPart(MODELPART_GUN_MUZZLEFLASH2, 0);
+	watchGunSetPart(MODELPART_GUN_MUZZLEFLASH3, 0);
+}
+
 struct watchbox {
 	s32 set;
 	f32 lo[3];
@@ -4213,6 +4341,12 @@ struct watchbox {
 
 // GoldenEye's own model's box for each item, as the face shows it
 static struct watchbox g_WatchOwnBox[GUN_NUM_ITEMS];
+
+// measured on one conversion's models, by its item numbers
+static void watchOwnBoxesForget(void)
+{
+	memset(g_WatchOwnBox, 0, sizeof(g_WatchOwnBox));
+}
 
 static void watchBoxWalk(struct modelnode *node, Mtxf *matrices, s32 nummatrices, struct watchbox *box)
 {
@@ -4484,6 +4618,11 @@ static Gfx *watchDrawGun(Gfx *gdl, s32 weaponnum, s32 turning)
 	s32 ownitem;
 	u16 hdfile;
 
+	// nor drawn as Perfect Dark's key card
+	if (gegadgetsIsCollectable(weaponnum)) {
+		return gdl;
+	}
+
 	if (item < 0) {
 		return watchDrawPdGun(gdl, weaponnum, turning);
 	}
@@ -4609,13 +4748,7 @@ static Gfx *watchDrawGun(Gfx *gdl, s32 weaponnum, s32 turning)
 	if (hdfile) {
 		mtx4MultMtx4(&base, &toown, &tmp);
 
-		// The release's gun rides its host's model, whose muzzle flashes are
-		// toggles left to flash (gebean.c) and which start out shown: the
-		// face showed the AR33 firing (F3 20260927-233302). GoldenEye's gun
-		// on the face has no flash (watchGunParts(), part 1)
-		watchGunSetPart(MODELPART_GUN_MUZZLEFLASH1, 0);
-		watchGunSetPart(MODELPART_GUN_MUZZLEFLASH2, 0);
-		watchGunSetPart(MODELPART_GUN_MUZZLEFLASH3, 0);
+		watchGunNoFlash(weaponnum);
 
 		g_WatchHdWeapon = weaponnum;
 		gdl = watchRenderGun(gdl, &tmp, turning ? 0xa0ffa03c : 0x64dc6428);
@@ -4684,8 +4817,8 @@ static const f32 g_PadButtonPos[13][3] = {
 static void watchPadStickLean(Mtxf *out)
 {
 	Mtxf rx;
-	f32 x = joyGetStickX(0);
-	f32 y = joyGetStickY(0);
+	f32 x = gexMenuStickX(0);
+	f32 y = gexMenuStickY(0);
 	const f32 ax = fabsf(x);
 	const f32 ay = fabsf(y);
 	const f32 big = ax > ay ? ax : ay;
@@ -4956,12 +5089,12 @@ static Gfx *watchDrawController(Gfx *gdl)
 #define INV_X         0x4e   // the list's left
 #define INV_BASE_Y    0x8c   // the top of its five-line window
 #define INV_ROWS      5
-#define INV_ROWCOLOUR 0x00aa00b0
-#define INV_BARCOLOUR 0x00800050
+#define INV_ROWCOLOUR watchTint(0x00aa00b0)
+#define INV_BARCOLOUR watchTint(0x00800050)
 
 // the rest of GoldenEye's colours for the screens
-#define COL_OUTLINE   0x007000a0 // textRenderOutlined()'s, round white
-#define COL_LIST      0x00aa00b0 // a list and the controller's words
+#define COL_OUTLINE   watchTint(0x007000a0) // textRenderOutlined()'s, round white
+#define COL_LIST      watchTint(0x00aa00b0) // a list and the controller's words
 
 /**
  * GoldenEye's 320x240 frame over the player's view (GE_VIEW_TOP): the screens'
@@ -5069,6 +5202,10 @@ static const char *watchGunText(s32 item, s32 offset)
 	static s32 moddir = -2;
 	u32 id;
 
+	if (item >= 0) {
+		watchGunItemsEnsure();
+	}
+
 	if (item < 0 || !g_WatchGun.items || g_WatchGun.itemslen < GUN_ITEM_ROW * GUN_NUM_ITEMS) {
 		return NULL;
 	}
@@ -5110,7 +5247,7 @@ static Gfx *watchDrawMissionPage(Gfx *gdl)
 		colour = COL_GREEN;
 	} else {
 		status = watchString(STR_INCOMPLETE);
-		colour = g_Watch.statuspulse;
+		colour = watchTint(g_Watch.statuspulse);
 	}
 
 	// GoldenEye moves on by the width of the first string and back up by its
@@ -5655,7 +5792,9 @@ static Gfx *watchDrawBriefingPage(Gfx *gdl)
 				break;
 			default:
 				state = watchString(STR_INCOMPLETE);
-				colour = (g_Watch.objpulse << 16) | 0x400040ff;
+				// Goldfinger 64's red here is 0, not its green (7F0AC79C):
+				// the one colour of its watch it did not turn yellow
+				colour = (g_Watch.objpulse << 16) | (g_Watch.tint == 1 ? 0x000040ff : 0x400040ff);
 				break;
 			}
 
@@ -5715,8 +5854,10 @@ Gfx *geWatchRender(Gfx *gdl)
 		return gdl;
 	}
 
-	// the arm is not in the view until it starts coming up
-	if (g_Watch.state < WS_RAISE) {
+	// the arm is not in the view until it starts coming up, and is gone once
+	// it is down: GoldenEye's WATCH_ANIMATION_0x8 clears pausing_flag, and
+	// bondviewRenderWatch() draws nothing while the view tilts back
+	if (g_Watch.state < WS_RAISE || g_Watch.state == WS_RESTORE) {
 		return gdl;
 	}
 
@@ -5813,7 +5954,7 @@ static void watchMpTick(void)
 {
 	const s32 num = g_Vars.currentplayernum;
 	const s32 pad = optionsGetContpadNum1(g_Vars.currentplayerstats->mpindex);
-	const s32 stickx = joyGetStickX(pad);
+	const s32 stickx = gexMenuStickX(pad);
 	const s32 left = joyGetButtonsPressedThisFrame(pad, L_JPAD | L_CBUTTONS | L_TRIG) != 0
 		|| (stickx < -0x2d && !g_MpWatch[num].sticky);
 	const s32 right = joyGetButtonsPressedThisFrame(pad, R_JPAD | R_CBUTTONS | R_TRIG) != 0

@@ -1,70 +1,92 @@
-# Dab's Mod v3.11.0: ragdolls, dismemberment and aiming crosshair (revision 2)
+# Dab's Mod + Chesluk Physics — Yedgar Repack
 
-Unofficial Windows 64-bit integration. Dab's Mod v3.11.0 is the base.
-Ragdolls and dismemberment are ON by default. Original authors' credits and
-licences are retained; see CREDITS.md, LICENSE and JOLT-LICENSE.txt.
-OpenAI Codex made the integration and these fixes with AI assistance.
-CE's README separately discloses Claude Opus 5.5 and Fable 5.1 assistance.
+Unofficial integration for Jon / yedgar93. Windows 64-bit, revision 4.
+Base: DabDavis's official Dab's Mod v3.14.0 release, commit
+90c8622e74b35be669d60d177effc6d7d2d7621c.
 
-## Installing the update
+Chesluk-Industries's CE supplies ragdolls, dismemberment and body dragging.
+Jon / yedgar93 requested and directed the integration and provides gameplay
+testing. OpenAI Codex performed integration and compatibility work with AI
+assistance. All original authors retain credit; see CREDITS.md and licences.
+This is an unofficial derivative, without a claim of upstream endorsement.
 
-Close the old game. Unpack the ZIP, then copy pd.x86_64.exe and its two DLLs
-into a COPY of the folder you already play from. Keep your data, saves,
-pd.ini, mods, cache, added-content and packs. Those are not in the ZIP.
-This is an engine change; it cannot be loaded through Load Mods.
+## Install into your existing game
 
-If starting from a new folder, copy your own pd.ntsc-final.z64 into data.
-START.cmd can copy it from the standard existing Dab's download folder.
-No ROM or other game assets are downloaded by the launcher.
+Close the game. Extract this ZIP and copy these three files into the folder
+containing the executable you normally launch, replacing its existing copies:
 
-## Options
+- pd.x86_64.exe
+- SDL2.dll
+- zlib1.dll
 
-- Options > Extended Options > Ragdolls & Dismemberment: both switches.
-- Options > Extended Options > Game > Player 1 (or your chosen player):
-  Crosshair Only While Aiming. Enable it to hide the hip-fire crosshair.
-  It defaults to OFF and saves independently for each player as
-  Game.PlayerN.CrosshairOnlyWhileAiming. Target tracking still updates.
-- Further ragdoll settings save under [Ragdoll] in pd.ini.
-  Strong hits/explosions can sever limbs; the default chance is 40%.
+Keep your existing data, added-content, mods, model-packs, texture-packs,
+cache, pd.ini and saves. The ZIP contains no ROMs, game assets or saves.
+Keep the included credits and licences alongside the executable.
+This is an engine add-on. Dab's Load Mods page cannot load engine code.
+It can be removed by restoring the official executable. The ordinary
+in-game updater can also replace this custom executable with an official one.
 
-## Revision 2 fixes
+## Body dragging
 
-- Converted stages above the title/menu ID range now advance physics using
-  Dab's existing STAGE_IS_LEVEL check. Previously the death hook stopped the
-  animation but the physics loop skipped these stages, freezing the body.
-- Normal enemy firing is retained via the original func0f041a74 call.
-  The early work/playtest executable omitted it; that is an obsolete build.
-- The requested optional crosshair setting also covers GoldenEye's sight.
+Options > Extended Options > Ragdolls & Dismemberment:
 
-Only physics/dismemberment and their required hooks, plus the explicitly
-requested crosshair option, are changed. CE's unrelated port fixes, audio,
-player collision, new cheat, grabbing controls, guard investigation and death
-camera are excluded. A normal official update can replace this custom exe.
+- Ragdolls and Dismemberment are enabled by default.
+- Enable Body Dragging (Hold Use); it starts off by default.
+- Drag Strength controls the pulling force (default 1.20x).
 
-## Validation and limits
+Look at a nearby corpse and hold your configured Use button (E by default
+on keyboard; controller binding depends on your control layout). Walk back
+or move the view to pull it. Release Use to drop it. This uses CE's original
+physics pulling code and works in solo/co-op; Combat Simulator dragging is
+disabled as in CE. Characters and detached pieces remain physics driven.
+Normal doors and switches take priority over acquiring a body. The acquired
+drag consumes that Use press, including release, to prevent incidental
+reload/activation or classic-control weapon-function changes.
 
-Revision 2 compiled and linked with OpenGL and Vulkan enabled. Jolt's
-self-test and original ntsc-final ROM startup passed. A local converted
-GoldenEye Runway stage (ID 0x5e) loaded collision and exited normally.
-A debugger-created GoldenEye guard ragdoll advanced for 30 frames: its
-pelvis moved from y=-113.75 to y=-173.65, demonstrating that the converted
-stage now steps physics. This is a focused movement check, not exhaustive
-gameplay validation. The actual sight-rendering functions were also checked:
-with the option enabled, hip-fire produced no sight commands; aiming did.
+Only body dragging is enabled here; CE's object-grab acquisition is excluded.
+The source retains inert optional CE helpers. Player collision, death camera,
+body investigation, held-body shields, CE's unrelated audio/port fixes and
+new cheat are not enabled. Dab's crosshair controls and player-config layout
+remain those of v3.14.0, with no added aiming-only crosshair option.
 
-The user reported frozen corpses and non-firing guards in the obsolete early
-test build. The revised stage check and restored firing call address those
-identified defects. Full GoldenEye/XBLA/model-pack gameplay and replacement
-mesh dismemberment still need testing. These remain unofficial builds.
+## Build and checks
 
-Up to 256 ragdoll records are tracked; physics resource exhaustion falls back
-to the existing death system. Dab's body settings are retained, and simulant
-corpse ownership transfers its physics pose. Physics random choices use a
-separate random stream.
+Built from the exact v3.14.0 release tag with the integration applied, using
+GCC 16.2, CMake, Jolt v5.6.0 and the stable update channel. OpenGL and Vulkan
+are enabled. The build compiled and linked successfully.
 
-## Building
+The original ntsc-final ROM started and exited normally at a specified frame,
+and Jolt's self-test passed. On converted GoldenEye Runway (stage 0x5e), a
+debugger-created guard ragdoll moved over 30 frames, from pelvis y=-109.50
+to y=-164.57. This confirms that the converted-stage physics loop advances.
 
-Use Dab's existing MSYS2 MINGW64 instructions with CMake 3.20+ and the Unix
-Makefiles generator. Jolt v5.6.0 is fetched automatically, or supply JOLT_DIR.
-PD_PHYSICS=OFF excludes physics. No game files are included in the GitHub
-source branch or source archive; the playable binary ZIP has no ROM or saves.
+A focused debugger check acquired a body, issued 27 calls to the CE pulling
+function, consumed Use, released the body and respected the off switch.
+The normal-interaction priority guard was exercised with an injected target.
+That check does not establish ordinary-play dragging quality or real door
+operation. Its short lift observation did not raise the pelvis; it is not
+treated as proof of successful body movement under dragging. Gameplay testing
+is left to Jon at his request; no further game runs are being performed.
+
+Original v3.14.0 sight.c and types.h are unchanged. Normal enemy firing retains
+the original func0f041a74 call. This supersedes the old v3.11.0 test packages.
+
+Please test pickup, dragging while moving, release and strength; normal door
+and switch use; absence of incidental reload/weapon-mode changes; live guards
+shooting; and dead guards falling. Test original PD and GoldenEye/XBLA content.
+Replacement meshes and dismemberment seams need their own gameplay checks.
+The focus checks do not establish compatibility with every mission or pack.
+
+Up to 256 ragdoll records are tracked. Resource exhaustion falls back to the
+existing death system. Dab's retained-body handoff is adapted to keep physics
+ownership, and its pose cache yields to ragdolls. Physics randomness uses a
+separate stream from gameplay randomness.
+
+## Source and rebuilding
+
+Only source-code and credit/documentation changes are published to GitHub.
+No ROMs, executables, saves, textures, sound files or XBLA packages are uploaded.
+The accompanying source patch is applied to the official v3.14.0 checkout
+with git apply --index. Build using Dab's MSYS2 MINGW64 instructions, CMake
+3.20+ and Jolt v5.6.0. Jolt is fetched automatically, or set JOLT_DIR to a
+local checkout. Pass UPDATE_CHANNEL=stable. PD_PHYSICS=OFF omits physics.

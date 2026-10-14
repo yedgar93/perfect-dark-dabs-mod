@@ -16,10 +16,14 @@
 #include "system.h"
 #include "lib/model.h"
 #include "lib/mtx.h"
+#include "game/camera.h"
+#include "game/gfxmemory.h"
 #include "lib/rng.h"
 #include "geguns.h"
+#include "gebean.h"
 #include "geslappers.h"
 #include "modloader.h"
+#include "mod.h"
 #include "langpack.h"
 
 #ifndef PLATFORM_N64
@@ -50,9 +54,10 @@
 
 _Static_assert(MODEL_GE_FIRST + NUM_GE_WEAPONS <= MODEL_REMAKE_FIRST,
 		"a model state per GoldenEye gun, before the remake's models");
-_Static_assert(NUM_MPWEAPONS - MPWEAPON_GE_FIRST == NUM_GE_GUNS,
-		"a Combat Simulator row per GoldenEye gun");
-_Static_assert(NUM_WEAPONS <= 0x80, "gunctrl.weaponnum is an s8");
+_Static_assert(MPWEAPON_GE_EXTRA1 - MPWEAPON_GE_FIRST == NUM_GE_GUNS
+		&& NUM_MPWEAPONS - MPWEAPON_GE_EXTRA1 == NUM_GE_EXTRA,
+		"a Combat Simulator row per GoldenEye gun, and per hack's own pistol");
+_Static_assert(NUM_WEAPONS <= WEAPON_MPLOCATION00, "a weapon number below the pads' (gunctrl's are s16)");
 
 static const char *const names[NUM_GE_WEAPONS] = {
 	[WEAPON_GE_PP7             - WEAPON_GE_FIRST] = LANG_N("PP7\n"),
@@ -89,6 +94,11 @@ static const char *const names[NUM_GE_WEAPONS] = {
 	[WEAPON_GE_GADGETB         - WEAPON_GE_FIRST] = LANG_N("Gadget\n"),
 	[WEAPON_GE_TANKSHELLS      - WEAPON_GE_FIRST] = LANG_N("Tank\n"),
 	[WEAPON_GE_DETONATOR       - WEAPON_GE_FIRST] = LANG_N("Detonator\n"),
+	// a ROM hack's own pistols, named by its gun set (gegunsStageSet())
+	[WEAPON_GE_EXTRA1          - WEAPON_GE_FIRST] = LANG_N("Pistol\n"),
+	[WEAPON_GE_EXTRA2          - WEAPON_GE_FIRST] = LANG_N("Pistol\n"),
+	[WEAPON_GE_EXTRA3          - WEAPON_GE_FIRST] = LANG_N("Pistol\n"),
+	[WEAPON_GE_EXTRA4          - WEAPON_GE_FIRST] = LANG_N("Pistol\n"),
 };
 
 /**
@@ -153,10 +163,14 @@ struct gegunstat {
 		{ speed0, speed1, speed2, speed3 }, back, up, bolt, sway, zoom, muzzle, ammotype, bitflags }
 
 // GoldenEye's WEAPONSTATBITFLAG_* bits a definition is built from (bondconstants.h)
+#define GESTATFLAG_ROLL_FLASH             0x00000001 // WEAPONSTATBITFLAG_00000001 (gunfire.c)
 #define GESTATFLAG_HAS_AUTO_AIM           0x00000008
+#define GESTATFLAG_CLICKY                 0x00000010
+#define GESTATFLAG_HIDE_FIRST_PERSON_HAND 0x00002000
 #define GESTATFLAG_ONLY_1_HANDED          0x00000100
 #define GESTATFLAG_HIDE_FIRST_PERSON_MENU 0x00004000
 #define GESTATFLAG_USE_HOLD_TIME          0x00020000
+#define GESTATFLAG_CAN_DUAL_WIELD         0x00100000
 
 /**
  * What each gun sounds like: the Sound field of the same gunWeaponStat rows,
@@ -172,7 +186,7 @@ struct gegunstat {
 // GoldenEye's melee reach (chrprop.c): 50 in front of the camera
 #define GE_MELEE_REACH 50
 
-static const u8 shootsounds[NUM_GE_WEAPONS] = {
+static const u8 geShootSounds[NUM_GE_WEAPONS] = {
 	[WEAPON_GE_PP7 - WEAPON_GE_FIRST]             = 107, // GUN_B2_HEAVY
 	[WEAPON_GE_PP7SILENCED - WEAPON_GE_FIRST]     = 46,  // GUN_SILPPK_A
 	[WEAPON_GE_DD44 - WEAPON_GE_FIRST]            = 112, // GUN_B8_ANOTHER
@@ -193,6 +207,9 @@ static const u8 shootsounds[NUM_GE_WEAPONS] = {
 	[WEAPON_GE_GRENADELAUNCHER - WEAPON_GE_FIRST] = 12,  // GUN_TANK2BIGBIG_1
 };
 
+// the gun set's (gegunsStageSet()): GoldenEye's, or a ROM hack's own
+static const u8 *shootsounds = geShootSounds;
+
 /**
  * And how often: the same rows' SoundTriggerRate (the US ROM's, its BUGFIX_R0
  * set; Europe's are a tick shorter). Where it is not 0, a held trigger starts
@@ -203,7 +220,7 @@ static const u8 shootsounds[NUM_GE_WEAPONS] = {
  * chrUpdateFireslot() are gunTickHandState() and sub_GAME_7F02BFE4() line for
  * line) under the name of a fire slot's duration, so this is that number.
  */
-static const u8 shootsoundrates[NUM_GE_WEAPONS] = {
+static const u8 geShootSoundRates[NUM_GE_WEAPONS] = {
 	[WEAPON_GE_KLOBB - WEAPON_GE_FIRST]       = 11,
 	[WEAPON_GE_KF7SOVIET - WEAPON_GE_FIRST]   = 4,
 	[WEAPON_GE_ZMG - WEAPON_GE_FIRST]         = 4,
@@ -214,17 +231,21 @@ static const u8 shootsoundrates[NUM_GE_WEAPONS] = {
 	[WEAPON_GE_RCP90 - WEAPON_GE_FIRST]       = 2,
 };
 
+static const u8 *shootsoundrates = geShootSoundRates;
+
 /**
  * How GoldenEye words each gun's name when it is picked up: "an AR33 Assault
  * Rifle", "the Golden Gun". A copy took its host's, which gave the covert modem,
  * the plastique and the GoldenEye key the ECM mine's "an".
  */
-static const u32 determiners[NUM_GE_WEAPONS] = {
+static const u32 geDeterminers[NUM_GE_WEAPONS] = {
 	[WEAPON_GE_AR33 - WEAPON_GE_FIRST]        = WEAPONFLAG_DETERMINER_S_AN | WEAPONFLAG_DETERMINER_F_AN,
 	[WEAPON_GE_RCP90 - WEAPON_GE_FIRST]       = WEAPONFLAG_DETERMINER_S_AN | WEAPONFLAG_DETERMINER_F_AN,
 	[WEAPON_GE_AUTOSHOTGUN - WEAPON_GE_FIRST] = WEAPONFLAG_DETERMINER_S_AN | WEAPONFLAG_DETERMINER_F_AN,
 	[WEAPON_GE_GOLDENGUN - WEAPON_GE_FIRST]   = WEAPONFLAG_DETERMINER_S_THE | WEAPONFLAG_DETERMINER_F_THE,
 };
+
+static const u32 *determiners = geDeterminers;
 
 /**
  * What each makes a pickup sound like: GoldenEye's
@@ -313,9 +334,11 @@ s32 gegunsShootSound(s32 weaponnum)
 	return shootsounds[weaponnum - WEAPON_GE_FIRST];
 }
 
-static const struct gegunstat stats[NUM_GE_WEAPONS] = {
+static const struct gegunstat geStats[NUM_GE_WEAPONS] = {
 #include "gegunstats.h"
 };
+
+static const struct gegunstat *stats = geStats;
 
 #undef GUNSTAT
 
@@ -389,7 +412,8 @@ static u32 gegunsFuncSize(s32 type)
  * gegunsDump() writes all of it out, and a change to this is checked by the
  * difference between two dumps.
  */
-static u16 nameids[NUM_GE_WEAPONS];
+static u16 geNameIds[NUM_GE_WEAPONS];
+static u16 *nameids = geNameIds;
 
 static struct noisesettings *gegunsNoise(s32 i)
 {
@@ -440,6 +464,9 @@ static struct noisesettings *gegunsNoise(s32 i)
  * sniper rifle at 16 for 20 - and the watch laser at every tick for 4. Ticks,
  * not frames, so a faster frame rate does not change it.
  */
+#ifndef GEGUNS_AR33_ADS_LIFT
+#define GEGUNS_AR33_ADS_LIFT -1.0f
+#endif
 #define GEGUNS_GE_FRAME_TICKS    2
 #define GEGUNS_PD_SHOT_OVERHEAD  1
 
@@ -460,6 +487,81 @@ s32 gegunsTriggerDelay60(s32 weaponnum)
 	return 0;
 }
 
+/**
+ * How often one of GoldenEye's guns clicks held empty, in sixtieths: its
+ * DRY_FIRE state runs 20 (gunfire.c's WHEN_D_FLD890) from the click, IDLE
+ * takes a frame and TRIGGER_PRESS, after the Cougar's and the grenade
+ * launcher's wait, clicks again. The cartridge: 22 on most, 30 on the Cougar.
+ * 0 for a gun that is not GoldenEye's or has no magazine to run dry.
+ */
+s32 gegunsDryFireInterval60(s32 weaponnum)
+{
+	if (gegunsClicksEmpty(weaponnum) <= 0) {
+		return 0;
+	}
+
+	return 20 + GEGUNS_GE_FRAME_TICKS + gegunsTriggerDelay60(weaponnum);
+}
+
+/**
+ * Whether one of GoldenEye's guns clicks when its trigger is held empty: 1,
+ * or 0 for one that reloads instead - the grenade, the mines, the throwing
+ * knife, whose rows lack WEAPONSTATBITFLAG_CLICKY, go from an empty hand to
+ * RELOAD_START with the trigger still held (gunfire.c), where Perfect Dark
+ * dry-fires them until it lets go. -1 for a weapon that is not GoldenEye's.
+ */
+s32 gegunsClicksEmpty(s32 weaponnum)
+{
+	if (!GE_GUN_INDEX(weaponnum - WEAPON_GE_FIRST) || stats[weaponnum - WEAPON_GE_FIRST].bitflags == 0) {
+		return -1;
+	}
+
+	return (stats[weaponnum - WEAPON_GE_FIRST].bitflags & GESTATFLAG_CLICKY) != 0;
+}
+
+/**
+ * GoldenEye's grenade and mines: held and thrown by GoldenEye's rule rather
+ * than their hosts' (bondgun.c's bgunTickIncAttackingGeThrow()).
+ */
+s32 gegunsThrowsAsGoldenEye(s32 weaponnum)
+{
+	switch (weaponnum) {
+	case WEAPON_GE_GRENADE:
+	case WEAPON_GE_TIMEDMINE:
+	case WEAPON_GE_PROXIMITYMINE:
+	case WEAPON_GE_REMOTEMINE:
+		return 1;
+	}
+
+	return 0;
+}
+
+/**
+ * GoldenEye's three mines, which stick where they first land (propobj.c's
+ * thrown weapon tick: embedded on contact, ATTACH_MINE_SFX).
+ */
+s32 gegunsMineAttaches(s32 weaponnum)
+{
+	return weaponnum == WEAPON_GE_TIMEDMINE || weaponnum == WEAPON_GE_PROXIMITYMINE
+		|| weaponnum == WEAPON_GE_REMOTEMINE;
+}
+
+/**
+ * Whether GoldenEye draws nothing of this in the hand
+ * (WEAPONSTATBITFLAG_HIDE_FIRST_PERSON_HAND: the grenade, the mines), so that
+ * its reload neither lowers nor raises anything: RELOAD_LOWER ends at once and
+ * RELOAD_RAISE goes straight to idle (gunfire.c), 17 ticks of RELOAD_SWAP
+ * between the throw's recovery and the next one ready.
+ */
+s32 gegunsHidesHand(s32 weaponnum)
+{
+	if (!GE_GUN_INDEX(weaponnum - WEAPON_GE_FIRST)) {
+		return 0;
+	}
+
+	return (stats[weaponnum - WEAPON_GE_FIRST].bitflags & GESTATFLAG_HIDE_FIRST_PERSON_HAND) != 0;
+}
+
 static s32 gegunsGeSingleWait(s32 weaponnum, const struct gegunstat *stat)
 {
 	s32 speeds = stat->recoilspeed[0] + stat->recoilspeed[1];
@@ -476,6 +578,64 @@ static s32 gegunsGeSingleWait(s32 weaponnum, const struct gegunstat *stat)
 	}
 
 	return frames * GEGUNS_GE_FRAME_TICKS;
+}
+
+/**
+ * How much more (or less) than the 3.5 every gun is raised by a GoldenEye gun
+ * comes up to the eye under COD Style Aiming. The AR33's carry handle stands
+ * over its bore as a solid block with no aperture through it, in GoldenEye's
+ * own model and the release's alike, and raised as far as the rest the eye
+ * sat behind its rear end: the handle filled the middle of the view under the
+ * crosshair and hid the front sight and what it was on (F3 20260930-032244,
+ * "ads doesn't actually look down its iron sights, they're obscured by the
+ * top rail"). Held lower, the sight line passes over the handle.
+ */
+f32 gegunsCodAimLift(s32 weaponnum)
+{
+	if (weaponnum == WEAPON_GE_AR33) {
+		return GEGUNS_AR33_ADS_LIFT;
+	}
+
+	return 0.0f;
+}
+
+/**
+ * How long after a single shot GoldenEye's gun is ready again when the trigger
+ * has been let go since, as bgun0f09aba4() counts it (ticks since the shot), or
+ * -1 where Perfect Dark's own rule stands (not a GoldenEye gun, or an automatic).
+ *
+ * gunTickHandState() goes back to IDLE from RECOIL1 once field_890 reaches the
+ * two recoil speeds plus SingleRate - unless the trigger was released since
+ * the shot (field_888), when the two speeds are enough. So a tapped Cougar
+ * fires every 34 ticks and a held one every 54: at GoldenEye's two sixtieths a
+ * frame it is 2 * ceil(speeds / 2) + 4, and the Cougar and the grenade
+ * launcher still wait their 6 in TRIGGER_PRESS, which the next shot here waits
+ * itself (gegunsTriggerDelay60()). Perfect Dark lets a released trigger cut
+ * the recovery short only where the fourth recoil speed is not negative, and
+ * only once the trigger is pressed again: the Cougar's is -1, and a tapped
+ * Cougar fired at its held rate (F3 20260929-212222, "time between shots on
+ * magnum is too slow").
+ */
+s32 gegunsReleasedReady(s32 weaponnum, s32 speeds, s32 hasanim)
+{
+	s32 t;
+
+	if (weaponnum < WEAPON_GE_FIRST || weaponnum >= WEAPON_GE_FIRST + NUM_GE_WEAPONS) {
+		return -1;
+	}
+
+	if (!stats[weaponnum - WEAPON_GE_FIRST].bitflags || stats[weaponnum - WEAPON_GE_FIRST].autorate != 0xff) {
+		return -1;
+	}
+
+	if (speeds < 0) {
+		speeds = 0;
+	}
+
+	t = ((speeds + GEGUNS_GE_FRAME_TICKS - 1) / GEGUNS_GE_FRAME_TICKS + 2) * GEGUNS_GE_FRAME_TICKS
+		- (hasanim && !gegunsTriggerDelay60(weaponnum) ? GEGUNS_PD_SHOT_OVERHEAD : 0);
+
+	return t < speeds ? speeds : t;
 }
 
 static s8 gegunsRecovery(s32 weaponnum, const struct gegunstat *stat, s32 hasanim)
@@ -500,13 +660,24 @@ static struct weaponfunc *gegunsFunc(s32 i, s32 f, const struct weaponfunc *src,
 {
 	const struct gegunstat *stat = &stats[i];
 	const s32 hasrow = stat->bitflags != 0;
-	struct weaponfunc *fn = calloc(1, gegunsFuncSize(src->type));
+	u32 type = src->type;
+	struct weaponfunc *fn;
+
+	// A ROM hack's gun fires as its row says where its host's does not:
+	// Goldfinger 64's Karabiner 98k and M1 Carbine are single shot on the
+	// Phantom's and the RC-P90's automatic hosts. GoldenEye's own guns all
+	// fire as their hosts do.
+	if (hasrow && f == 0 && (type == INVENTORYFUNCTYPE_SHOOT_SINGLE || type == INVENTORYFUNCTYPE_SHOOT_AUTOMATIC)) {
+		type = stat->autorate != 0xff ? INVENTORYFUNCTYPE_SHOOT_AUTOMATIC : INVENTORYFUNCTYPE_SHOOT_SINGLE;
+	}
+
+	fn = calloc(1, gegunsFuncSize(type) > gegunsFuncSize(src->type) ? gegunsFuncSize(type) : gegunsFuncSize(src->type));
 
 	if (!fn) {
 		return (struct weaponfunc *)src;
 	}
 
-	fn->type = src->type;
+	fn->type = type;
 	fn->name = src->name;
 	fn->ammoindex = src->ammoindex;
 	fn->fire_animation = src->fire_animation; // the model's
@@ -558,7 +729,13 @@ static struct weaponfunc *gegunsFunc(s32 i, s32 f, const struct weaponfunc *src,
 			shoot->unk27 = from->unk27;
 		}
 
-		if (src->type == INVENTORYFUNCTYPE_SHOOT_AUTOMATIC) {
+		if (type == INVENTORYFUNCTYPE_SHOOT_AUTOMATIC && src->type != INVENTORYFUNCTYPE_SHOOT_AUTOMATIC) {
+			// an automatic on a single-shot host: no barrel of its own to spin
+			struct weaponfunc_shootauto *autofn = (struct weaponfunc_shootauto *)fn;
+
+			autofn->initialrpm = gegunsRpm(stat->autorate);
+			autofn->maxrpm = autofn->initialrpm;
+		} else if (type == INVENTORYFUNCTYPE_SHOOT_AUTOMATIC) {
 			const struct weaponfunc_shootauto *afrom = (const struct weaponfunc_shootauto *)src;
 			struct weaponfunc_shootauto *autofn = (struct weaponfunc_shootauto *)fn;
 			const f32 rpm = hasrow ? gegunsRpm(stat->autorate) : 0.0f;
@@ -586,7 +763,7 @@ static struct weaponfunc *gegunsFunc(s32 i, s32 f, const struct weaponfunc *src,
 
 		// A gun GoldenEye fires automatically on one Perfect Dark does not, or
 		// the other way round, would fire at the wrong rate or not at all
-		if (hasrow && f == 0 && (stat->autorate != 0xff) != (src->type == INVENTORYFUNCTYPE_SHOOT_AUTOMATIC)) {
+		if (hasrow && f == 0 && (stat->autorate != 0xff) != (fn->type == INVENTORYFUNCTYPE_SHOOT_AUTOMATIC)) {
 			sysLogPrintf(LOG_WARNING, "geguns: weapon %02x is %s in GoldenEye and its function %04x is not",
 					WEAPON_GE_FIRST + i, stat->autorate != 0xff ? "automatic" : "single shot", src->type);
 		}
@@ -859,6 +1036,27 @@ static void gegunsBuild(s32 i, const struct weapon *model, const struct weapon *
 			}
 		}
 	}
+
+	// The gun's Combat Simulator row hands out its ammunition - Start Armed
+	// fills it, a match's crate beside the gun carries it - and the rows
+	// still named the hosts' types: the PP7s' and the DD44's pistol rounds,
+	// where the gun loads GoldenEye's one 9mm pool (geammotypes, the
+	// submachine gun's), so Start Armed gave them nothing to fire (F3
+	// 20261003-003052). The row follows what the gun loads.
+	{
+		s32 row = -1;
+
+		if (i < NUM_GE_GUNS) {
+			row = MPWEAPON_GE_FIRST + i;
+		} else if (i >= WEAPON_GE_EXTRA1 - WEAPON_GE_FIRST && i < NUM_GE_WEAPONS) {
+			row = MPWEAPON_GE_EXTRA1 + i - (WEAPON_GE_EXTRA1 - WEAPON_GE_FIRST);
+		}
+
+		if (row >= 0 && g_MpWeapons[row].weaponnum == WEAPON_GE_FIRST + i
+				&& g_MpWeapons[row].priammotype > 0 && def->ammos[0] && def->ammos[0]->type > 0) {
+			g_MpWeapons[row].priammotype = def->ammos[0]->type;
+		}
+	}
 }
 
 /**
@@ -1044,6 +1242,18 @@ static void gegunsOwnTrigger(s32 i)
 		def->flags2 &= ~WEAPONFLAG2_UNEQUIPPEDRELOAD;
 		def->flags3 &= ~WEAPONFLAG3_REVOLVER;
 	}
+
+	// GoldenEye's automatic shotgun throws no shell: autoshot_stats has no
+	// ejected cartridge (NULL where the Shotgun's row names cartshell), and
+	// on the cartridge no casing lands after its shots. The host's shell
+	// did, with CART_SPENT (FINDINGS row 11)
+	if (weaponnum == WEAPON_GE_AUTOSHOTGUN) {
+		const struct weapon *host = g_Weapons[g_GeWeaponHosts[i]];
+
+		if (def->ammos[0] && def->ammos[0] != host->ammos[0]) {
+			def->ammos[0]->casingeject = (u32)CASING_NONE;
+		}
+	}
 }
 
 /**
@@ -1111,6 +1321,21 @@ static void gegunsOwnThrown(s32 i)
 		def->functions[1] = NULL;
 	}
 
+	// Thrown straight along the aim, 16.7 a tick and 5 up (gun.c's
+	// generate_player_thrown_grenade() and _object()), not on the host's arc
+	// to the point under the crosshair at 21.7, which brought a mine down 12
+	// ticks after the throw where the cartridge's takes 22 (FINDINGS row 10).
+	// The 5 up is bondgun.c's (gegunsThrowsAsGoldenEye())
+	if (weaponnum != WEAPON_GE_DETONATOR) {
+		for (s32 f = 0; f < 2; f++) {
+			struct weaponfunc *func = def->functions[f];
+
+			if (func && (func->type & 0xff) == INVENTORYFUNCTYPE_THROW) {
+				func->flags &= ~FUNCFLAG_CALCULATETRAJECTORY;
+			}
+		}
+	}
+
 	if (weaponnum == WEAPON_GE_DETONATOR) {
 		// Perfect Dark's own detonate (HANDATTACKTYPE_DETONATE, which
 		// playerActivateRemoteMineDetonator() answers), as the one function:
@@ -1140,9 +1365,32 @@ static void gegunsOwnThrown(s32 i)
  * grenade and the mines are not on it: Akimbo pairs them (user's call,
  * 2026-09-26), GoldenEye's own rule never does.
  */
+static s32 gegunsWatchLaserInstalled(void);
+
 s32 gegunsNeverPairs(s32 weaponnum)
 {
-	return weaponnum == WEAPON_GE_DETONATOR;
+	// nor the watch laser on the Moonraker's number (Train), which is the
+	// same two hands at the watch: a pair drew the watch in one hand and the
+	// Moonraker in the other (F3 20260929-220750, "with watch laser no akimbo
+	// allowed, looks too funny")
+	return weaponnum == WEAPON_GE_DETONATOR
+		|| (weaponnum == WEAPON_GE_MOONRAKER && gegunsWatchLaserInstalled());
+}
+
+/**
+ * Whether GoldenEye's All Guns cheat holds this gun as a pair too: its row's
+ * CAN_DUAL_WIELD, which the cheat alone reads (bondinvItemAvailableForHand(),
+ * bondinvChooseCycleForwardWeapon()); never the watch laser nor the detonator.
+ */
+s32 gegunsAllGunsPairs(s32 weaponnum)
+{
+	const s32 i = weaponnum - WEAPON_GE_FIRST;
+
+	if (!GE_GUN_INDEX(i) || gegunsNeverPairs(weaponnum)) {
+		return 0;
+	}
+
+	return (stats[i].bitflags & GESTATFLAG_CAN_DUAL_WIELD) != 0;
 }
 
 /**
@@ -1266,9 +1514,7 @@ s32 gegunsBorrowedPickup(s32 index, u16 *fileid, u16 *scale)
  * row of gitem_structs is at. The gadgets' is the mission's (gegadgets.c) and
  * is not here.
  */
-s32 gegunsItemNumber(s32 index)
-{
-	static const s8 items[NUM_GE_WEAPONS] = {
+static const u8 geItems[NUM_GE_WEAPONS] = {
 		[WEAPON_GE_PP7 - WEAPON_GE_FIRST] = 4,
 		[WEAPON_GE_PP7SILENCED - WEAPON_GE_FIRST] = 5,
 		[WEAPON_GE_DD44 - WEAPON_GE_FIRST] = 6,
@@ -1294,8 +1540,24 @@ s32 gegunsItemNumber(s32 index)
 		[WEAPON_GE_TIMEDMINE - WEAPON_GE_FIRST] = 27,
 		[WEAPON_GE_PROXIMITYMINE - WEAPON_GE_FIRST] = 28,
 		[WEAPON_GE_REMOTEMINE - WEAPON_GE_FIRST] = 29,
-	};
+};
 
+static const u8 *items = geItems;
+
+/*
+ * gunRenderFirstPersonGunModels() (gunfire.c) draws six hand items under its
+ * weapon envmap light and the camera's LookAt - the golden gun (19), the
+ * magnum (18), the knife (2), the throwing knife (3) and the silver and gold
+ * PP7s (20, 21) - and every other gun under what the level loaded last,
+ * bgLevelRender()'s GlobalLight and the same LookAt. A bit an item; a hack's
+ * own six come with its guns (geguns.bin, envmapitems in geconvert.c).
+ */
+#define GEGUNS_ENVMAP_ITEMS ((1u << 19) | (1u << 18) | (1u << 2) | (1u << 3) | (1u << 20) | (1u << 21))
+
+static u32 envitems = GEGUNS_ENVMAP_ITEMS;
+
+s32 gegunsItemNumber(s32 index)
+{
 	return index >= 0 && index < NUM_GE_WEAPONS ? items[index] : 0;
 }
 
@@ -1312,6 +1574,51 @@ s32 gegunsItemWeapon(s32 item)
 	}
 
 	return WEAPON_NONE;
+}
+
+/**
+ * The lights and LookAt one of GoldenEye's guns is drawn under in first
+ * person, as gunRenderFirstPersonGunModels() gives them: the weapon envmap
+ * light for an item on its list (envitems), the level's GlobalLight (bg.c,
+ * what every other gun inherits from bgLevelRender()) otherwise, and the
+ * camera's LookAt either way (camGetLookAt() is GoldenEye's own
+ * guLookAtReflect()). Both in world terms against a modelview that ends at
+ * the camera, as on the cartridge (gun.c builds a model's matrices on
+ * camGetWorldToScreenMtxf()), so a sphere-mapped gun's highlight sweeps as
+ * Bond turns. Perfect Dark set these only for its own WEAPONFLAG_00008000
+ * guns; a GoldenEye gun took whatever the world drew last.
+ */
+Gfx *gegunsLightsAndLookAt(Gfx *gdl, s32 weaponnum)
+{
+	const s32 item = gegunsItemNumber(weaponnum - WEAPON_GE_FIRST);
+	Lights1 *lights = gfxAllocate(sizeof(Lights1));
+
+	// g_WeaponEnvmapLight (gun.c) or GlobalLight (bg.c): grey ambient and a
+	// white light, the two alike but for the light's direction
+	if (item > 0 && item < 32 && (envitems & (1u << item))) {
+		*lights = (Lights1)gdSPDefLights1(0x96, 0x96, 0x96, 0xff, 0xff, 0xff, 0xb2, 0x4d, 0x2e);
+	} else {
+		*lights = (Lights1)gdSPDefLights1(150, 150, 150, 255, 255, 255, 77, 77, 46);
+	}
+
+	gSPSetLights1(gdl++, (*lights));
+	gSPLookAt(gdl++, camGetLookAt());
+
+	return gdl;
+}
+
+/** Weapon `index`'s own name (its text id), the gun set's. */
+u16 gegunsNameId(s32 index)
+{
+	return index >= 0 && index < NUM_GE_WEAPONS ? nameids[index] : 0;
+}
+
+/** A gun's GoldenEye AmmoType, the gun set's (0 none), or -1 for a weapon with no row. */
+s32 gegunsGeAmmoType(s32 weaponnum)
+{
+	const s32 i = weaponnum - WEAPON_GE_FIRST;
+
+	return GE_GUN_INDEX(i) && stats[i].bitflags ? stats[i].ammotype : -1;
 }
 
 f32 gegunsItemDamage(s32 item)
@@ -1342,6 +1649,10 @@ f32 gegunsItemDamage(s32 item)
 static u16 convertedModel[NUM_GE_WEAPONS];
 static s32 convertedSearched = -1;
 static s32 convertedGeneration = -1;
+static s32 convertedSet = -2;
+
+// the mod dir whose gun set is in (gegunsStageSet()), -1 GoldenEye's own
+static s32 g_GunSetDir = -1;
 
 static void gegunsFindConverted(void)
 {
@@ -1350,22 +1661,27 @@ static void gegunsFindConverted(void)
 	s32 found = 0;
 	s32 dir = -1;
 
-	if (convertedSearched == numdirs && convertedGeneration == generation) {
+	if (convertedSearched == numdirs && convertedGeneration == generation && convertedSet == g_GunSetDir) {
 		return;
 	}
 
 	convertedSearched = numdirs;
 	convertedGeneration = generation;
+	convertedSet = g_GunSetDir;
 
 	// the mount's index may have moved too: searched again from nothing
 	memset(convertedModel, 0, sizeof(convertedModel));
 
-	// the PP7 is the conversion's marker: every GoldenEye gun is written with it
+	// the PP7 is the conversion's marker: every GoldenEye gun is written with
+	// it. GoldenEye's own conversion's, never a ROM hack's (Goldfinger 64's
+	// guns are models of its own), wherever the two are mounted - but the
+	// hack's own on a stage of its own, where its gun set is in
 	for (s32 i = 0; i < numdirs && dir < 0; i++) {
 		char path[FS_MAXPATH + 1];
 		const char *at = fsGetModDirAt(i);
 
-		if (!at) {
+		if (!at || (g_GunSetDir >= 0 ? i != g_GunSetDir
+				: (modloaderGexPlusDirIndex() >= 0 && !modloaderDirIndexIsGexPlus(i)))) {
 			continue;
 		}
 
@@ -1380,8 +1696,8 @@ static void gegunsFindConverted(void)
 		return;
 	}
 
-	for (s32 i = 0; i < NUM_GE_GUNS; i++) {
-		const s32 item = gegunsItemNumber(i);
+	for (s32 i = 0; i < NUM_GE_WEAPONS; i++) {
+		const s32 item = GE_GUN_INDEX(i) ? gegunsItemNumber(i) : 0;
 		char name[16];
 		char path[FS_MAXPATH + 1];
 
@@ -1404,7 +1720,8 @@ static void gegunsFindConverted(void)
 	}
 
 	if (found) {
-		sysLogPrintf(LOG_NOTE, "geguns: %d of GoldenEye's own first-person guns, converted from the ROM", found);
+		sysLogPrintf(LOG_NOTE, "geguns: %d %s first-person guns, converted from the ROM", found,
+				g_GunSetDir >= 0 ? "of a ROM hack's own" : "of GoldenEye's own");
 	}
 }
 
@@ -1413,7 +1730,7 @@ s32 gegunsHasOwnModel(s32 index)
 {
 	gegunsFindConverted();
 
-	return index >= 0 && index < NUM_GE_GUNS && convertedModel[index] != 0;
+	return GE_GUN_INDEX(index) && convertedModel[index] != 0;
 }
 
 /**
@@ -1460,7 +1777,7 @@ u16 gegunsOwnModel(s32 index)
  * three numbers in the same space (the Falcon 2's 9, -15.7, -23.8 beside the
  * PP7's 11, -20.8, -33.5), so GoldenEye's own model takes GoldenEye's.
  */
-static const f32 ownpos[NUM_GE_GUNS][3] = {
+static const f32 geOwnPos[NUM_GE_WEAPONS][3] = {
 	[WEAPON_GE_PP7 - WEAPON_GE_FIRST] = { 11.0f, -20.8f, -33.5f },
 	[WEAPON_GE_PP7SILENCED - WEAPON_GE_FIRST] = { 11.0f, -20.8f, -33.5f },
 	[WEAPON_GE_DD44 - WEAPON_GE_FIRST] = { 11.0f, -20.8f, -33.5f },
@@ -1487,6 +1804,8 @@ static const f32 ownpos[NUM_GE_GUNS][3] = {
 	[WEAPON_GE_PROXIMITYMINE - WEAPON_GE_FIRST] = { 11.0f, -21.0f, -37.0f },
 	[WEAPON_GE_REMOTEMINE - WEAPON_GE_FIRST] = { 11.0f, -21.0f, -37.0f },
 };
+
+static const f32 (*ownpos)[3] = geOwnPos;
 
 /**
  * Whether gun `index` stands on one of Perfect Dark's classic pistols, the
@@ -1519,10 +1838,13 @@ static s32 gegunsHostIsOwnModel(s32 index)
 
 // The host's own placement and part commands, to go back to when the gun is
 // drawn on the host's model again (the other look, F6)
-static s32 ownInUse[NUM_GE_GUNS];
-static s32 hostSaved[NUM_GE_GUNS];
-static f32 hostPos[NUM_GE_GUNS][3];
-static struct gunviscmd *hostVis[NUM_GE_GUNS];
+static s32 ownInUse[NUM_GE_WEAPONS];
+static s32 hostSaved[NUM_GE_WEAPONS];
+static f32 hostPos[NUM_GE_WEAPONS][3];
+static struct gunviscmd *hostVis[NUM_GE_WEAPONS];
+static struct guncmd *hostEquip[NUM_GE_WEAPONS];
+static struct guncmd *hostUnequip[NUM_GE_WEAPONS];
+static s32 animsTaken[NUM_GE_WEAPONS];
 
 
 /**
@@ -1534,7 +1856,7 @@ void gegunsSetOwnModelInUse(s32 index, s32 inuse)
 {
 	struct weapon *def;
 
-	if (index < 0 || index >= NUM_GE_GUNS) {
+	if (!GE_GUN_INDEX(index)) {
 		return;
 	}
 
@@ -1549,6 +1871,35 @@ void gegunsSetOwnModelInUse(s32 index, s32 inuse)
 	}
 
 	ownInUse[index] = inuse;
+
+	// A host's draw and put-away animate the host's joints, which on
+	// GoldenEye's model are other parts or none: the Moonraker on the Laser's
+	// stood still through the Laser's put-away and popped up through its
+	// draw ("Moonraker Laser lacks a put away and pull out animation", F3
+	// 20261002-174244). GoldenEye lowers and raises every gun whole
+	// (gunfire.c's SWITCH_LOWER and SWITCH_RAISE), which is what Perfect
+	// Dark does for a gun with no such animation. A classic gun's
+	// equip_animation is its held pose (WEAPONFLAG_00004000), and a thrown
+	// one is drawn at once (gegunsSwitchAtOnce()); both keep theirs.
+	if (inuse && !(def->flags & (WEAPONFLAG_00004000 | WEAPONFLAG_THROWABLE))) {
+		if (def->equip_animation || def->unequip_animation) {
+			hostEquip[index] = def->equip_animation;
+			hostUnequip[index] = def->unequip_animation;
+			animsTaken[index] = 1;
+		}
+
+		def->equip_animation = NULL;
+		def->unequip_animation = NULL;
+	} else if (animsTaken[index]) {
+		// the host's model again (the other look, or a rebuilt definition
+		// left as it was built)
+		if (!def->equip_animation && !def->unequip_animation) {
+			def->equip_animation = hostEquip[index];
+			def->unequip_animation = hostUnequip[index];
+		}
+
+		animsTaken[index] = 0;
+	}
 
 	if (inuse) {
 		def->posx = ownpos[index][0];
@@ -1596,7 +1947,7 @@ s32 gegunsViewPlacement(s32 index, f32 *own, f32 *host)
 {
 	const struct weapon *def;
 
-	if (index < 0 || index >= NUM_GE_GUNS) {
+	if (!GE_GUN_INDEX(index)) {
 		return 0;
 	}
 
@@ -1623,7 +1974,7 @@ s32 gegunsOwnModelInUse(s32 weaponnum)
 		return geslappersActive();
 	}
 
-	return index >= 0 && index < NUM_GE_GUNS && ownInUse[index];
+	return GE_GUN_INDEX(index) && ownInUse[index];
 }
 
 /**
@@ -1632,7 +1983,7 @@ s32 gegunsOwnModelInUse(s32 weaponnum)
  * conversion's `models` block numbers them MODEL_REMAKE_FIRST + prop and its
  * setups give them to the guards and lay them on the floor.
  */
-static const s16 chrProps[NUM_GE_GUNS] = {
+static const s16 geChrProps[NUM_GE_WEAPONS] = {
 	[WEAPON_GE_PP7             - WEAPON_GE_FIRST] = 191, // PROP_CHRWPPK
 	[WEAPON_GE_PP7SILENCED     - WEAPON_GE_FIRST] = 204, // PROP_CHRWPPKSIL
 	[WEAPON_GE_DD44            - WEAPON_GE_FIRST] = 205, // PROP_CHRTT33
@@ -1660,10 +2011,12 @@ static const s16 chrProps[NUM_GE_GUNS] = {
 	[WEAPON_GE_REMOTEMINE      - WEAPON_GE_FIRST] = 199, // PROP_CHRREMOTEMINE
 };
 
+static const s16 *chrProps = geChrProps;
+
 /** Gun `index`'s PROP_CHR* number, or -1. */
 s32 gegunsChrProp(s32 index)
 {
-	return index >= 0 && index < NUM_GE_GUNS && chrProps[index] > 0 ? chrProps[index] : -1;
+	return GE_GUN_INDEX(index) && chrProps[index] > 0 ? chrProps[index] : -1;
 }
 
 /**
@@ -1688,7 +2041,7 @@ s32 gegunsOwnPropModel(s32 weaponnum)
 	const s32 index = weaponnum - WEAPON_GE_FIRST;
 	s32 prop;
 
-	if (!gegunsOwnModelInUse(weaponnum) || index >= NUM_GE_GUNS) {
+	if (!gegunsOwnModelInUse(weaponnum) || !GE_GUN_INDEX(index)) {
 		return -1;
 	}
 
@@ -1911,7 +2264,7 @@ s32 gegunsEnemyRocketsSwaps(s32 weaponnum)
 		return 0;
 	}
 
-	return weaponnum >= WEAPON_GE_FIRST && weaponnum < WEAPON_GE_FIRST + NUM_GE_GUNS;
+	return GE_GUN_INDEX(weaponnum - WEAPON_GE_FIRST);
 }
 
 s32 gegunsEnemyRocketModel(void)
@@ -1922,6 +2275,23 @@ s32 gegunsEnemyRocketModel(void)
 }
 
 /**
+ * Whether GoldenEye takes this weapon up and puts it away with no movement at
+ * all: what it draws nothing of in the hand (gunfire.c's raise states go
+ * straight to idle for WEAPONSTATBITFLAG_HIDE_FIRST_PERSON_HAND or no model).
+ * The grenade and the mines on GoldenEye's own models (gegunsOwnModelHidden()),
+ * and every gadget but the watch's detonator, which is drawn
+ * (bondgun.c's bgunTickIncChangeGun()).
+ */
+s32 gegunsSwitchAtOnce(s32 weaponnum)
+{
+	if (weaponnum >= WEAPON_GE_COVERTMODEM && weaponnum <= WEAPON_GE_TANKSHELLS) {
+		return 1;
+	}
+
+	return gegunsOwnModelHidden(weaponnum);
+}
+
+/**
  * GoldenEye draws its gadgets in silence (gunfire.c's equip sound leaves out
  * the covert modem, the plastique, the GoldenEye key, the camera, the watch
  * magnet, the tank's shells and the watch's detonator); their hosts, the ECM
@@ -1929,7 +2299,11 @@ s32 gegunsEnemyRocketModel(void)
  */
 s32 gegunsEquipSilent(s32 weaponnum)
 {
-	return weaponnum >= WEAPON_GE_COVERTMODEM && weaponnum <= WEAPON_GE_DETONATOR;
+	// and the watch laser, which is no gun drawn (ITEM_WATCHLASER is in the
+	// same silent case): it played the Moonraker's PICKUP_LASER_SFX, its
+	// host's (F3 20260930-191858, "makes moonraker pullout sound")
+	return (weaponnum >= WEAPON_GE_COVERTMODEM && weaponnum <= WEAPON_GE_DETONATOR)
+		|| (weaponnum == WEAPON_GE_MOONRAKER && gegunsWatchLaserInstalled());
 }
 
 /**
@@ -1950,7 +2324,34 @@ s32 gegunsThrownFuse60(s32 weaponnum)
 	return 0;
 }
 
+/**
+ * The fuse on a grenade a guard throws, in sixtieths, or 0 for Perfect Dark's.
+ *
+ * Perfect Dark's guards let go with timer240 at TICKS(240): one second, on the
+ * clock of 240ths. GoldenEye's (chraction.c's chrlvTickThrowGrenade) set the
+ * grenade's timer to CHRLV_DEFAULT_TIMER - NTSC's 180 sixtieths, PAL's 150
+ * fiftieths, three seconds either way - every tick from frame 61 of the throw
+ * until it leaves the hand at 119, and propobj.c counts it down on its
+ * sixtieths. A converted mission's guards threw Perfect Dark's one second
+ * (F3 20260930-211747, Control). GoldenEye's grenade from any guard, and any
+ * grenade on a converted mission.
+ */
+s32 gegunsChrGrenadeFuse60(s32 weaponnum)
+{
+	if (weaponnum == WEAPON_GE_GRENADE
+			|| (modloaderStageIsMission(g_Vars.stagenum) && !g_Vars.normmplayerisrunning)) {
+		return 180;
+	}
+
+	return 0;
+}
+
 static s32 gegunsOwnThrowKnifeGone(const struct hand *hand);
+
+static s32 gegunsIsShotgun(s32 weaponnum)
+{
+	return weaponnum == WEAPON_GE_SHOTGUN || weaponnum == WEAPON_GE_AUTOSHOTGUN;
+}
 
 static void gegunsSetPart(struct model *model, s32 part, s32 visible)
 {
@@ -1968,6 +2369,50 @@ static void gegunsSetPart(struct model *model, s32 part, s32 visible)
  * thrown item's own pieces 14 and 15 are on while it is in the hand, and part
  * 1 is the muzzle flash, on while the hand's flash is.
  */
+/**
+ * The release's flash on a gun GoldenEye shows none for (the silenced PP7 and
+ * D5K, FUNCFLAG_NOMUZZLEFLASH): its file has flash cards like every other gun
+ * (gebean.c's fpCardSet), and the release lights them for the shot - eight
+ * shots of the silenced PP7 on Dam, each with its flash for a frame. The HD
+ * look lights the cards alone for that tick, without hand->flashon and so
+ * without the flash's light on the room or the firing flash of the player's
+ * own body (bondgun.c sets it, bgunTickInc() clears it).
+ */
+static u8 gegunsCards[MAX_PLAYERS][2];
+
+void gegunsCardsLit(s32 handnum, s32 on)
+{
+	const s32 p = g_Vars.currentplayernum;
+
+	if (p >= 0 && p < MAX_PLAYERS && handnum >= 0 && handnum < 2) {
+		gegunsCards[p][handnum] = on ? 1 : 0;
+	}
+}
+
+/** Whether the hand's flash is drawn this tick: its own, or the release's cards on a silenced gun. */
+static s32 gegunsFlashLit(struct hand *hand)
+{
+	const s32 p = g_Vars.currentplayernum;
+	f32 flash[3];
+	f32 star[3];
+
+	if (hand->flashon) {
+		return 1;
+	}
+
+	if (p < 0 || p >= MAX_PLAYERS || !g_Vars.currentplayer) {
+		return 0;
+	}
+
+	for (s32 h = 0; h < 2; h++) {
+		if (hand == &g_Vars.currentplayer->hands[h]) {
+			return gegunsCards[p][h] && gebeanFirstPersonFlashCards(hand->gset.weaponnum, flash, star);
+		}
+	}
+
+	return 0;
+}
+
 void gegunsOwnModelParts(struct hand *hand, struct model *model)
 {
 	if (!gegunsOwnModelInUse(hand->gset.weaponnum)) {
@@ -1981,7 +2426,54 @@ void gegunsOwnModelParts(struct hand *hand, struct model *model)
 	gegunsSetPart(model, 35, 1);
 	gegunsSetPart(model, 14, !gegunsOwnThrowKnifeGone(hand));
 	gegunsSetPart(model, 15, !gegunsOwnThrowKnifeGone(hand));
-	gegunsSetPart(model, 1, hand->flashon ? 1 : 0);
+	gegunsSetPart(model, 1, gegunsFlashLit(hand));
+
+	// The shotguns' shells on the side of the gun, the top one going first:
+	// shell i (parts 18 + i and 23 + i) while five - i or more are shown
+	if (gegunsIsShotgun(hand->gset.weaponnum)) {
+		for (s32 i = 0; i < 5; i++) {
+			gegunsSetPart(model, 18 + i, hand->geshells >= 5 - i);
+			gegunsSetPart(model, 23 + i, hand->geshells >= 5 - i);
+		}
+	}
+}
+
+/**
+ * GoldenEye's shotgun and automatic shotgun carry five shells on the side of
+ * the gun, and show one for each round in reserve, up to five - counted when
+ * the gun is loaded, whether raised or reloaded (gunfire.c's
+ * sub_GAME_7F0649D8() sets hand->numvisibleshells, and the draw hides
+ * Switches[18..22] and [23..27] by it), not as each shot is fired or ammo is
+ * picked up. With a shotgun in each hand the reserve is shared, and a hand
+ * counts only what the other is not already showing
+ * (get_ammo_in_hands_weapon()). Called as a clip is filled from the reserve
+ * (bondgun.c's bgun0f098df8()).
+ */
+void gegunsShellsLoaded(struct hand *hand)
+{
+	struct player *player = g_Vars.currentplayer;
+	s32 handnum;
+	s32 shells;
+	const struct hand *other;
+
+	if (!player || !hand || !gegunsIsShotgun(hand->gset.weaponnum)) {
+		return;
+	}
+
+	handnum = hand == &player->hands[HAND_LEFT] ? HAND_LEFT : HAND_RIGHT;
+
+	if (hand != &player->hands[handnum] || hand->ammotypes[0] < 0) {
+		return;
+	}
+
+	other = &player->hands[1 - handnum];
+	shells = player->ammoheldarr[hand->ammotypes[0]];
+
+	if (other->inuse && gegunsIsShotgun(other->gset.weaponnum)) {
+		shells -= other->geshells;
+	}
+
+	hand->geshells = (s8)(shells >= 5 ? 5 : shells < 0 ? 0 : shells);
 }
 
 /**
@@ -2678,7 +3170,8 @@ static void gegunsOwnModelFlashUnposed(struct model *model, struct modelnode *st
 /**
  * GoldenEye's own muzzle flash, posed as gunfire.c poses it: GoldenEye never
  * lets the model pose it. The flash (part 3's matrix) is the gun's matrix
- * with a random roll, 1 to 1.25 times the size, and stretched along the barrel
+ * with a random roll (only on the guns whose row asks for one), 1 to 1.25
+ * times the size, and stretched along the barrel
  * by the gun's MuzzleFlashExtension; the star (part 2's, and part 4's on the
  * KF7 alone) faces the eye at its place in the flash, a tenth the size. Posed as a
  * plain model both sat at their rest offsets unturned: a streak lying along
@@ -2693,10 +3186,14 @@ void gegunsOwnModelFlash(struct hand *hand, struct model *model)
 	f32 scale;
 	f32 ext;
 	f32 unit;
+	f32 roll;
 	Mtxf *parent;
 	Mtxf *flashmtx;
+	f32 cardflash[3];
+	f32 cardstar[3];
+	s32 cards;
 
-	if (!hand->flashon || !gegunsOwnModelInUse(hand->gset.weaponnum) || !model->matrices) {
+	if (!gegunsFlashLit(hand) || !gegunsOwnModelInUse(hand->gset.weaponnum) || !model->matrices) {
 		return;
 	}
 
@@ -2707,13 +3204,31 @@ void gegunsOwnModelFlash(struct hand *hand, struct model *model)
 		return;
 	}
 
+	// The HD look draws the release's own flash cards in these lists
+	// (gebean.c's fpCardSet), turned about the release's muzzle and its
+	// star's place rather than GoldenEye's
+	cards = gebeanFirstPersonFlashCards(hand->gset.weaponnum, cardflash, cardstar);
+
+	if (cards) {
+		off[0] = cardflash[0];
+		off[1] = cardflash[1];
+		off[2] = cardflash[2];
+	}
+
 	parent = &model->matrices[modelFindNodeMtxIndex(base, 0)];
 	flashmtx = &model->matrices[modelFindNodeMtxIndex(flash, 0)];
 	scale = gegunsRandFrac() * 0.25f + 1.0f;
 	ext = g_Weapons[hand->gset.weaponnum]->muzzlez;
 	unit = sqrtf(parent->m[0][0] * parent->m[0][0] + parent->m[0][1] * parent->m[0][1] + parent->m[0][2] * parent->m[0][2]);
 
-	gegunsFlashMatrix(flashmtx, parent, gegunsRandFrac() * M_BADTAU, scale, ext, off, 0);
+	// GoldenEye rolls the flash at random only on a gun whose row has bit
+	// 0x1 (gunfire.c); the KF7, AR33, RC-P90 and sniper rifle lack it, and
+	// their flash keeps the model's own turn, lined up with the vents
+	// (F3 20261001-165454)
+	roll = (stats[hand->gset.weaponnum - WEAPON_GE_FIRST].bitflags & GESTATFLAG_ROLL_FLASH)
+		? gegunsRandFrac() * M_BADTAU : 0.0f;
+
+	gegunsFlashMatrix(flashmtx, parent, roll, scale, ext, off, 0);
 
 	for (s32 part = 2; part <= 4; part += 2) {
 		struct modelnode *star = modelGetPart(def, part);
@@ -2734,11 +3249,15 @@ void gegunsOwnModelFlash(struct hand *hand, struct model *model)
 		}
 
 		// its place in the flash's own space, into the eye's
-		for (s32 col = 0; col < 3; col++) {
-			at[col] = star->rodata->position.pos.x * flashmtx->m[0][col]
-				+ star->rodata->position.pos.y * flashmtx->m[1][col]
-				+ star->rodata->position.pos.z * flashmtx->m[2][col]
-				+ flashmtx->m[3][col];
+		{
+			const f32 sx = cards == 2 && part == 2 ? cardstar[0] : star->rodata->position.pos.x;
+			const f32 sy = cards == 2 && part == 2 ? cardstar[1] : star->rodata->position.pos.y;
+			const f32 sz = cards == 2 && part == 2 ? cardstar[2] : star->rodata->position.pos.z;
+
+			for (s32 col = 0; col < 3; col++) {
+				at[col] = sx * flashmtx->m[0][col] + sy * flashmtx->m[1][col] + sz * flashmtx->m[2][col]
+					+ flashmtx->m[3][col];
+			}
 		}
 
 		gegunsFlashMatrix(&model->matrices[modelFindNodeMtxIndex(star, 0)], NULL,
@@ -3102,6 +3621,11 @@ static s32 gegunsWatchLaserInstalled(void)
 	return g_WatchLaser.func && g_GeWeaponDefs[WEAPON_GE_MOONRAKER - WEAPON_GE_FIRST].functions[0] == g_WatchLaser.func;
 }
 
+s32 gegunsWatchLaserShot(s32 weaponnum)
+{
+	return weaponnum == WEAPON_GE_MOONRAKER && gegunsWatchLaserInstalled();
+}
+
 void gegunsSetWatchLaser(s32 on)
 {
 	struct weapon *def = &g_GeWeaponDefs[WEAPON_GE_MOONRAKER - WEAPON_GE_FIRST];
@@ -3161,11 +3685,21 @@ void gegunsSetWatchLaser(s32 on)
 	// laser's takes its charge
 	g_WatchLaser.func->ammoindex = 0;
 
+	// nor the hands' shake while firing (recoilsettings, a random jitter of
+	// the gun's position the Moonraker's host has): GoldenEye moves a gun
+	// only by its recoil speeds and pull back, all nothing for the watch
+	// laser, which fires from a still wrist (F3 20260930-191858, "has recoil")
+	shoot->recoilsettings = NULL;
+
 	g_WatchLaser.noise = stat->noise;
 	g_WatchLaser.func->noisesettings = &g_WatchLaser.noise;
 
 	memset(&g_WatchLaser.ammo, 0, sizeof(g_WatchLaser.ammo));
 	g_WatchLaser.ammo.type = AMMOTYPE_WATCHLASER;
+	// no casing: watchlaser_stats' ejected cartridge is NULL. A zeroed
+	// casingeject is the pistol's cartridge (index 0), and the watch threw
+	// one out of the hand every shot (F3 20260930-191858)
+	g_WatchLaser.ammo.casingeject = (u32)-1;
 	g_WatchLaser.ammo.clipsize = stat->magsize;
 	def->ammos[0] = &g_WatchLaser.ammo;
 
@@ -3176,10 +3710,454 @@ void gegunsSetWatchLaser(s32 on)
 	}
 
 	def->flags &= ~WEAPONFLAG_TRACKTIMEUSED;
+	// GoldenEye never pairs it (no CAN_DUAL_WIELD), and Akimbo does not
+	// either (gegunsNeverPairs())
+	def->flags &= ~WEAPONFLAG_DUALWIELD;
 	// the laser's shots are free (WEAPONFLAG3_FREESHOTS); each of the watch
 	// laser's takes one of its charge
 	def->flags3 &= ~WEAPONFLAG3_FREESHOTS;
 	def->functions[0] = g_WatchLaser.func;
 }
 
+/**
+ * A converted GoldenEye ROM hack's own guns: its gun set.
+ *
+ * GE Editor's hacks renumber the hand items and patch the code that tests an
+ * item by number to follow, so each of a hack's guns is the GoldenEye gun whose
+ * file it took - Goldfinger 64's AK47 is GoldenEye's KF7 at another item
+ * number, its Armalite AR7 the sniper rifle, its golf club the hunting knife
+ * - and stands on that gun's weapon here (geconvert.c's itemWeaponsBuild()),
+ * with what is the hack's own: its gunWeaponStat row (damage, rates, recoil,
+ * sound, clip, where it is held), its name, the prop a hand holds it as, and
+ * its first-person model (Igx%03dZ under its own item number). Four of
+ * Goldfinger's are on files GoldenEye has no gun of its own for (the taser,
+ * the watch laser and the gold and silver PP7s), and take the four weapons
+ * past the detonator (WEAPON_GE_EXTRA1).
+ *
+ * The conversion writes them as menu/geguns.bin (writeGuns()). On a stage of
+ * the hack's own the guns' definitions are built from it once and swapped in
+ * whole, and on any other stage GoldenEye's are swapped back, as they were -
+ * as the watch laser is on Train.
+ */
+#define GEGUNS_SETS     4
+#define GEGUNS_NAMELEN  40
+#define GEGUNS_STATROW  0x70
+#define GEGUNS_ROW      (4 + GEGUNS_NAMELEN + GEGUNS_STATROW)
+
+struct gegunset {
+	s32 moddir;
+	struct gegunstat stats[NUM_GE_WEAPONS];
+	u8 sounds[NUM_GE_WEAPONS];
+	u8 soundrates[NUM_GE_WEAPONS];
+	u8 items[NUM_GE_WEAPONS];
+	s16 props[NUM_GE_WEAPONS];
+	f32 pos[NUM_GE_WEAPONS][3];
+	u32 determiners[NUM_GE_WEAPONS];
+	u16 nameids[NUM_GE_WEAPONS];
+	char names[NUM_GE_WEAPONS][GEGUNS_NAMELEN + 2];
+	u32 envitems;
+	s32 built;
+	struct weapon defs[NUM_GE_WEAPONS];
+	struct aibotweaponpreference prefs[NUM_GE_WEAPONS];
+};
+
+static struct gegunset *g_GunSets[GEGUNS_SETS];
+static s32 g_GunSetNoFile; // mod dirs known to have none, a bit each
+static s32 g_GunSetNumDirs = -1;
+
+// GoldenEye's own definitions while a hack's are in
+static struct weapon g_GunSetGeDefs[NUM_GE_WEAPONS];
+static struct aibotweaponpreference g_GunSetGePrefs[NUM_GE_WEAPONS];
+
+static u32 gegunsBe32(const u8 *p)
+{
+	return (u32)p[0] << 24 | (u32)p[1] << 16 | (u32)p[2] << 8 | p[3];
+}
+
+static f32 gegunsBeF32(const u8 *p)
+{
+	const u32 v = gegunsBe32(p);
+	f32 f;
+
+	memcpy(&f, &v, sizeof(f));
+
+	return f;
+}
+
+/** A gunWeaponStat row (gun.h's WeaponStats, big-endian) as gegunstats.h has GoldenEye's. */
+static void gegunsStatFromRow(struct gegunstat *st, const u8 *r)
+{
+	memset(st, 0, sizeof(*st));
+	st->muzzle = gegunsBeF32(r + 0);
+	st->ammotype = (u8)gegunsBe32(r + 28);
+	st->magsize = (s16)(r[32] << 8 | r[33]);
+	st->autorate = r[34];
+	st->singlerate = r[35];
+	st->penetration = r[36];
+	st->damage = gegunsBeF32(r + 44);
+	st->spread = gegunsBeF32(r + 48);
+	st->zoom = gegunsBeF32(r + 52);
+	st->sway = gegunsBeF32(r + 64);
+
+	for (s32 k = 0; k < 4; k++) {
+		st->recoilspeed[k] = (s8)r[68 + k];
+	}
+
+	st->recoilback = gegunsBeF32(r + 72);
+	st->recoilup = gegunsBeF32(r + 76);
+	st->boltback = gegunsBeF32(r + 80);
+	st->noise.minradius = gegunsBeF32(r + 84);
+	st->noise.maxradius = gegunsBeF32(r + 88);
+	st->noise.incradius = gegunsBeF32(r + 92);
+	st->noise.decbasespeed = gegunsBeF32(r + 96);
+	st->noise.decremspeed = gegunsBeF32(r + 100);
+	st->impactforce = gegunsBeF32(r + 104);
+	st->bitflags = gegunsBe32(r + 108);
+}
+
+/**
+ * "An" where a name is said with a vowel first: a vowel but U ("a UZI"), or
+ * a letter said as itself before a number or another capital ("an M1
+ * Garand", "an MP40", "an S&W Model 36").
+ */
+static u32 gegunsDeterminer(const char *name)
+{
+	const char c = name[0];
+
+	if (strchr("AEIO", c)) {
+		return WEAPONFLAG_DETERMINER_S_AN | WEAPONFLAG_DETERMINER_F_AN;
+	}
+
+	if (strchr("FHLMNRSX", c) && c && name[1] && ((name[1] >= '0' && name[1] <= '9')
+			|| (name[1] >= 'A' && name[1] <= 'Z') || name[1] == '&')) {
+		return WEAPONFLAG_DETERMINER_S_AN | WEAPONFLAG_DETERMINER_F_AN;
+	}
+
+	return 0;
+}
+
+/** Mod dir `moddir`'s gun set, read the first time it is asked for; NULL where it has none. */
+static struct gegunset *gegunsSetAt(s32 moddir)
+{
+	char path[FS_MAXPATH + 1];
+	struct gegunset *set;
+	u32 len = 0;
+	u8 *d;
+	u32 count;
+	u32 hdr;
+	s32 slot = -1;
+
+	if (moddir < 0 || !fsGetModDirAt(moddir)) {
+		return NULL;
+	}
+
+	// a change of mods mounts them again, in whatever order
+	if (g_GunSetNumDirs != fsGetNumModDirs()) {
+		g_GunSetNumDirs = fsGetNumModDirs();
+		g_GunSetNoFile = 0;
+
+		for (s32 i = 0; i < GEGUNS_SETS; i++) {
+			if (g_GunSets[i] && g_GunSetDir != g_GunSets[i]->moddir) {
+				g_GunSets[i]->moddir = -1;
+			}
+		}
+	}
+
+	for (s32 i = 0; i < GEGUNS_SETS; i++) {
+		if (g_GunSets[i] && g_GunSets[i]->moddir == moddir) {
+			return g_GunSets[i];
+		}
+
+		// one the mounts left behind is free again: the defs in use are
+		// copies, and the set they came from is the one in (g_GunSetDir)
+		if (slot < 0 && (!g_GunSets[i] || g_GunSets[i]->moddir < 0)) {
+			slot = i;
+		}
+	}
+
+	if ((moddir < 32 && (g_GunSetNoFile & (1 << moddir))) || slot < 0) {
+		return NULL;
+	}
+
+	snprintf(path, sizeof(path), "%s/menu/geguns.bin", fsGetModDirAt(moddir));
+	d = fsFileSize(path) > 0 ? fsFileLoad(path, &len) : NULL;
+
+	// GGN2 carries the items drawn under the envmap light after the count
+	hdr = d && len >= 12 && !memcmp(d, "GGN2", 4) ? 12 : 8;
+
+	if (!d || len < 8 || (memcmp(d, "GGN1", 4) && hdr != 12) || len < hdr + (count = gegunsBe32(d + 4)) * GEGUNS_ROW) {
+		if (d) {
+			sysLogPrintf(LOG_WARNING, "geguns: %s is not a gun set", path);
+		}
+
+		sysMemFree(d);
+
+		if (moddir < 32) {
+			g_GunSetNoFile |= 1 << moddir;
+		}
+
+		return NULL;
+	}
+
+	set = g_GunSets[slot];
+
+	if (!set) {
+		set = g_GunSets[slot] = calloc(1, sizeof(*set));
+
+		if (!set) {
+			sysMemFree(d);
+			return NULL;
+		}
+	} else {
+		memset(set, 0, sizeof(*set));
+	}
+
+	set->moddir = moddir;
+	set->envitems = hdr == 12 ? gegunsBe32(d + 8) : GEGUNS_ENVMAP_ITEMS;
+
+	// GoldenEye's, where the hack has no gun on a weapon: its gadgets, and
+	// whatever of GoldenEye's it has no row for
+	memcpy(set->stats, geStats, sizeof(set->stats));
+	memcpy(set->sounds, geShootSounds, sizeof(set->sounds));
+	memcpy(set->soundrates, geShootSoundRates, sizeof(set->soundrates));
+	memcpy(set->items, geItems, sizeof(set->items));
+	memcpy(set->props, geChrProps, sizeof(set->props));
+	memcpy(set->pos, geOwnPos, sizeof(set->pos));
+	memcpy(set->determiners, geDeterminers, sizeof(set->determiners));
+	memcpy(set->nameids, geNameIds, sizeof(set->nameids));
+
+	for (u32 k = 0; k < count; k++) {
+		const u8 *row = d + hdr + GEGUNS_ROW * k;
+		const u8 *stat = row + 4 + GEGUNS_NAMELEN;
+		const s32 i = row[0];
+
+		if (i >= NUM_GE_WEAPONS) {
+			continue;
+		}
+
+		// the detonator's item only: it is no gun and keeps GoldenEye's rows
+		set->items[i] = row[1];
+
+		if (!GE_GUN_INDEX(i)) {
+			continue;
+		}
+
+		gegunsStatFromRow(&set->stats[i], stat);
+		set->sounds[i] = (u8)(stat[38] << 8 | stat[39]);
+		set->soundrates[i] = stat[37];
+		set->props[i] = (s16)(row[2] << 8 | row[3]);
+		set->pos[i][0] = gegunsBeF32(stat + 4);
+		set->pos[i][1] = gegunsBeF32(stat + 8);
+		set->pos[i][2] = gegunsBeF32(stat + 12);
+
+		memcpy(set->names[i], row + 4, GEGUNS_NAMELEN);
+		set->names[i][GEGUNS_NAMELEN] = '\0';
+
+		if (set->names[i][0]) {
+			set->determiners[i] = gegunsDeterminer(set->names[i]);
+			strcat(set->names[i], "\n"); // as the game's own names end
+			set->nameids[i] = langAddPortText(set->names[i]);
+		}
+	}
+
+	sysMemFree(d);
+	sysLogPrintf(LOG_NOTE, "geguns: %u guns of a ROM hack's own, from %s", count, path);
+
+	return set;
+}
+
+/** Points geguns.c's tables at `set`'s, or GoldenEye's own for NULL. */
+static void gegunsUseTables(struct gegunset *set)
+{
+	stats = set ? set->stats : geStats;
+	shootsounds = set ? set->sounds : geShootSounds;
+	shootsoundrates = set ? set->soundrates : geShootSoundRates;
+	items = set ? set->items : geItems;
+	chrProps = set ? set->props : geChrProps;
+	ownpos = set ? (const f32 (*)[3])set->pos : geOwnPos;
+	determiners = set ? set->determiners : geDeterminers;
+	nameids = set ? set->nameids : geNameIds;
+	envitems = set ? set->envitems : GEGUNS_ENVMAP_ITEMS;
+}
+
+/**
+ * The guns of the stage about to load: a ROM hack's own on a stage of its
+ * own (its menu/geguns.bin), GoldenEye's everywhere else. Before the setup's
+ * props are made, which hold them.
+ */
+void gegunsStageSet(s32 stagenum)
+{
+	struct gegunset *set = NULL;
+	s32 dir = -1;
+
+	if (modloaderStageIsRemake(stagenum) && !modloaderStageIsGexPlus(stagenum)) {
+		set = gegunsSetAt(modloaderGetStageModDirIndex(stagenum));
+		dir = set ? set->moddir : -1;
+	}
+
+	if (dir == g_GunSetDir) {
+		gegunsExtraRowsRefresh();
+		return;
+	}
+
+	// the watch laser is put in again by its own stage (gegadgets.c)
+	gegunsSetWatchLaser(0);
+
+	if (g_GunSetDir < 0) {
+		memcpy(g_GunSetGeDefs, g_GeWeaponDefs, sizeof(g_GunSetGeDefs));
+		memcpy(g_GunSetGePrefs, g_GeAibotWeaponPreferences, sizeof(g_GunSetGePrefs));
+	}
+
+	gegunsUseTables(set);
+
+	if (!set) {
+		memcpy(g_GeWeaponDefs, g_GunSetGeDefs, sizeof(g_GunSetGeDefs));
+		memcpy(g_GeAibotWeaponPreferences, g_GunSetGePrefs, sizeof(g_GunSetGePrefs));
+	} else if (set->built) {
+		memcpy(g_GeWeaponDefs, set->defs, sizeof(set->defs));
+		memcpy(g_GeAibotWeaponPreferences, set->prefs, sizeof(set->prefs));
+	} else {
+		// GoldenEye's own first, so the gadgets and what the hack has no row
+		// for are as they are everywhere else
+		memcpy(g_GeWeaponDefs, g_GunSetGeDefs, sizeof(g_GunSetGeDefs));
+
+		for (s32 i = 0; i < NUM_GE_WEAPONS; i++) {
+			const struct weapon *host = g_Weapons[g_GeWeaponHosts[i]];
+
+			if (!GE_GUN_INDEX(i)) {
+				continue;
+			}
+
+			gegunsBuild(i, host, host);
+			gegunsOwnTrigger(i);
+			gegunsFireRate(i);
+			gegunsOwnThrown(i);
+			gegunsBotPrefs(i);
+			gegunsNameThrow(i);
+		}
+
+		memcpy(set->defs, g_GeWeaponDefs, sizeof(set->defs));
+		memcpy(set->prefs, g_GeAibotWeaponPreferences, sizeof(set->prefs));
+		set->built = 1;
+	}
+
+	g_GunSetDir = dir;
+
+	// and each one's model in the hand, the set's own (gegunsFindConverted()):
+	// gebean.c's for GoldenEye's guns, and here for the hack's own pistols,
+	// which the release has nothing of
+	gebeanGunsStageRefresh();
+
+	for (s32 w = WEAPON_GE_EXTRA1; w <= WEAPON_GE_EXTRA4; w++) {
+		const s32 i = w - WEAPON_GE_FIRST;
+		const u16 own = gegunsOwnModel(i);
+
+		g_GeWeaponDefs[i].hi_model = own ? own : gegunsModelFile(i);
+		gegunsSetOwnModelInUse(i, own != 0);
+		g_GeWeaponDefs[i].flags &= ~WEAPONFLAG_HASHANDS;
+
+		if (!own) {
+			g_GeWeaponDefs[i].flags |= gegunsHandsFlag(i);
+		}
+	}
+
+	gegunsExtraRowsRefresh();
+
+	sysLogPrintf(LOG_NOTE, "geguns: %s guns", set ? "a ROM hack's own" : "GoldenEye's own");
+}
+
+/** Whether a ROM hack's own gun set is in (gegunsStageSet()): its stage is loaded. */
+s32 gegunsHackSetIn(void)
+{
+	return g_GunSetDir >= 0;
+}
+
+/**
+ * The gun set the menus name GoldenEye's guns by: a ROM hack's own while its
+ * mode is chosen (g_GexPlusVariant: GE Plus's Combat Simulator and folder in
+ * its mode), over whatever stage the menus are on - between its matches that
+ * is Perfect Dark's, in GoldenEye's set (gegunsStageSet()); the stage's
+ * otherwise. NULL for GoldenEye's own.
+ */
+static struct gegunset *gegunsMenuSet(void)
+{
+	if (g_GexPlusMode && g_GexPlusVariant) {
+		return gegunsSetAt(modloaderGexPlusVariantDirIndex());
+	}
+
+	return g_GunSetDir >= 0 ? gegunsSetAt(g_GunSetDir) : NULL;
+}
+
+/**
+ * A gun's name in the Combat Simulator's menus (mpGetWeaponLabel()): its
+ * menus' gun set's (gegunsMenuSet()), so a ROM hack's weapon sets and slots
+ * list its AK47 where GoldenEye's set has the KF7 Soviet; 0 where that is
+ * GoldenEye's, whose names are the weapons' own.
+ */
+u16 gegunsMenuNameId(s32 weaponnum)
+{
+	const s32 i = weaponnum - WEAPON_GE_FIRST;
+	const struct gegunset *set;
+
+	if (!GE_GUN_INDEX(i) || !(set = gegunsMenuSet())) {
+		return 0;
+	}
+
+	return set->nameids[i];
+}
+
+/**
+ * The Combat Simulator's rows of a ROM hack's own pistols
+ * (MPWEAPON_GE_EXTRA1): shown where a hack's gun set names them - its stage,
+ * or its mode's menus (gegunsMenuSet()) - under the game's own weapon list,
+ * hidden everywhere else, where each is a "Pistol" of nobody's. Goldfinger
+ * 64's own weapon sets hand out its Luger, P38 and two Smith & Wessons.
+ */
+void gegunsExtraRowsRefresh(void)
+{
+	const struct gegunset *set = modDataMpWeaponsImported() ? NULL : gegunsMenuSet();
+
+	for (s32 k = 0; k < NUM_GE_EXTRA; k++) {
+		const s32 i = WEAPON_GE_EXTRA1 + k - WEAPON_GE_FIRST;
+
+		g_MpWeapons[MPWEAPON_GE_EXTRA1 + k].unlockfeature = set && set->names[i][0] ? 0 : MPFEATURE_NEVER;
+	}
+}
+
 #endif
+
+/**
+ * GoldenEye's Moonraker marks what it hits and sounds the surface as well as
+ * its laser ricochet (chrprop.c's shot: an impact for every gun but the
+ * watch laser, ITEM_WATCHLASER; gunfire.c's recall_joy2_hits_edit_flag():
+ * RICO_LASER and the texture's own hit). Its host, the Laser, leaves no hole
+ * (WEAPONFLAG2_NOWALLHIT) and sounds only its own hit (FINDINGS row 14). The
+ * watch laser on the Moonraker's number (Train) stays as it is.
+ */
+s32 gegunsMoonrakerMarks(s32 weaponnum)
+{
+	return weaponnum == WEAPON_GE_MOONRAKER && !gegunsWatchLaserInstalled();
+}
+
+/**
+ * Where GoldenEye's grenade and mines leave the hand, in camera space: where
+ * it holds them, gunWeaponStat's PosX/Y/Z (ownpos), which gunfire.c turns
+ * into the hand's world matrix every frame (throw_item_pos_related) and
+ * gun.c throws from. Nothing of them is drawn, so the host's muzzle - the
+ * mine's down at the hand, 80 units under the eye - was no place of
+ * GoldenEye's: they came down a dozen ticks after the throw where the
+ * cartridge's take 22, so a proximity mine lay within its own 250 of Bond
+ * (FINDINGS row 10). 1 when it is one of those, with the position.
+ */
+s32 gegunsThrowOrigin(s32 weaponnum, struct coord *campos)
+{
+	if (!gegunsThrowsAsGoldenEye(weaponnum)) {
+		return 0;
+	}
+
+	campos->x = ownpos[weaponnum - WEAPON_GE_FIRST][0];
+	campos->y = ownpos[weaponnum - WEAPON_GE_FIRST][1];
+	campos->z = ownpos[weaponnum - WEAPON_GE_FIRST][2];
+
+	return 1;
+}

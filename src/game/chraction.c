@@ -79,7 +79,9 @@
 #include "geguns.h"
 #include "gebean.h"
 #include "geslappers.h"
+#include "gehitpuff.h"
 #include "modloader.h"
+#include "simbrain.h"
 
 // GoldenEye's frame as geguns.c takes it for its guns' rates: two sixtieths
 #define GE_FRAME60 2
@@ -4628,6 +4630,17 @@ void chrChoke(struct chrdata *chr, s32 choketype)
 		allowoverride = true;
 	}
 
+#ifndef PLATFORM_N64
+	// GoldenEye's play_sound_for_shot_actor() has only the yelps above: no
+	// gurgle for a head shot and no cough. Those are Perfect Dark's own
+	// voices (SFX_M1_CHOKING, 0x5b1/0x5b2, 0x4af/0x4b0 - past the numbers a
+	// converted level remaps), so one head shot in eight died in Perfect
+	// Dark's voice there (F3 20261003-003943, Egyptian)
+	if (geSfxStage()) {
+		allowoverride = false;
+	}
+#endif
+
 	if (allowoverride) {
 		if (choketype == CHOKETYPE_GURGLE) {
 			s32 sounds[] = {
@@ -5660,6 +5673,10 @@ void chrDamage(struct chrdata *chr, f32 damage, struct coord *vector, struct gse
 			// Handle chr dizziness and psychosis
 			if (makedizzy && race != RACE_DRCAROLL && race != RACE_ROBOT) {
 				if (gsetHasFunctionFlags(gset, FUNCFLAG_PSYCHOSIS)) {
+#ifndef PLATFORM_N64
+					// a converted GoldenEye guard's list never looks for the flag
+					gexPlusPsychosis(chr);
+#endif
 					chr->hidden |= CHRHFLAG_PSYCHOSISED;
 				} else {
 					chr->blurdrugamount += gsetGetBlurAmount(gset);
@@ -5953,6 +5970,14 @@ void chrDie(struct chrdata *chr, s32 aplayernum)
 // (chrNavTickMain()'s WAYMODE_LOST1), which is when func0f03645c() walks the
 // tile graph as well
 static bool g_NavGeLegs = false;
+
+// Set while chrNavTickMain() walks a simulant to a point on its navmesh path
+// (Mod.SimBrain, simbrain.c): the mesh has already said the way there is
+// floor with no wall, so only props and chrs are looked for on it. The level's
+// own walls, looked for too, stopped simulants in narrow runs (Pipes' lower
+// tunnel): the mesh keeps a walker's centre 20 from a wall to within its
+// simplification error, and the sight lines are cast 19 either side.
+bool g_NavMeshAim = false;
 #endif
 
 bool func0f03645c(struct chrdata *chr, struct coord *arg1, RoomNum *arg2, struct coord *arg3, struct coord *arg4, s32 arg5)
@@ -7415,7 +7440,82 @@ static bool chrGoPosWatchProgress(struct chrdata *chr)
 
 #endif
 
+#ifndef PLATFORM_N64
+/**
+ * Set a simulant out for pos with no waypoints at all, straight on its last
+ * stretch - chrGoToRoomPos()'s setting out, for a simulant stock found no
+ * route for and the navmesh (Mod.SimBrain) has a path for (simbrain.c).
+ */
+void chrGoPosStartBare(struct chrdata *chr, struct coord *pos, RoomNum *room, u32 goposflags)
+{
+	s32 isgopos = chr->actiontype == ACT_GOPOS
+		&& (chr->act_gopos.flags & GOPOSMASK_SPEED) == (goposflags & 0xff & GOPOSMASK_SPEED)
+		&& !chrGoPosIsWaiting(chr);
+	s32 i;
+
+	chrStopFiring(chr);
+
+	chr->actiontype = ACT_GOPOS;
+	chr->act_gopos.endpos = *pos;
+	roomsCopy(room, chr->act_gopos.endrooms);
+	chr->act_gopos.target = NULL;
+	chr->act_gopos.curindex = 0;
+	chr->act_gopos.flags = goposflags | GOPOSFLAG_INIT;
+	chr->act_gopos.turnspeed = 0;
+	chr->unk32c_21 = 0;
+	chr->act_gopos.waydata.age = 0;
+	chr->act_gopos.waydata.gotaimposobj = 0;
+
+	if (!isgopos) {
+		chr->act_gopos.waydata.lastvisible60 = -1;
+	}
+
+	for (i = 0; i < MAX_CHRWAYPOINTS; i++) {
+		chr->act_gopos.waypoints[i] = NULL;
+	}
+
+	chrGoPosInitExpensive(chr);
+	chr->goposforce = -1;
+	chr->sleep = 0;
+	chr->liftaction = 0;
+	chr->act_gopos.flags &= ~(GOPOSFLAG_DUCK | GOPOSFLAG_CROUCH | GOPOSFLAG_WAITING);
+
+	if (!isgopos) {
+		chrGoPosChooseAnimation(chr);
+	}
+
+	chr->hidden &= ~CHRHFLAG_NEEDANIM;
+}
+
+static bool chrGoToRoomPosStock(struct chrdata *chr, struct coord *pos, RoomNum *room, u32 goposflags);
+
+/**
+ * With Mod.SimBrain's modern movement, a simulant's route is the navmesh's
+ * (simbrain.c) as well as stock's: stock routes it as always, so it can take
+ * over at any moment, and the navmesh is asked for the same end. With stock
+ * (the default) this is chrGoToRoomPosStock() and nothing else.
+ */
 bool chrGoToRoomPos(struct chrdata *chr, struct coord *pos, RoomNum *room, u32 goposflags)
+{
+	bool result;
+
+	if (g_SimBrainModern && chr->aibot && simbrainHoldsGoTo(chr, pos, room)) {
+		return true;
+	}
+
+	result = chrGoToRoomPosStock(chr, pos, room, goposflags);
+
+	if (g_SimBrainModern && chr->aibot) {
+		result = simbrainAfterGoTo(chr, pos, room, goposflags, result);
+	}
+
+	return result;
+}
+
+static bool chrGoToRoomPosStock(struct chrdata *chr, struct coord *pos, RoomNum *room, u32 goposflags)
+#else
+bool chrGoToRoomPos(struct chrdata *chr, struct coord *pos, RoomNum *room, u32 goposflags)
+#endif
 {
 	struct prop *prop = chr->prop;
 	struct waypoint *nextwaypoint;
@@ -7432,7 +7532,12 @@ bool chrGoToRoomPos(struct chrdata *chr, struct coord *pos, RoomNum *room, u32 g
 	struct coord prevpos;
 	s32 numwaypoints = 0;
 
-	if (chr->aibot && (chrGoPosIsTakingLift(chr)
+	// (the navmesh's simulants have their own holds: simbrainHoldsGoTo())
+	if (chr->aibot
+#ifndef PLATFORM_N64
+			&& !simbrainOwns(chr)
+#endif
+			&& (chrGoPosIsTakingLift(chr)
 #ifndef PLATFORM_N64
 				|| chrGoPosIsDetouring(chr)
 #endif
@@ -7754,6 +7859,27 @@ void chrRecordLastVisibleTargetTime(struct chrdata *chr)
 	chr->lastvisibletarget60 = g_Vars.lvframe60;
 }
 
+/**
+ * GoldenEye's guard fires at Bond only where its line walk along the tile
+ * graph, from its gun, ends on Bond's tile (chraction.c, the attack's target
+ * test: stanTestLineUnobstructed() && stan == the target's), as its sight does
+ * (chrHasLosToChr()). Perfect Dark's line through a converted level's geometry
+ * passes through a floor, which has no wall under it, so a guard on Cradle's
+ * catwalk shot Bond on the deck under it (F3 20261003-154834). True off
+ * converted levels, for a bot and for any target but a player.
+ */
+static bool chrGeStanReachesPlayer(struct chrdata *chr, struct prop *targetprop)
+{
+#ifndef PLATFORM_N64
+	if (!chr->aibot && targetprop->type == PROPTYPE_PLAYER && targetprop->chr && geRoomActive()
+			&& geStanLinks(&chr->prop->pos, chr->ground, &targetprop->pos, targetprop->chr->ground, true) == 0) {
+		return false;
+	}
+#endif
+
+	return true;
+}
+
 bool chrHasLosToEntity(struct chrdata *chr, struct coord *chrpos, RoomNum *chrrooms, bool allowextraheight, u32 attackflags, u32 entityid)
 {
 	bool result = false;
@@ -7805,12 +7931,14 @@ bool chrHasLosToEntity(struct chrdata *chr, struct coord *chrpos, RoomNum *chrro
 
 					func0f065dd8(chrpos, chrrooms, &frompos, fromrooms);
 
-					if (cdTestLos05(&frompos, fromrooms, &targetpos, targetrooms, types, GEOFLAG_BLOCK_SHOOT)) {
+					if (cdTestLos05(&frompos, fromrooms, &targetpos, targetrooms, types, GEOFLAG_BLOCK_SHOOT)
+							&& chrGeStanReachesPlayer(chr, targetprop)) {
 						chrRecordLastVisibleTargetTime(chr);
 						result = true;
 					}
 				} else {
-					if (cdTestLos05(chrpos, chrrooms, &targetpos, targetrooms, types, GEOFLAG_BLOCK_SHOOT)) {
+					if (cdTestLos05(chrpos, chrrooms, &targetpos, targetrooms, types, GEOFLAG_BLOCK_SHOOT)
+							&& chrGeStanReachesPlayer(chr, targetprop)) {
 						chrRecordLastVisibleTargetTime(chr);
 						result = true;
 					}
@@ -7882,6 +8010,20 @@ bool chrHasLosToChr(struct chrdata *chr, struct chrdata *target, RoomNum *room)
 					GEOFLAG_BLOCK_SIGHT)) {
 			cansee = true;
 		}
+
+#ifndef PLATFORM_N64
+		// GoldenEye's guard sees Bond only where its line walk along the tile
+		// graph, from its own tile, ends on Bond's tile (chraction.c's
+		// chrCanSeeBond(): stanTestLineUnobstructed() && mystan ==
+		// bondprop->stan). A converted level has no ceilings and its walls
+		// stop under the floor above, so Perfect Dark's line alone let a guard
+		// see Bond on a balcony, a stair or the deck above and open fire over
+		// the railing (F3 20261002-231043, 20261002-155539).
+		if (cansee && !chr->aibot && target->prop->type == PROPTYPE_PLAYER && geRoomActive()
+				&& geStanLinks(&prop->pos, chr->ground, &target->prop->pos, target->ground, true) == 0) {
+			cansee = false;
+		}
+#endif
 
 		chrSetPerimEnabled(chr, true);
 		chrSetPerimEnabled(target, true);
@@ -9115,7 +9257,20 @@ void chrPunchInflictDamage(struct chrdata *chr, s32 damage, s32 range, u8 revers
 		bgunPlayPropHitSound(&gset, targetprop, -1);
 
 		if (targetprop->type == PROPTYPE_PLAYER || targetprop->type == PROPTYPE_CHR) {
-			chrDamageByImpact(targetprop->chr, gsetGetDamage(&gset) * damage, &vector, &gset, chr->prop, 200);
+			f32 base = gsetGetDamage(&gset);
+
+#ifndef PLATFORM_N64
+			// A guard's punch is five of Perfect Dark's (0.5), its animation's
+			// own count. Where unarmed is GoldenEye's slappers (2, a slap
+			// Bond deals) it was five of those, which killed Bond outright:
+			// Guards Alerted!'s Perfect Dark guards on a GE Plus mission (F3
+			// 20261003-032815). GoldenEye's own guards never punch.
+			if (!chr->aibot && geslappersActive()) {
+				base = geslappersPdPunchDamage();
+			}
+#endif
+
+			chrDamageByImpact(targetprop->chr, base * damage, &vector, &gset, chr->prop, 200);
 		}
 	}
 
@@ -10181,6 +10336,20 @@ void chrTickDie(struct chrdata *chr)
 
 	// Check for end of death animation and switch to ACT_DEAD
 	if (modelGetCurAnimFrame(model) >= modelGetAnimEndFrame(model)) {
+#ifndef PLATFORM_N64
+		// Perfect Dark's own stomach death beside GoldenEye's on a GE Plus
+		// level plays under another number (gechranims.c), and ends half way
+		// down; it falls the rest of the way by Perfect Dark's own 0x3c
+		// (F3 20261003-154731: a Cradle guard left frozen kneeling)
+		if (CHRRACE(chr) == RACE_HUMAN && geChrAnimsPlayingPd(modelGetAnimNum(model), ANIM_DEATH_STOMACH_LONG)) {
+			s32 next = geChrAnimsPd(ANIM_003C);
+
+			modelSetAnimation(model, next, !modelIsFlipped(model), 50, 0.3, animGetNumFrames(next) - 51.0f);
+			modelSetAnimSpeed(model, 0.5, animGetNumFrames(next) - 51.0f);
+			return;
+		}
+#endif
+
 		if (CHRRACE(chr) == RACE_HUMAN && modelGetAnimNum(model) == ANIM_DEATH_STOMACH_LONG) {
 			modelSetAnimation(model, ANIM_003C, !modelIsFlipped(model), 50, 0.3, animGetNumFrames(ANIM_003C) - 51.0f);
 			modelSetAnimSpeed(model, 0.5, animGetNumFrames(ANIM_003C) - 51.0f);
@@ -10549,6 +10718,14 @@ void chrUpdateFireslot(struct chrdata *chr, s32 handnum, bool withsound, bool wi
 		weaponnum = weapon->weaponnum;
 		duration = gsetGetFireslotDuration(&weapon->gset);
 		soundnum = gsetGetSingleShootSound(&weapon->gset);
+
+#ifndef PLATFORM_N64
+		// GoldenEye's rocket launcher has no shot of its own: the rocket's
+		// launch is its sound (chrFireProjectile's site)
+		if (geChrRocketLaunchSilent(weaponnum)) {
+			withsound = false;
+		}
+#endif
 
 		if (chr->fireslots[handnum] < 0) {
 			chr->fireslots[handnum] = bgunAllocateFireslot();
@@ -12094,6 +12271,12 @@ void chrTickShoot(struct chrdata *chr, s32 handnum)
 							bgun0f09ebcc(&projectileobj->base, &gunpos, gunrooms, &projectilemtx, &sp16c, &identmtx, chrprop, &gunpos);
 
 							if (projectileobj->base.hidden & OBJHFLAG_PROJECTILE) {
+#ifndef PLATFORM_N64
+								// a GoldenEye gun's round lands and is hurt as GoldenEye's (propobj.c)
+								if (WEAPON_IS_GE(gset.weaponnum)) {
+									projectileobj->base.projectile->flags |= PROJECTILEFLAG_GEROUND;
+								}
+#endif
 								if (func->base.base.flags & FUNCFLAG_PROJECTILE_LIGHTWEIGHT) {
 									projectileobj->base.projectile->flags |= PROJECTILEFLAG_LIGHTWEIGHT;
 								} else if (func->base.base.flags & FUNCFLAG_PROJECTILE_POWERED) {
@@ -12111,6 +12294,16 @@ void chrTickShoot(struct chrdata *chr, s32 handnum)
 								projectileobj->base.projectile->targetprop = chrGetTargetProp(chr);
 
 								// Play sound
+#ifndef PLATFORM_N64
+								// GoldenEye's guard launches a rocket with ROCKET_LAUNCH_SFX
+								// (1) and no position (chraction.c: sndPlaySfx() with no
+								// post event), heard at full wherever he is; at the rocket
+								// down GoldenEye's distance curve it was faint even near him
+								// (F3 20261002-232007, Streets)
+								if (geChrRocketLaunchSilent(gset.weaponnum)) {
+									geSfxPlay(GESFX_ROCKET_LAUNCH, GESFX_VOLUME);
+								} else
+#endif
 								if (func->soundnum > 0) {
 									psCreate(NULL, projectileobj->base.prop, func->soundnum, -1,
 											-1, 0, 0, PSTYPE_NONE, NULL, -1, NULL, -1, -1, -1, -1);
@@ -12295,6 +12488,11 @@ void chrTickShoot(struct chrdata *chr, s32 handnum)
 
 								if (chrIsUsingPaintball(chr)) {
 									sparksCreate(hitrooms[0], hitprop, &hitpos, NULL, NULL, SPARKTYPE_PAINT);
+#ifndef PLATFORM_N64
+								} else if (geHitPuffActive()) {
+									// GoldenEye's puff where a guard's shot ends
+									geHitPuffBg(&hitpos, NULL, 0);
+#endif
 								} else {
 									sparksCreate(hitrooms[0], hitprop, &hitpos, NULL, NULL, SPARKTYPE_DEFAULT);
 								}
@@ -12314,6 +12512,11 @@ void chrTickShoot(struct chrdata *chr, s32 handnum)
 
 							if (chrIsUsingPaintball(chr)) {
 								sparksCreate(hitrooms[0], 0, &hitpos, NULL, NULL, SPARKTYPE_PAINT);
+#ifndef PLATFORM_N64
+							} else if (geHitPuffActive()) {
+								// GoldenEye's puff where a guard's shot ends
+								geHitPuffBg(&hitpos, NULL, 0);
+#endif
 							} else {
 								sparksCreate(hitrooms[0], 0, &hitpos, NULL, NULL, SPARKTYPE_DEFAULT);
 							}
@@ -13258,6 +13461,19 @@ void chrTickThrowGrenade(struct chrdata *chr)
 		obj->hidden &= ~OBJHFLAG_GONE;
 	}
 
+#ifndef PLATFORM_N64
+	// GoldenEye's guard pulls the pin at frame 61 of the throw
+	// (chrlvTickThrowGrenade(): the held grenade's timer set every tick from
+	// there), so one killed before he lets go drops a live grenade - the
+	// fuse runs from his death, where Perfect Dark's ran only from the throw
+	// and a guard shot mid-throw dropped a dud (F3 20261002-232842)
+	if (frame >= 61 && weaponprop && modelGetAnimNum(model) == ANIM_THROWGRENADE_STANDING
+			&& gegunsChrGrenadeFuse60(weaponprop->weapon->weaponnum) > 0) {
+		weaponprop->weapon->timer240 = TICKS(gegunsChrGrenadeFuse60(weaponprop->weapon->weaponnum) * 4);
+		weaponprop->forcetick = true;
+	}
+#endif
+
 	// Decide at which frame the grenade leaves the chr's hand
 	if ((frame >= 119 && weaponprop && modelGetAnimNum(model) == ANIM_THROWGRENADE_STANDING)
 			|| (frame >= 57 && weaponprop && modelGetAnimNum(model) == ANIM_THROWGRENADE_NOPIN)
@@ -13266,6 +13482,18 @@ void chrTickThrowGrenade(struct chrdata *chr)
 		objSetDropped(weaponprop, DROPTYPE_THROWGRENADE);
 		chr->hidden |= CHRHFLAG_DROPPINGITEM;
 		weapon->timer240 = TICKS(240);
+
+#ifndef PLATFORM_N64
+		// GoldenEye's guards give theirs three seconds. Perfect Dark's second
+		// went off in the air, but three leave it lying on the floor, and a
+		// weapon at rest in a room that is neither on screen nor beside one
+		// is paused (propsTickPlayer()): the fuse stopped until the player
+		// looked that way. GoldenEye ticks every object, so this one ticks.
+		if (gegunsChrGrenadeFuse60(weapon->weaponnum) > 0) {
+			weapon->timer240 = TICKS(gegunsChrGrenadeFuse60(weapon->weaponnum) * 4);
+			weaponprop->forcetick = true;
+		}
+#endif
 	}
 
 	frame2 = modelGetCurAnimFrame(model);
@@ -13717,6 +13945,38 @@ void func0f044b68(struct coord *arg0, struct coord *arg1, struct coord *arg2)
  * This is similar to chrNavCheckForObstacle. The difference between the two are
  * not yet understood.
  */
+#ifndef PLATFORM_N64
+/**
+ * The bottom of the box a guard's route is swept with, on a level converted
+ * from GoldenEye, where the next position is up a flight the tile graph walks
+ * straight to (geStanReaches(), GoldenEye's own test): the destination's floor
+ * and the body's own step over it, rather than the floor the guard stands on.
+ *
+ * The box is swept flat from where the guard stands, so on a stair it meets
+ * whatever stands under the top step. Control's central room is ringed with
+ * glass up to 58, and the flight out of it climbs from 6 to the balcony at 90
+ * across the pane's top; from the landing Natalya never "saw" the pad at the
+ * head of the stair, lost it, went back down to find it and came up again,
+ * round and round (F3 20260929-225110). Her feet cross the pane's line at 68.
+ */
+static f32 chrNavSweepYMin(struct chrdata *chr, struct coord *chrpos, struct coord *aimpos, f32 ymin, f32 ymax)
+{
+	if (geRoomActive() && chr->aibot == NULL && aimpos->y > chr->ground + 20.0f) {
+		const f32 aimfloor = geStanFloorAt(aimpos);
+
+		if (aimfloor + 20.0f > ymin && geStanReaches(chrpos, chr->ground, aimpos)) {
+			ymin = aimfloor + 20.0f;
+
+			if (ymin > ymax - 30.0f) {
+				ymin = ymax - 30.0f;
+			}
+		}
+	}
+
+	return ymin;
+}
+#endif
+
 bool chrNavCanSeeNextPos(struct chrdata *chr, struct coord *chrpos, RoomNum *chrrooms, struct coord *aimpos, struct coord *leftpos, struct coord *rightpos, f32 negchrradius, f32 chrradius, s32 cdtypes, s32 arg9)
 {
 	struct coord spd4;
@@ -13742,6 +14002,10 @@ bool chrNavCanSeeNextPos(struct chrdata *chr, struct coord *chrpos, RoomNum *chr
 	struct prop *prop = chr->prop;
 
 	chrGetBbox(prop, &radius2, &ymax, &ymin);
+
+#ifndef PLATFORM_N64
+	ymin = chrNavSweepYMin(chr, chrpos, aimpos, ymin, ymax);
+#endif
 
 	spd4.x = aimpos->x - chrpos->x;
 	spd4.y = 0.0f;
@@ -13901,6 +14165,10 @@ bool chrNavCheckForObstacle(struct chrdata *chr, struct coord *chrpos, RoomNum *
 	struct prop *prop = chr->prop;
 
 	chrGetBbox(prop, &radius2, &ymax, &ymin);
+
+#ifndef PLATFORM_N64
+	ymin = chrNavSweepYMin(chr, chrpos, aimpos, ymin, ymax);
+#endif
 
 	spd4.x = aimpos->x - chrpos->x;
 	spd4.y = 0.0f;
@@ -14207,6 +14475,16 @@ void chrNavTickMain(struct chrdata *chr, struct coord *nextpos, struct waydata *
 	if (modAlarmGuardOpensAnyDoor(chr)) {
 		cdtypes &= ~CDTYPE_DOORSLOCKEDTOAI;
 	}
+
+	// A door left wide open is in the way like any other object on a level
+	// converted from GoldenEye, whose doors swing: Perfect Dark's slide away
+	// into the wall when open, so a door the AI can open was never an obstacle
+	// to steer round, only a thing to open. A swung leaf stands out into the
+	// room, and a guard cutting across to the player past one walked into it
+	// for good (Archives, Natalya's guard, F3 20261002-231301/231349).
+	if (geRoomActive()) {
+		cdtypes |= CDTYPE_OPENDOORS;
+	}
 #endif
 
 	if (chr->hidden & CHRHFLAG_BLOCKINGDOOR) {
@@ -14224,7 +14502,11 @@ void chrNavTickMain(struct chrdata *chr, struct coord *nextpos, struct waydata *
 			// Check to see if the chr can see the next pad. This is almost
 			// always true, but if the chr has tried to avoid an object they
 			// may have gone behind a wall and can't see the pad any more.
-			if (chrNavCanSeeNextPos(chr, &prop->pos, prop->rooms, &sp100, &waydata->obstacleleft, &waydata->obstacleright, -chr->radius, chr->radius, CDTYPE_PATHBLOCKER | CDTYPE_BG, arg3)) {
+			if (chrNavCanSeeNextPos(chr, &prop->pos, prop->rooms, &sp100, &waydata->obstacleleft, &waydata->obstacleright, -chr->radius, chr->radius,
+#ifndef PLATFORM_N64
+						g_NavMeshAim ? CDTYPE_PATHBLOCKER :
+#endif
+						CDTYPE_PATHBLOCKER | CDTYPE_BG, arg3)) {
 				// Can see the next pad
 				waydata->gotaimpos = true;
 				waydata->aimpos.x = sp100.x;
@@ -14336,7 +14618,11 @@ void chrNavTickMain(struct chrdata *chr, struct coord *nextpos, struct waydata *
 				hasobstacle = false;
 			}
 
-			if (chrNavCheckForObstacle(chr, &prop->pos, prop->rooms, &waydata->aimpos, &waydata->obstacleleft, &waydata->obstacleright, -chr->radius, chr->radius, cdtypes, hasobstacle)) {
+			if (chrNavCheckForObstacle(chr, &prop->pos, prop->rooms, &waydata->aimpos, &waydata->obstacleleft, &waydata->obstacleright, -chr->radius, chr->radius,
+#ifndef PLATFORM_N64
+						g_NavMeshAim ? cdtypes & ~CDTYPE_BG :
+#endif
+						cdtypes, hasobstacle)) {
 				// No obstacle ahead
 				waydata->gotaimposobj = true;
 				waydata->mode = WAYMODE_INIT;
@@ -14784,7 +15070,8 @@ void chrTickGoPos(struct chrdata *chr)
 	}
 
 #ifndef PLATFORM_N64
-	if (chr->aibot && chr->act_gopos.waydata.mode != WAYMODE_MAGIC && chrGoPosWatchProgress(chr)) {
+	// (a simulant on the navmesh has simbrain.c's watch instead)
+	if (chr->aibot && chr->act_gopos.waydata.mode != WAYMODE_MAGIC && !simbrainOwns(chr) && chrGoPosWatchProgress(chr)) {
 		return;
 	}
 #endif
@@ -14861,6 +15148,40 @@ void chrTickGoPos(struct chrdata *chr)
 		f32 sp156;
 		struct waypoint *next;
 		struct pad pad2;
+
+#ifndef PLATFORM_N64
+		// Mod.SimBrain's modern movement: the navmesh's path says where to
+		// walk (simbrain.c), stock's navigation walks there - round props,
+		// through doors - and the last stretch is stock's own
+		if (g_SimBrainModern && chr->aibot) {
+			s32 tick = simbrainTickGoPos(chr, &nextpos);
+
+			if (tick == SIMBRAIN_TICK_FINAL) {
+				if (chrGoPosIsArrivingAtPos(chr, &chr->act_gopos.endpos) ||
+						(chr->inlift && posIsArrivingLaterallyAtPos(&chr->prevpos, &prop->pos, &chr->act_gopos.endpos, 30))) {
+					chrStop(chr);
+					return;
+				}
+
+				nextpos = chr->act_gopos.endpos;
+
+				if (chr->myaction == MA_AIBOTGETITEM) {
+					sp240 = false;
+				}
+			}
+
+			if (tick != SIMBRAIN_TICK_STOCK) {
+				chr->act_gopos.flags &= ~GOPOSFLAG_INIT;
+				// ...until the walls do stop it (the mesh is only as exact as its
+				// cells: Skedar's leaning pillars): then stock's way round them
+				g_NavMeshAim = tick == SIMBRAIN_TICK_WALK
+					&& (chr->invalidmove == 0 || chr->lastmoveok60 >= g_Vars.lvframe60 - TICKS(15));
+				chrNavTickMain(chr, &nextpos, &chr->act_gopos.waydata, sp240);
+				g_NavMeshAim = false;
+				return;
+			}
+		}
+#endif
 
 		waypoint = chr->act_gopos.waypoints[chr->act_gopos.curindex];
 
@@ -15570,6 +15891,21 @@ void chraTickBg(void)
 	}
 
 	// Run BG scripts
+#ifndef PLATFORM_N64
+	// ...but on a mission converted from GoldenEye's ROM not before the
+	// chrs run theirs. lvRender() ticks no prop for a level's first five
+	// frames (lvHoldsLevelStart()) while these lists ran from the first, and
+	// GoldenEye runs both from its first frame, the background lists first
+	// (chrlvAllChrTick(), then each chr's in its prop tick). Goldfinger 64's
+	// Vaults: its background list read Oddjob's health on frames 2-3 and sent
+	// him to his last list before his own first ran, on frame 6, so it never
+	// set his health, armour and accuracy - 4 health, no armour, accuracy 0,
+	// where the cartridge's has 50, 200 and 100. A converted
+	// mission's lists now start with the chrs', five frames into the level;
+	// Perfect Dark's own and a Perfect Dark mod's (GE-X's) keep the stock
+	// order, written for it.
+	if (!lvHoldsLevelStart() || !modloaderDirIndexIsConversion(modloaderGetStageModDirIndex(g_Vars.stagenum)))
+#endif
 	for (i = 0; i < g_NumBgChrs; i++) {
 		if (!g_Vars.autocutplaying || (g_BgChrs[i].hidden2 & CHRH2FLAG_TICKDURINGAUTOCUT)) {
 			chraTick(&g_BgChrs[i]);
@@ -17402,6 +17738,20 @@ struct prop *chrSpawnAtChr(struct chrdata *basechr, s32 body, s32 head, u32 chrn
 {
 	struct chrdata *chr = chrFindById(basechr, chrnum);
 	f32 fvalue;
+
+#ifndef PLATFORM_N64
+	// GoldenEye's chrSpawnAtChr() (its TRYSpawningChrNextToChr, "next to an
+	// unseen chr") spawns nothing beside a chr the player has ever seen
+	// (CHRFLAG_HAS_BEEN_ON_SCREEN, Perfect Dark's CHRCFLAG_EVERONSCREEN, the
+	// same bit set at the same draw); Perfect Dark dropped the test. A
+	// converted mission's scripts were written against GoldenEye's rule:
+	// Bunker 1's and Surface 2's reinforcements come from beside a guard the player
+	// has not yet looked at, never out of one in plain view
+	if (modloaderStageIsRemake(g_Vars.stagenum)
+			&& (chr == NULL || chr->prop == NULL || (chr->chrflags & CHRCFLAG_EVERONSCREEN))) {
+		return NULL;
+	}
+#endif
 
 	if (1) {
 		fvalue = chrGetInverseTheta(chr);

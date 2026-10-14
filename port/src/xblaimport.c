@@ -114,11 +114,18 @@ static char packName[XBLAIMPORT_NAMELEN] = XBLAIMPORT_PACK_NAME;
  * The release's water (0014) and second cloud (0c90) are copies of the ROM's
  * and stay in.
  *
+ * 063c is the file select's portrait ("New Agent..." and a "New Recruit"
+ * file, g_TexGeneralConfigs[12]). The release has no file select - a profile
+ * signs in straight to the Perfect Menu - so nothing there draws it, and its
+ * record is not 4J's art for the row but a different, red-haired Joanna that
+ * a tester knew as the Japanese cartridge's picture (2026-09-30, F3
+ * 20260930-191617). The row keeps the ROM's picture in either look.
+ *
  * The rest are the slots the release reused for other pictures, xblaslots.h:
  * a ROM room binding one wants the ROM's picture, and a release room binding
  * one is given the release's by the level loader, pack or no pack.
  */
-static const u16 leftOut[] = { 0x0013, XBLA_REUSED_SLOTS };
+static const u16 leftOut[] = { 0x0013, 0x063c, XBLA_REUSED_SLOTS };
 
 s32 xblaImportTextureIsLeftOut(s32 texturenum)
 {
@@ -257,10 +264,17 @@ static void xblaScanForPackage(const char *name, void *arg)
 	// with both files without Perfect Dark's XBLA art and Agent 4: the scan
 	// went in directory order, and Windows lists "CommunityEdition..." before
 	// "Perfect Dark XBLA.7z" where ext4 happened not to.
+	//
+	// Nor a GoldenEye ROM hack passed around as a zip of its patch
+	// (gexplusrom.c's ROM hacks: goldfinger64.zip), which goes there too and
+	// was unpacked as the release where the release was not there - and
+	// named with a capital, before it where it was.
 	if (xblaLooksLikePackage(path) ||
 			(scan->archives && archiveIsSupported(path) && fsFileSize(path) >= 0 &&
 			 !archiveFindEntry(path, "files/new/char/") &&
-			 !archiveFindEntry(path, GEBEANCE_DIFF_ENTRY))) {
+			 !archiveFindEntry(path, GEBEANCE_DIFF_ENTRY) &&
+			 !archiveFindEntry(path, ".xdelta") && !archiveFindEntry(path, ".vcdiff") &&
+			 !archiveFindEntry(path, ".bps") && !archiveFindEntry(path, ".ips"))) {
 		strncpy(scan->found, path, sizeof(scan->found) - 1);
 		return;
 	}

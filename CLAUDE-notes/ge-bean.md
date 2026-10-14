@@ -1,5 +1,87 @@
 # GoldenEye 007 XBLA ("Project Bean") characters on GoldenEye X (2026-09-15)
 
+## Digest (moved from CLAUDE.md, 2026-09-30)
+
+The entries CLAUDE.md carried for this note, verbatim. The sections below are
+the long form.
+
+- **GoldenEye's clones** — ge-bean.md, "GoldenEye's clones" (2026-09-30, converter 94): `TRYCloningChr` (0xc1) is Perfect Dark's `aiDuplicateChr` (0x00ca) with spawn flags 0, and a guard record's 0x04 (CHRFLAG_CLONE) is written as CHRFLAG0_CAN_HEARSPAWN, which body.c turns into CHRCFLAG_CLONEABLE (the same bit, 0x02); both had been dropped, so no converted guard ever cloned. On a converted mission the clone takes guns and hat only (not the chr's flags or pad preset) and waits for one of GoldenEye's slots (setup guards + 7 alive)
+- **A GoldenEye hat on an HD head** — ge-bean.md, "A GoldenEye hat on an HD head" (2026-09-30): GoldenEye's per-head hat table is the N64 heads' (Bean's image has it byte for byte) and floated side caps over 4J's HD hair; on an HD head the hat is worn as modelled, and a side cap or helmet is lifted clear of hair through it (`xblaMeshHatSeat()`), berets and fur hats unmeasured
+- **GE Plus's level music** — ge-bean.md, "The levels' own music": GoldenEye's `music_setup_entries` row on each map/mission line (converter 45), `gemusic.c` appends the ROM's sequences on one shared bank with GoldenEye's own volumes; a converted mission was silent because Perfect Dark starts a mission's music from its intro's AI list; background plays level-wide; watch and death tunes
+- **GoldenEye's death replay** — ge-bean.md, "GoldenEye's death replay": `port/src/gedeathcam.c` replays the fall three times from random cameras once the death has faded to black (bondview2.c's `CAMERAMODE_DEATH_CAM_SP`), on GE Plus's converted solo missions only (no Combat Sim, the user's call); a body's matrices are floats only between `chrTick()` and the drawing, and Jungle's bushes have no collision; the oracle recipe for a death in the native GE port
+- **Music a mod or a conversion adds** — ge-bean.md, "Borrowed music read its volume past the end of a table": `seqSetVolume()` scales a sequence by `var8005ecf8[tracknum]`, which has 121 rows for the game's 119 sequences, so every sequence `seqAppend()` hands out (GE-X's borrowed music, GoldenEye's folder and intro themes) read past it - one drew `AL_VOL_FULL` and played three times as loud. They take Perfect Dark's own menu scale now. `SDL_AUDIODRIVER=disk` + `SDL_DISKAUDIOFILE` is the quickest way to hear a headless run
+- **GoldenEye 007 XBLA (Rare's "Project Bean" build) characters on GoldenEye X** — [ge-bean.md](CLAUDE-notes/ge-bean.md): `port/src/gebean.c`, on whenever the release is there (`gebeanGetEnabled()`; the "Enable GoldenEye Characters" checkbox and `Mod.XblaGoldenEye` went on 2026-09-21); the archive or its folder goes in `added-content/` beside the Perfect Dark release, and only the characters, heads, props, guns (both looks) and level meshes are streamed into `cache/xbla/goldeneye/` (`archiveExtractMatching()`: the 7z is one 740MB solid block that `SzArEx_Extract()` would hold whole), while `xblaimport.c`'s scan now skips an archive holding them - the first `.7z` in `xbla/` used to be taken for Perfect Dark's whatever it was; CAFF 07.08.06.0036, nothing of the Perfect Dark release's formats applies; GoldenEye X files pair with Bean assets through the generated `gebeantable.h` (name plus list node and vertex counts, mods only - regenerate with `.xbla-work/ge-bean/gen_beantable.py`), and **GE Plus's own converted characters through `gebeanchrtable.h`** (ge-bean.md, "The converted characters wear the release's skins too", 2026-09-22): 4J built the release on the cartridge, so a `Cgx%03dZ` is paired by GoldenEye's own file name with the C and Z off (`CredmanZ` -> `char/redman`), the five Brosnan heads take their outfit's Bond body, a head is a character with no skeleton and a body's kind is GoldenEye's `hashead` flag (exactly "has no HEADSPOT node"); **a toggle at a model's root is the model's own switch and not a piece of it** - GoldenEye wraps every head in one, and counting it blanked the face with the hair and drew every converted guard headless, which excluding a parentless toggle did not fix because a head is grafted into the body at its HEADSPOT and the walk climbs straight through (`beanNodeIsToggled()` stops there now); the UV scale is 1/16384 or 1/32768 with no marker (measured per file) and a vertex buffer is shared by draws with different palettes; the mesh is 4J's layout skinned to the model's own matrices with each joint's rest as the inverse bind, fitted onto GoldenEye's star rest pose, a group per list node, heads rigid on matrix 0; bruises and the triangle hit test do not reach it yet; a `bean` model pack on disk wins over it; and **F6 switches its look** (2026-09-15): with the release's meshes off a Combat Simulator pool character draws Bean's N64-look `files/original/` and a GoldenEye X one its own N64 model - the originals' UV scale is a per-file power of two (2048-16384) measured from the median texture, they draw with a second record (0x30, whose fourth word is a *piece* number and not a flag - a head's sunglasses are pieces to leave out, a gun's hand and working parts are the model), sunglasses sit behind 0x17 kind 2, and four heads carry a zero pose that the HD file's neck replaces; **the guns follow F6 too** (2026-09-16, ge-bean.md "The guns follow F6 too"; removed the same day once GoldenEye X's models could be borrowed, and **brought back 2026-09-22** when GoldenEye X went dormant and the N64 look was left with no gun at all - ge-bean.md "The N64 look has no gun again, and three ways to give it one", which also has what the conversion's own `Igx` models cannot do yet and the six conflicts the revert had; the N64-look *pickup* did not come back, and `GEBEAN_DONE_FILE` bumps whenever the archive's wanted list changes): a GoldenEye gun stands on a Perfect Dark weapon, so with the meshes off it drew GoldenEye's own N64 gun out of `files/original/gun/` - with the glove GoldenEye drew round the pistols and the knives, Perfect Dark's hands off those seven, the painted muzzle flash found by its bones and left out, the placement measured on the gun alone so both looks stand in the same place, a muzzle offset per look, and the material's picture read from the four-input shape GoldenEye's own models use (which also repaints the N64 pickups and one N64 head, and moves nothing else in either look); and **its weapon sets** (ge-bean.md "GoldenEye X's weapon sets, borrowed the same way": slots are weapon numbers mapped to the borrowed guns, `mpApplyWeaponSet()` searches past Disabled, the set list grows with `WEAPONSET_RANDOM*` after it) and **its arenas complete** (ge-bean.md "GoldenEye X's arenas, borrowed complete": the Stage Loader's GE-X maps take its stage rows, skies and model states - props - swapped per stage in `setupLoadFiles()`, weapons' states kept) and **its music** (ge-bean.md "GoldenEye X's music, borrowed the same way": sequences after the game's 119 each on its own instrument bank, swapped only when it changes, and its 44 tracks in the Combat Simulator's list, `MP_MAX_TRACKS` 96) and **GoldenEye X's characters are borrowed too** (ge-bean.md "GoldenEye X's characters, borrowed the same way": its own Combat Simulator bodies and heads replace the release's pool, names out of its language file, `NUM_HEADSANDBODIES` 512, and the HD look finds its meshes by name as with GoldenEye X loaded); and **GoldenEye X's guns are borrowed whole** when it is installed (2026-09-16, ge-bean.md "GoldenEye X's guns, borrowed whole", `port/src/modborrow.c`): its definitions out of its data segment, its models pinned to a guns-only mount with their textures by mod (`tex.srcmod`), its changed animations and its GoldenEye sound bank appended after the game's own - and an external animation's header and frames must go through the slot buffers or the bit reader never finishes; and **every one of GoldenEye's N64 pictures decoded to solid black** until 2026-09-16, which is why the N64 guns were black in third person - the packed mip tail's step is 16 *texels* and was being walked as 16 elements, four tiles past a DXT picture, and a surface with one level is not packed at all (ge-bean.md, "Every N64 gun black in third person"; it fixes 26 of the release's own records too)
+- **GoldenEye XBLA's HD levels on the levels converted from the ROM** — ge-bean.md, "GoldenEye XBLA's levels on GoldenEye X's rooms" and "An HD level is paired by GoldenEye's name for it, not by its rooms": `port/src/gebeanstage.c` writes Bean's material-sorted level mesh into the converted level's rooms in the ROM's room format and serves them through xblastage.c (live on F6); **paired by GoldenEye's own key for the level** (`files/bgdata/bg_gx<key>.seg`, `.xbla-work/ge-bean/gen_stagetable.py`), the conversion's coordinates being GoldenEye's divided by the level scale less its re-centring - it was the room count and a hash of the room positions until 2026-09-22, which had silently cost Streets its HD when its rooms moved, and the 24 GoldenEye X rows that key also served are gone (GE Plus is built from the ROM alone); Bean's `temple` is GoldenEye's **Egyptian** and its `multitemple` the multiplayer Temple, so 25 of the 26 levels pair and only Statue Park, which 4J remodelled, has no HD; triangles go to the room whose *triangle* is nearest (a vertex names the room next door), and a room is Bean's wherever Bean's mesh reaches it; level UVs are **the level's own** fraction of a repeat, written only as a float literal in its shaders (1/128 Dam and Train, 1/256 most, 1/1024 where there is none - ge-bean.md, "HD Dam had no ground (the room matrix cache), and every level's UV scale": taken as 1/1024 throughout until 2026-09-21, most levels drew four times too coarse; and **`roomAllocateMtx()` answers slot 0 when its 120-slot cache is full**, so a level that draws all of 136 rooms drew the camera's room somewhere else - HD Dam's missing ground), 32-bit index buffers exist (descriptor word 6), vertex arrays must start 8-aligned with an even count, t is flipped
+- **GE Plus's arenas converted from the player's GoldenEye ROM at startup** — ge-bean.md, "The converter runs in the game, from the player's ROM": `port/src/geconvert.c` is `tools/geconvert/geconvert.py` byte for byte (numpy's pairwise mean, half-even rounding, no -0.0 from `float(round())`) (retired 2026-10-01: geconvert.c is the only converter; the Python twin `tools/geconvert/geconvert.py` is gone and the census reads the C - tools/gefidelity/census), everything read from the ROM's data segment; a US ROM in `added-content/` (or data/, where it went before 2026-09-21) is converted once into `mods/GoldenEye Arenas/` before the mods mount, with a notice drawn in fill rectangles, and the first conversion turns its maps on in `Mod.MapMods` and saves pd.ini at once; and **GE Plus opens on GoldenEye's own folder screens** (ge-bean.md, "GE Plus opens on GoldenEye's own folder screens", `port/src/gexfront.c`): folder, fonts, strings, pictures and the folders theme all converted out of the ROM into `menu/`, GoldenEye's text renderer rather than Perfect Dark's, `mtx00015f04()` is GoldenEye's scale (not `...f88`), the keyboard's accept is `BUTTON_UI_ACCEPT` not A, and gdb needs `'gexfront.c'::g_Front`; and since 2026-09-17 **SELECT MISSION opens GoldenEye's own solo chain** (ge-bean.md, "Solo missions on the folder screens") - mission select, difficulty, 007 options and the five-page briefing - which since the same day plays **GoldenEye's own twenty missions, converted from the player's ROM** (ge-bean.md, "GoldenEye's own solo missions, from the ROM", `tools/geconvert/gesolo.py` and the same code in geconvert.c): GoldenEye's setup file is Perfect Dark's ancestor and its propdef type numbers are Perfect Dark's own, so a mission converts record for record, one Perfect Dark record for each of GoldenEye's so the indices still line up; a `missions` block registers each as a stage that is **not** an arena; the AI bytecode is mapped 253 commands to 482 by `.xbla-work/ge-arena/genaitable.py` (the two tables aligned in order, and GE-X as an oracle) - **the aligner's tail past GoldenEye's 0xd8 is junk and anything uncertain there is dropped, because a wrong row crashes and a dropped one does not**; a guard's body is GoldenEye's own character number that `gexPlusMissionSetup()` maps at load to Bean's pool, GE-X's borrow or Perfect Dark's own; hats are left out and a weapon's model is left alone; **the missions' own text is the level's own bank served as a bank** (`LANGBANK_GEMISSION`, `gexPlusMissionLangLoad()`) - a GoldenEye text id is `bank * 0x400 + slot` and the bank is always the mission's own, so the conversion writes the slot against that one for an objective's text and for every `TextPrintTop`, and the file has to go through `preprocessLangFile()` or `langGet()` reads its 32-bit offsets at the width of a pointer; and **a pad exactly level with its floor has no ground under it** (Perfect Dark's ground search takes the highest floor *strictly* below), which is what dropped the player out of Egyptian and Control - `write_pads()` lifts those 63 pads a centimetre, and all twenty missions run now. With no conversion it falls back to **GoldenEye X's missions**, which are live only when GE-X is the mod the game is *loaded* with and not one it is borrowing from (`modBorrowIsGoldenEyeLoaded()`); GoldenEye's 007 difficulty is Perfect Dark's PD Mode and its four sliders are the same multipliers except the reaction speed, which the port does not act on; the briefing text is the ROM's, two more files a mission in `menu/` (the briefing file and the level's text bank, a text id being `bank * 0x400 + slot`), and the folder model's part 21 is the mission grid, so a mission's photo is `22 + mission`; and since 2026-09-18 **entering GE Plus plays GoldenEye's own intro** (ge-bean.md, "GoldenEye's own intro on the way into GE Plus", `port/src/geintro.c`): the gun barrel, the GoldenEye logo and the cast reel, then the folder screens - which needed the conversion to learn **GoldenEye's characters** (`tools/geconvert/gechr.py`: `c_item_entries` at data 0x1d080, all 80 written as `files/Cgx%03dZ`, and GoldenEye's `ModelJoint` skeleton is Perfect Dark's `g_SkelChrJoints` joint for joint so they load with `SKEL_CHR`) and **GoldenEye's animations** (`tools/geconvert/geanim.py`: its own bits with the root channels moved into the front of every frame, which comes to Perfect Dark's own 162-byte character header) - **an animation's root descriptors and stream are where its record's third and fifth words point**, offsets into `animation_data` - the blocks sit *between* the records, so reading them at `record+0x14` gave every animation the *next* one's, which is why the gun barrel's Bond stopped walking and dropped to the floor when he turned to fire (ge-bean.md, "The gun barrel: two faults in one sequence"); and **a character's animated parts are numbered from 1 in GoldenEye and from 0 in Perfect Dark**, which is what drew Bond lying on his side with his limbs posed correctly, and **the animation's root motion has to be carried into the model's position** by `modelUpdateInfo()`, which is Perfect Dark's own `subcalcpos()` - once a frame after the two ticks, not once per tick, or Bond walks in at twice GoldenEye's speed; and since 2026-09-18 (ge-bean.md, "The gun barrel: two faults in one sequence") **GoldenEye's hips must not be turned twice** - its header node applies no joint rotation while Perfect Dark's chrinfo *is* the hip node, so the group GoldenEye numbers part 1 is converted to a `POSITIONHELD` node and `bond_eye_fire`'s ninety degree turn stops coming out as a hundred and eighty; and **the cast reel** (ge-bean.md, "The cast reel: four faults, all of them GoldenEye's own numbers") is the **one** front-end screen GoldenEye draws into a z buffer - without it a character paints its far side over its near one - and its camera aims at the character's **root matrix** (its middle, 62) and not at the chr's position (where it stands, 10.9), with the ±100 height swinging the camera alone; its caption is on GoldenEye's own 315/108/152/174, which are already in 440x330; a head's sunglasses toggle and the gun's first two switches come off; and every model in the intro is lit by `gelogolight` and a reflected LookAt or it takes whatever the menu before it left behind. and **a texture a model file carries itself is named in its lists by its own address**, which the conversion was not moving with the data - the port's preprocessing rewrites such a `G_SETTIMG` only through an exact match against the texture rows and answers zero otherwise, so the GoldenEye logo's red ellipse read the head of the file (alpha zero) and its letters sampled 24 texels into their own picture (geconvert version 10; `$E/mods` is searched before `./mods`, so convert into `build/mods` before judging a converter change); and **the gun barrel** (ge-bean.md, "The gun barrel: Bond's tuxedo, and the 4:3 box") drew Bond's tuxedo flat black because the sight's own picture leaves `G_TP_NONE` set and nothing turned texture perspective back on for the model - GoldenEye's Rare logo, which this port does not play, is what leaves it `G_TP_PERSP` with `G_LIGHTING` and `gunbarrelLights` - and its 440x330 box now **covers** the window rather than fitting inside it, so a wide one loses the top and bottom of GoldenEye's picture instead of showing its edges sliding across black beside it; and **an animation's loop bit belongs on the animation** - GoldenEye's record carries it (`unk07 & 1`) and it is Perfect Dark's `ANIMFLAG_LOOP`, which is what wraps a frame past the end instead of holding the last one, and neither game's intro ever asks for a loop at the site that plays it - so `entry.flags = 0` in `introLoadAnims()` froze the cast reel's 26-frame `running_one_handed` in mid-stride for two of its three seconds (ge-bean.md, "The cast reel's runner stopped in mid-stride"); and **a row of `menu/intro.bin` is matched by its name**, which was a 20-byte field the converter truncated to 19 - so the ten animations with longer names (and `fire_standing_draw_fast`/`_slow`, which share their first 19 characters) matched nothing and **ten of the reel's twenty-two characters stood still**, the loader falling back to `idle` and saying nothing; the field is 32 bytes and the magic `GEI2` since converter version 11, and the loader names every animation the conversion has not got (ge-bean.md, "Ten of the intro's animations never loaded at all"); and **GoldenEye's blood runs on both of its screens** since 2026-09-19 (ge-bean.md, "The blood: GoldenEye's death screen, and why the barrel's wash never showed", `port/src/geblood.c`): one 42-frame animation out of the conversion serves the gun barrel and the death screen, and Perfect Dark kept the whole of GoldenEye's death but the animation (`redbloodfinished`, the red wash, the fade and the death camera are still there in `playerRenderHud()`), so a death on a converted mission or on GE Plus's arenas is two hooks and no new state - and **the renderer keeps a texture by the address it was uploaded from**, which is why the barrel's wash only ever drew its first, nearly empty frame: a buffer redrawn in place needs `videoFreeCachedTexture()` after every step; and **the gun barrel plays at the console's speed** since 2026-09-20 (ge-bean.md, "The gun barrel ran at twice the console's speed"): GoldenEye steps it once a *frame*, and a capture of the console shows the dots at sixty and everything from the sight on at a steady thirty - which its PAL constants confirm and which `M_INTRO`, started with the dots, is written to - so `introTickBarrel()` is a sixtieth of a second off `diffframe60freal` and half a GoldenEye frame from mode 3 on; ares draws it all at sixty and cannot answer a frame rate question; and Bond's camera follows the barrel's cover scaling on a wide window, where he had stood small and left of the lens's middle; and **GoldenEye's own sound effects play out of the ROM** since the same day (ge-bean.md, "GoldenEye's own sound effects, and the gun barrel's shot", `port/src/gesfx.c`, converter 39): its sfx bank converts as `menu/sfxctl`/`sfxtbl`, `geSfxPlay()` appends a sound the way modborrow.c does, the id is GoldenEye's `SFX_ID`, which is the bank's sound **id - 1** (GoldenEye reads its instrument through a struct that puts `soundArray` four bytes early; read from 0 until 2026-09-21, every sound played was the enum's next one), a key map's chain to a next sound cannot be rewritten to an appended id, so `geSfxPlay()` starts every link itself (each waits its *own* `velocityMax`), the volume is GoldenEye's own balance (effects at full over `g_musicDefaultTrackVolume[]`, scaled to the 0x4ccc its music plays at here: 0x5555 in the intro, 0x5fff elsewhere) - **a YouTube capture's limiter halves a transient, so measure loudness against the oracle's `PORT_AUDIO_WAV`** - and the folder screens and the watch play GoldenEye's own few sounds and are silent where it is (a cursor or value moving, a press on nothing), and the solo watch has GoldenEye's **interference** (`watchTickStatic()`: the face's green is the fill's alpha, and `G_RM_AA_PCL_SURF` is the snow because **a render mode's `G_AC_DITHER` bits do reach the hardware** - the microcode ors the whole word in and they stay set - with a scanline whose alpha wraps in a byte), its pages **fit the face at any window** (a text frame with no aspect mode is not square - a third too wide on 16:9; `frontWrap()` never measured a paragraph's last word; values at GoldenEye's 0xb4; the layout at 0.88), and **the gun in hand is held up on the face** (`watchDrawGun()`: the conversion's `Igx%03dZ` first person models, all 25 of which draw, placed by `menu/geitems.bin` - `gitem_structs` whole, converter 40, **C only: the Python converter has no item conversion** - under GoldenEye's 45 degree camera squeezed onto the text's frame, parts 8-13 hidden and **14-15 shown**, which are the throwing knife), and **GoldenEye's controller on the control page** (`watchDrawController()`: `GjoypadZ` is hand item 0x55 and converts like a gun, `Igx085Z`, converter 41; it turns only by the player's stick while they hold the page's second row and eases back after a hundred frames; the second pass of loose buttons beside their names is not done); and **Perfect Dark's own guns show on it too** (`watchDrawPdGun()`: the inventory menu's and firing range's `gunconfig[]` table, now at file scope in the port behind `menuGetWeaponModelConfig()` - its scale is already in view units - with `weaponGetFileNum()` and the weapon's `partvisibility`)); and since 2026-09-19 the folder screens' **background reaches the edges of a wide window** (ge-bean.md, "The folder screens' background on a wide window") - the folder and its text already keep GoldenEye's shape in the middle of any window, and what was black beside them is the backdrop, which is a **picture frame of eight vertices** and not a plane, so only its outer four move (`frontWidenBackdrop()`) and they move to the half width the *camera* spans rather than by the window's aspect, GoldenEye's own right edge being inside its 4:3 screen already; and the same day **everything 2D on those screens was a twelfth too far from the middle** (ge-bean.md, "PREVIOUS stood beside its tab, not on it") - `G_ASPECT_CENTER_EXT` holds this frame at `SCREEN_ASPECT` (320/220), *not* 4:3, so GoldenEye's 440x330 goes into it by its **height** and centred (`frontX()`, `frontScaleX()` == `frontScaleY()`), and the folder, drawn through `videoGetAspect()` with no aspect mode, was right all along; and since 2026-09-19 **a converted wall stops under the floor above it** (ge-bean.md, "Walls in the air over a staircase", `wall_above()`/`wallAbove()`, converter version 16) - the conversion raises a quad round every unlinked stan edge and used to raise it 400 units, while **GoldenEye's own wall is the edge and nothing more** (`sub_GAME_7F0B1DDC()` walks out from the tile the player stands on through the links alone and never looks at y), so wherever two walkable surfaces sit over one another the lower one's walls stood in the air across the upper one - which is every level with stairs, GoldenEye stacking its flights - and the traps in fixing it were that a riser's own side is a wall that is a *point* in plan, that a wall blocks between its own lowest and highest vertex rather than along its plane (`cdCollectGeoForCylFromList()` reads the tile's ymin/ymax), and that the player stands up to their own radius from it, on ground that much lower; and the same day **a wall's foot lifts over the head of anyone standing under it** (ge-bean.md, "And a wall hanging into the space under a ledge"), capped at 50 over its own edge and not made at all where the lift would have to go further - **players crouch twice**, and `playerGetBbox()` still holds their box at manground+30..+80 however deep (`minsane`), a chr's deepest duck being `chr->height` 90 over manground+20 - so most of what looked like this class is a raised platform a player belongs against, and **counting whether a position is blocked says nothing**: ask `cdCollectGeoForCyl()` which geo answers (`build/gexrom/blockprobe.py`), since a place under a walkway has a real wall beside it too; and since 2026-09-19 **a converted wall blocks sight and shots as well as bodies** (ge-bean.md, "Guards alerted across the map, and shooting through walls") - Perfect Dark reads a tile's flags for the question being asked and nothing else, so a wall carrying `GEOFLAG_WALL` alone stopped a body and was not there at all to a guard's sight (`GEOFLAG_BLOCK_SIGHT`) or to a bullet (`GEOFLAG_BLOCK_SHOOT`), which is "they shoot you through walls from across the map"; two AI rows in the same report told every guard to go looking for the player on its first tick (`IFISeeSomeoneShot`/`Die` are `aiIfSawInjury`/`aiIfSawDeath`, not a line to the player and a route to it), Perfect Dark's `aiIfChrHealthGreaterThan`/`LessThan` are named the other way round from their own bodies, and **`.xbla-work/ge-arena/genaitable.py` is stale and must not be run** - the AI map is kept by hand in `tools/geconvert/geaitable.py` and `port/include/geaitable.h` together; and the same report's cinema half (ge-bean.md, "The cinema's camera was the player's prop") - GE Plus's Cinema moved the **player's prop** to each shot, so a guard's list, which asks about the prop and not about the picture, found Bond standing at the camera: `g_Vars.bondvisible` covers everything that asks whether a guard can *see* him but nothing that asks where he *is* (`aiIfTargetInRoom` alone is 264 commands over the twenty missions), so the camera is placed on its own now with `playerSetCamPropertiesWithRoom()` from `lvTickPlayer()` - after `playerTick()` has built its own from the eye - and the prop stays at the spawn, which is where GoldenEye leaves Bond; and since 2026-09-19 a converted mission runs **GoldenEye's own guard AI and wears its own characters** (ge-bean.md, "GoldenEye's own guards, wearing its own faces and running its own AI"): GoldenEye keeps eighteen global AI lists that every level shares (`g_GlobalAILists`, data `0x8003744c`) and names one by an id of **1024 or less**, which is exactly where Perfect Dark's `ailistFindById()` divides the stage's lists from **its own** - so a guard whose list was GoldenEye's standard guard has been running Perfect Dark's unalerted list since the missions first ran, and the sight code was never the difference (`chrCheckCanSeeTarget()` is GoldenEye's `chrCheckTargetInSight()` line for line, and Perfect Dark's `chrsCheckForNoise()` only records a time where GoldenEye's alerts); the eighteen convert with each mission at ids from **0x800** - they must stay under 0x1000, since Perfect Dark makes a *background chr* of every stage list from there up and ticks it from frame one, which had `m_RunToBond` crashing in `chrGoToRoomPos()` with no prop - the table is sorted and holds each id once (Perfect Dark binary-searches it; Facility carries 1063 twice), and **`--ai-trace [frames]`** prints a line per AI command per chr with the list as `ailistFindById()` resolved it, which is how to answer "what is this guard being told to do"; and a mission's guards are GoldenEye's own eighty characters out of the ROM (`menu/gechrs.bin` for each one's flags, scale and pov, which are `makeonebody()`'s two `modelSetScale`/`modelSetAnimTranslationScale` arguments), rows taken from `g_HeadsAndBodies` per mission and given back by `gexPlusMissionHeads()` on any stage that is not one - a body's row must be under 256 (`packedchr.bodynum` is a u8, and so is `aiSpawnChrAtPad`'s), a head's need not be, since GoldenEye's own setups leave all but two heads at -1 and its `bodyChooseHead()` takes four male heads for a level and one female exactly as Perfect Dark's does; and since 2026-09-19 **a mission's own cutscene camera goes where GoldenEye put it** (ge-bean.md, "A converted mission's own cutscene camera"): GoldenEye's `CameraSwitch` becomes Perfect Dark's `ai00df` and the record it names is Perfect Dark's `cameraposobj` field for field, so it was copied raw - which is nearly right, because **`setup.c` still does GoldenEye's own conversion on it after the load** (the position over 100, the angles over 65536), and what a raw copy misses is the level's offset, so every one of the thirty-one shots in the twenty missions stood at GoldenEye's origin; the yaw is **mirrored** between the two engines and not turned half round (GoldenEye's z is -cos·cos where `playerExecutePreparedWarp()` builds +cos·cos - a third convention again from the player's own basis, which is why the Cinema page wanted +180), the look-at-Bond flag (`CAMERAMODE_INTRO`, six of the thirty-one) has no case in Perfect Dark at all, and **the player has a chr and a prop at all times but only a model while something draws their body**, so the five missions that teleport Bond on the frame their cinema starts crashed `chrMoveToPos()` on a NULL model - which is what "a converted list parks at its CameraSwitch" really was; and the same day **GoldenEye's vehicles run** (ge-bean.md, "GoldenEye's vehicles, which nothing had ever ticked", `port/src/gexplusveh.c`): Perfect Dark still has both of GoldenEye's vehicle records - `truckobj` is its `VehichleRecord` and `heliobj` its `AircraftRecord` field for field - and **no tick for either**, nothing outside chrai.c so much as naming `g_Vars.truck` or `g_Vars.heli`, since the hovercar and the chopper took the job over; the record's **AI list id** sits at GoldenEye's 0x80 = Perfect Dark's 0x5c and had no `OBJ_TAILS` row, so `ailistFindById(0)` handed all seventeen vehicles Perfect Dark's own global list 0 (the guards' fault of `1afd53740` in the one place it was not looked for); all three vehicle AI commands are Perfect Dark's own line for line, so what was missing was GoldenEye's tick, and the rotor's angle is advanced in the **render** on one node's matrix (part 2, the numbering surviving the conversion) rather than at the fan's hook, which turns the whole object; **and its three animations fly it** (ge-bean.md, "And the three animations an aircraft flies by"): `animation_table_ptrs2[]` is one animated part and the four root-motion channels where a character's is fifteen parts, its ids **collide with the guards' table** so they take an id space of their own from `GEVEH_ANIM_FIRST` (256) and a vehicle's `PlayAnimation` becomes the port's own `aiGeVehicleAnim` (0x01e2), the aircraft model keeps its **chrinfo node** now that `modelUpdateChrNodeMtx()` tolerates a model with no animation (GoldenEye's own answer: the node's matrix is its parent's), and the flight is the animation's **root motion** through `modelSetRootPosition`/`modelUpdateInfo`/`modelGetRootPosition` with the height from the record's own pad - and the two silent traps are that **a prop's model carries no `anim` until something gives it one** (`modelSetAnimation2()` is a no-op without it) and that **an anim slot is only marked free, never cleared**, so a `playspeed` of zero left by its last owner holds frame 0 for ever; and since 2026-09-19 **GE Plus pauses on GoldenEye's watch** (ge-bean.md, "GoldenEye's watch as GE Plus's pause", `port/src/gewatch.c`): the gun goes down, the view tilts to -40, GoldenEye's own arm comes up playing its `bond_watch` and the view zooms to 5.9 degrees, with its five screens on the face (mission status and its abort, inventory, control, options, briefing) and its multiplayer overlay in the arenas - GoldenEye's state machine and its own strings, and the faults were that **a model instance belongs to the stage pool** (never free one after its stage, and `modelmgrAllocateSlots()` runs later in `setupLoadFiles()` than a stage hook, so the arm loads at the first pause), **`renderdata.unk00` is written by `modelSetMatrices()`** so a pose handed in is gone by the time the model is posed, **the watch's three hands are parts 0, 1 and 2** and not the first three `POSITIONHELD` nodes in the tree, the pose is reasserted on `matrices[0]` **after** the animation (rotX(+90), less the hour node's own offset), and **GoldenEye's in-game screens are laid out on its 320x240 frame** where the menus are its hi-res 440x330 (`gexFrontTextFrame()`, and since the watch pulled back it is over the **face** rather than the viewport, so the screens stay on the watch at any zoom); the arm is posed at the player's own wrist and the **whole** pose - not just the root, as GoldenEye moves it - is carried to the watch, since this window is wider than GoldenEye's 4:3 and has room for the cuff and the hand beside the face, and the open zoom follows the window's shape (5.9 degrees on 4:3, 11 by 16:9); and since the same day **the arm is the player's own character's** (ge-bean.md, "The player's own arm wears the watch"): `bond_watch` is a character animation and GoldenEye's floating arm is one of its own characters, so the animation poses the player's own body, every list outside its arm is put away for the draw - following **distance nodes' targets** to find them, and clearing the *instance's* `rwdata->dl.gdl` rather than the definition's pointers - and GoldenEye's own watch model (`GwatchidentifierZ`, out of `gitem_structs` at data 0x12b94, converter 35) goes on its `MODELPART_CHR_LEFTHAND`, where a position node's `pos` is the bone that built the matrix and not an offset to hang anything at - and **nothing done to the watch can turn it on the screen**: the move to the eye is `pose * inverse(face)`, so a roll on the watch turns the *body* under it, the dial's look is the pose against the face's axes (GoldenEye's rotX(+90) is for its hand bone, and the watch model is a quarter turn off it), and the fit on the wrist is measured off the floating arm, which wears the same watch on the same bone; the watch is **life size** (0.1 - anything more shrinks the whole body towards the eye, which is where the headless shoulders came from), its hands are **vertices of its one mesh** turned in place, the body wears a copy of its head that goes when the near plane would cut it, and **the conversion read a type 4 list record's one-byte render mode as a word until version 36** (3 became 0x0300: no render mode, and the second list never drawn) - which was GoldenEye's floating arm drawn as a pale sleeve and an icy hand round a white dial, its watch item, and the 21 third person guns and one hat missing their trigger guards, stocks and sights; *not* every character, as first guessed from the arm (count with `build/gexrom/gemodes.py` before saying how far a fault goes); fixed with 137 before/after pictures in `build/gexrom/cap/`, and with the arm right **the watch is GoldenEye's own arm again**, the player's body kept behind `g_WatchOwnBody` (ge-bean.md, "The render mode, fixed in the converter"; the intro is captured from `--boot-stage 0x26`, never from a mission)
+- **GoldenEye's HUD on GE Plus's levels** — ge-bean.md, "GoldenEye's HUD" (`port/src/gehud.c`, converter 53): ammunition with the ROM's own pictures, the crosshair, the two gauges, both kinds of message and the countdown, each swapped in where Perfect Dark draws its own while Perfect Dark keeps the state; **a Perfect Dark weapon in the hand keeps Perfect Dark's ammunition display and sight** (`geHudOwnsWeapon()`); GoldenEye's number strings end in `\n` because `textMeasure()` only counts a height at one; the pictures are stored bottom row first; `TextPrintTop` had been converted as the bottom message; GoldenEye's sight and Perfect Dark's classic sight never play the "target acquired" beep (`g_SightQuiet` - the classic sight's lock-on still runs, the rocket launcher homes by it); a probe's `--savedir` is under `data/`; and **its radar** (converter 54): `radarRender()` keeps deciding who is on it and every blip already goes through `radarDrawDot()`, so one hook there and GoldenEye's disc (image 200, first row skipped, 31 texels centre to centre) is the whole of it - and a fill rectangle snaps to the coarse frame buffer, so blips are written with the command's fraction bits (`hudFillBox()`)
+- **A converted level's doors and pickups sound like GoldenEye's** — ge-bean.md, "A converted level's doors, its body armour, and the index that was one out": the conversion always carried GoldenEye's door sound type and Perfect Dark read it through its own table; `geSfxDoor()` answers propobj.c's four door moments from GoldenEye's switch (a sound is either let go to ring out or *held* - the looped slide the door's next sound stops), through an audio config of GoldenEye's own falloff; `geSfxPickup()` maps the seven `SFX_PICKUP_*`; **a sound that plays and is plausible proves nothing about which sound it is** - dump the bank and check a property the name predicts; `doorsnd.py`, and `runall_snd.sh` is the sweep with the sound on
+- **Every other sound of a converted level** — ge-bean.md, "Every other sound of a converted level": **Perfect Dark's sounds 1-261 are GoldenEye's number for number** (141 of its `0x80xx` rows resolve to one too, the door table included) and only the *sample in the slot* changed, so one hook in `func00033820()` (`geSfxRemap()`, chains through `geSfxChain()`) plays GoldenEye's bank on a converted level, less the slots Perfect Dark's own code reuses (9 and 55 are its "no sound"); a converted AI list's sounds were raw GoldenEye numbers and `SfxEmitFromPad` had become a command that played its *time* as a sound (`psEmitFrom()`); guns fire with `gegunsShootSound()`; sneeze, cough and gas were left as "no sound"; vehicles' engines; GoldenEye has **no footsteps**; Bond grunts (68) where Perfect Dark's player yelped like a guard; **the near-miss whistle is dead code in the ROM** (no caller, checked by searching the game segment for the `jal`) and was not restored; an automatic's `SoundTriggerRate` is Perfect Dark's `gsetGetFireslotDuration()` (`gegunsShootSoundRate()`); the tank's sounds came with the tank; and grep a build for `error`, not ` error`
+- **A tester's seven on Dam, and the four conversion rules behind them** — ge-bean.md, "A tester's seven on Dam" (converter 55): **a decompilation's name for a flag bit is a guess** - PlayAnimation's 0x08 ("play sfx" / `CHRANIMFLAG_COMPLETED`) means "counts as stopped while animating" in both games and nothing else, GoldenEye's guard list only looks and listens while stopped, and dropping the bit made every idling guard blind and deaf; a borrowed GoldenEye X gun never had the ROM's stats re-applied, and its noise (now in gegunstats.h, on the weapon *function*) gave the silenced PP7 none; every converted object had 1000 health where GoldenEye's is the 16.16 word at 0x74; GoldenEye lets Bond use any **tagged** object and Perfect Dark wants a flag; a destroyed converted prop looked its explosion up past the end of Perfect Dark's table (`geexplosiontypes.h`); and **a probe of what the player does must go through what the player goes through** - `damfull.py` called `propobjInteract()` and passed an objective no player could press
+- **GoldenEye's tank** — ge-bean.md, "GoldenEye's tank" (`port/src/getank.c`, Runway 0x5e and Streets 0x61): Perfect Dark counts the record and builds nothing, but kept the player's fields, **AI command 0x00db (GoldenEye's `IFBondInTank`, emptied)** and ammunition 0x1d (`AMMO_TANK`); **it is Bond who moves and the tank is carried under him**, so there is no new movement mode - six hooks in the walk; the view is first person from the model's **seat node, which is where his feet go and not his eye** (at the node the eye is inside the turret and its faces cull: "the front is being culled"); the shells are weapon 0x7e whose trigger must not also be the activate button; a guard teleported by writing his prop from gdb is put back by his tick (`chrMoveToPos()`); the hull is a rectangle tested by lines (`tankRectBlocked()`) and **`func0f069c70()` switches an object's collision back on**, so it first ran into itself; objects are driven over by box overlap, not by the collision, which a line does not cut on a parked truck; the shell count is on GoldenEye's HUD (gehud.c); Bond **climbs onto it** as GoldenEye has him (`geTankBoard()`, 2026-09-21: bondwalk.c kept the half that switches a touched tank off and not the lift, so he walked through it - test against the tank's own collision polygon, and `bwalkTryMoveUpwards()` must switch it off too), **a positive `speedtheta` is a turn to the right** (the hull's sign was backwards until a tester drove it), its thirty shells are in the setup's record at 0xd8 (converter 57); and **a GoldenEye weapon with nothing to hold has a model state with no file** (the shells, the Data Uplink's gadgets), which a third person body was handed as a gun with no matrices - `mtxF2LBulk()` counts down from its count, and climbing out of the tank in third person crashed ("Climbing out of the tank in third person")
+- **GE Plus's Cinema, and staying inside GE Plus** — ge-bean.md, "Stuck in the Cinema, and GE Plus's own main menu": a cinema read the **N64's** buttons alone, and in the port's PC scheme `CK_A` is unbound, `CK_B` is `E`, Escape is no bind at all (it is read with `inputKeyJustPressed()`) and the **right mouse button is `CK_RTRIG` as well as `CK_CANCEL`** - so Escape did nothing and a right-click *skipped to the next shot*; it reads what the folder reads now, leaving asked before skipping. And a cinema came back to `STAGE_TITLE` with the folder drawn over it - **the title is not a backdrop**, it ticks on underneath, reads the same presses and after twenty seconds loads its **attract demo**, which resets the model pool the folder's own model lives in. Both a cinema and a mission go back the way a **match** does (`gexFrontGoBack()`: the Institute, `TITLEMODE_SKIP` and `var80087260`, which skips the Institute's arrival and is what `menuTick()` waits on to push the Perfect Menu). And **while inside GE Plus its main menu is the main menu** (`gexFrontIsInside()`, true until the player backs out of the mode select): a mission's endscreen - finished, failed or aborted, all three through `MENUROOT_ENDSCREEN` - comes back to the folder instead of dropping out to Perfect Dark's title. A `--boot-stage` run has no agent file, so its endscreen is the **"Error" dialog** that no press dismisses; drive the root or call the hook
+- **A converted mission ends on GoldenEye's report and statistics pages** — ge-bean.md, "A mission ends on GoldenEye's report, not Perfect Dark's endscreen": `gexFrontMissionReport()` stands in `mainEndStage()` where `endscreenPrepare()` does, keeps how the mission went (the level is gone when the pages draw) and goes back to the folder on `SCREEN_REPORT`/`SCREEN_STATS`; Perfect Dark's endscreen had been **filing a converted mission's time under the same number in Perfect Dark's own save** (Dam completed Defection), so best times are the remake's own `$S/geplus-times.txt`; `--boot-stage`, the GE-X fallback and co-op keep Perfect Dark's endscreen; Dam is stage **0x15**; `build/gexrom/report.gdb`
+- **GoldenEye's credits after the Cradle** — ge-bean.md, "GoldenEye's credits after the Cradle: Cuba" (`port/src/gecredits.c`): the credits are GoldenEye's level Cuba, converted as **mission 20** that the folder never lists (not an arena), its list run as it is with three port AI commands (0x01e8 CameraOrbitPad on `TICKMODE_WARP`, 0x01e9/0x01ea the roll), the rows in menu/credits.bin drawn as `bondviewRenderCredits()` on 440x330; then GoldenEye's **long cast reel** (`geIntroOpenCastAfterCredits()`) and the grid on the Cradle; the roll's 20 units a second is a judgement (the native oracle faults drawing it)
+- **A converted mission's opening and its ending** — ge-bean.md, "A mission's own opening, and the endings Bond was never in": a mission plays GoldenEye's still, fade and **swirl down to Bond** before the player has control (`gecinema.c`; Perfect Dark kept GoldenEye's frozen camera as `TICKMODE_WARP`, so the swirl is that mode with a camera of its own, the `INTROTYPE_SWIRL` records converted to floats in the file, converter 42), wearing **GoldenEye's own Bond by the setup's outfit** (`gexPlusMissionBond()`, asked in `playerTickChrBody()` and *not* `playerChooseBodyAndHead()`, which the first person hands and the watch's sleeve also ask); every **ending is Bond's own AI list** (`SetBondsAiList`) and never ran because `HideAllChrs` hid the player's chr, which GoldenEye does not have yet when it runs; **`TRYGiveMeItem` carried GoldenEye's raw prop and item numbers** (105 commands: every guard a list arms held Perfect Dark's model of that number - a lab door, an ammo crate), and `IFBondHasItemEquipped` its raw item, which is why Surface 2's spawners changed; **a tag that points at a four-byte "nothing" record** had `OBJHFLAG_TAGGED` written 0x40 bytes past it and crashed Streets; `--skip-mission-intro` for probes, `runall_intro.sh`/`runall_intro_t.sh` for the sweeps with the opening; build HEAD beside a change (`build/gexhead`) before believing an old sweep log; and ge-bean.md, "The opening swirl looked past Bond, and started a leg early" (2026-09-22): a swirl leg's **flag 4 means "look at Bond"** and its absence "look forty units along his own line of sight" - the port had the two the other way round, which on Facility (the only mission whose records carry the flag) swung him out of frame and filled the screen with the shaft wall over the last second, and everywhere else left the look vector zero on the frame the camera reaches his eyes; and the path starts on **record 1**, record 0 being the spline's prev control point (`s32 intro_camera_index = 1;`, and thirteen of the twenty missions store record 1 at record 0's own offset, three more within a unit)
+- **GE Plus's EXTRA page, the Cinema's Intro/Outro, and GoldenEye's monitor programmes** — ge-bean.md, "EXTRA: the Cinema on the mission grid, outros, and the monitor programmes" (converter 44): the mode select's third row is **EXTRA** (1. Cinema, 2. Monitor Programmes); the Cinema is the mission select's slide grid and then **Intro** (every opening shot, then the fade and the swirl) or **Outro** - found by the pair every mission ends on, `HideAllChrs` + the exit command, with a background chr started on it; `--cinema-opening`/`--cinema-ending` and `runall_cinema.sh`, where **rc 124 after an "over at frame" line is a pass**; **leaving either Bunker crashed the game and always had** - a GoldenEye hanging TV attaches to its mount through `OwnerOffset` (0xf4 of its record), the conversion carried no monitor tail, so it hung from *itself* and `objFree()` recursed for ever at the unload, which no sweep had ever done (`leave6f.gdb`); and **a converted level's screens ran Perfect Dark's programme 0**: `tvscreen` is GoldenEye's monitor command for command, so its 52 programmes (one block at data 0x80030b74, 1334 words) and 50 pictures convert as `menu/gemonitors.bin` and `port/src/gemonitor.c` answers propobj.c's three questions (which programme, where a jump goes - a word of the block, since a list is 32 bit and a pointer 64 - and which picture); **Monitor Programmes** shows them twelve to a page on GoldenEye's own TV sets (`PROP_TV1`, `frontDrawTvs()`: one modeldef, an instance a cell, under the folder's camera), and the level's clock is stopped while the folder is up, so the page lends a screen the frame's own; the large view is the TV's own screen node drawn alone through `tvscreenRender()` (it was a second renderer and disagreed with the sets: no mip levels, no alpha, no turn), `geMonitorImage()` answers only a screen running one of GoldenEye's lists (the Institute's own TVs, drawn under the folder, were loading Perfect Dark's textures into GoldenEye's picture table), and a model on a folder page is drawn with `G_ASPECT_CENTER_EXT` off or a wide window squeezes it (`frontTvCamera()`; `monsweep.gdb` captures all 52 both ways); the folder never opens by itself headlessly - reach it through a finished `--cinema-ending`; and the Cinema's **Loop** row (Off/Level/All, 2026-09-24, ge-bean.md "The Cinema's Loop row": Level repeats for ever, All cycles every mission for ever) breaks each level of All at the music's own loop point nearest the **Time** row's minutes (1-20, `Mod.GePlusCinemaMinutes`) - a song has come round only when *every* track has made its loop-for-ever jump, since a drum track loops its own bar (`g_SeqLoopPoints`, n_csq.c)
+- **A converted mission's character rows, and testing the way a tester runs** — ge-bean.md, "Three crash reports, two faults": `g_HeadsAndBodies` past the stock table is laid out in `gebean.h` - **152-175 are kept for a converted mission's bodies** (a body's row must fit a byte) and the Combat Simulator's pool starts at 176, because GoldenEye X's borrowed characters are 106 rows and used to start at 152 too, which left a mission none; a spawn command left with GoldenEye's own number spawned Perfect Dark's row of that number, and its 12 and 4 are **heads** (`Cheaddark_frockZ`, `Cheaddark_combatZ`) - no root matrix, and `chrTestHit()` died on the first frame Baron Samedi was on screen; `modelSetMatrices()` tries **`modelasm00018680()` before `model.c`**, so a guard in one twin is no guard (Runway's still plane, in the opening shot); `build/gexrom/runall_t.sh` sweeps the missions with GoldenEye X installed and `XblaGoldenEye=1`, which the plain sweep never did; and a side-by-side binary must not be named `<exe>.new`, which the updater deletes at the next start
+- **GoldenEye's own 2-D collision on a converted level** — ge-bean.md, "GoldenEye's own collision for a body: the tile graph" (`port/src/gestan.c`, converter 38): GoldenEye's collision is its tile graph and nothing else, so the only walls that exist for a body are the unlinked edges of tiles *linked to the one it stands on*, within its reach; the conversion keeps the graph (`bg_gx<level>_stan`, a link being an address - `first tile - 0x80 + (link << 3)` - and not an edge number) and the collision library's four background walkers ask `geStanWallSkipped()` whether a wall's tile is linked to the body's, for queries carrying `GEOFLAG_WALL` only; which tile a wall came from is the order the conversion wrote them in, checked point for point at the load; it is what let a player up Dam's first guard tower; and a walk probe must steer round corners, arrive within a body's radius and leave characters out, or it reports the probe's own faults
+- **A converted stair's rail and the wall beside it** — ge-bean.md, "Through the rail and into the tower's wall on Dam's outside stair" (converter 50): the tile a body stands on was the highest under `manground + 40`, and a player's ground lags a staircase by more than that when running up it with the stick to one side - the tile taken was the ground a storey below and every wall of the stair was left out (`stanTileUnder()`'s rise, only where the limit is a foot); and GoldenEye links a tread to a deck 317 over it through tiles that stand on edge, which is a drop from the top and a walk into the wall from the bottom (its only check is an edge 175 over Bond's eye), so the conversion raises a wall on the low side of **a link that climbs** more than 60 (`stanClimb()`, bit 14 of the link in the graph file; a ladder's link is left alone); `build/gexrom/realwalk.py` walks with the game's own walking and is the probe that reproduces a "stuck on the stairs" report - a move-function probe does not slide
+- **A converted level's line tests follow the line** — ge-bean.md, "Ourumov's squad running on the spot at the bottling room's door": a guard opens a door with a line test and the door is whatever prop it stops at; the tile graph was asked with a circle round the line's start as wide as the line is long, which took in an upright wall tile whose open edge crosses the doorway in plan, so the line stopped at a wall a pace short of the door and nothing was opened - `stanFlood()` measures from the move's line now (`GESTAN_LINEREACH`), as GoldenEye's `walkTilesBetweenPoints()` does; `guardrun.py` is the probe (a chr off screen skips collision, so the player must be placed to watch)
+- **A guard skipping waypoints on a converted level** — ge-bean.md, "Alerted guards running on the spot at Facility's stairs": a guard cuts ahead to a pad whenever a cylinder swept in plan meets no wall, and a converted level has no wall at a floor's edge, so Facility's guards cut from the floor to the landing's pad over their heads and from the landing to the player under it and ran on the spot there (arriving needs 150 in height); GoldenEye's skip passes only where the tile graph's walk ends on the target's tile - `geStanReaches()` in `chrGoPosMayCutTo()` for guards on a remake stage
+- **A converted level's hanging TVs under their mount** — ge-bean.md, "Bunker's hanging TVs, 1.7 m under their mount" and its 2026-09-26 correction: GoldenEye builds the mount's arms at the object's origin exactly as Perfect Dark does (its `PROPDEF_RACK` branch) and hangs a TV **without** taking the TV model's root back off (its `setupSingleMonitor()`); Perfect Dark's `setupCreateSingleMonitor()` subtracts it, and GoldenEye's `Ptv1Z` has its root 1694 up - so on a converted stage the TV keeps its root, and the first fix (arms moved up the mount's root) is undone; `~/dam-oracle/gebunker.py` boots the oracle into any level, `f3vrack.py` reads its rack matrices, and a model's matrices are only readable inside the frame that built them
+- **The sky's cloud plane and the two projection matrices** — ge-bean.md, "Three visuals from the 2026-09-26 pass": the N64 shades the cloud plane linearly *on the screen* and the port's 3D plane (far corners 300000 off) was shaded linearly *in the world*, so bright cloud reached the horizon and showed through Dam's cliff seams (`skyRenderCloudTri()` splits at screen midpoints now); rooms and props are drawn under different projection matrices, which as s15.16 disagreed on depth by tens of units far off (Frigate's bridge consoles through its wall) - both are floats with `CAM_PROJ_MTX_FLAGS` at every load
+- **A converted prop's skeleton, and Caverns' eyelid and iris doors** — ge-bean.md, "Caverns' doors were never there, and a triangle kept popping on the screen" (converter 59): a model header's second word is its skeleton - GoldenEye a **pointer** into its data segment, Perfect Dark an **id** resolved through `g_Skeletons[]` - so the conversion wrote `SKEL_BASIC` for every prop, and Perfect Dark poses a door **by its skeleton and by nothing else** (`doorInitMatrices()` is not the branch that calls `modelSetMatrices()`: it writes matrix 0 and then the leaves, only for `g_Skel11` and `g_Skel13`), so the eyelid and iris doors' other 2 and 12 matrices were never written and were drawn at whatever the frame's `gfxAllocate()` scratch held - the doors missing and a leaf across the near plane often enough for a tester to report a triangle popping on the screen; `GE_SKELETONS`/`propSkel()` names all fifteen of GoldenEye's prop skeletons and maps **only** those two (the rest are one matrix or are posed by their object type, and what Perfect Dark reads them for is shooting glass out of a door or a lens), and 164 and 165 are the only door models over every GoldenEye setup with more than one matrix; judge it by toggling the skeleton **inside one run** (`cavedoorab3.py`), and an eye or iris door's `maxfrac` is an angle in degrees, not a fraction
+- **A converted level's door in an outside wall** — ge-bean.md, "A tester's four on Runway": `doorInit()` finds a door's rooms again from its middle, which is in the wall - past its room's box and inside the outdoors' for Runway's back doors, with no portal between, so from inside they were an open doorway onto the sky; a remake stage's door keeps its pad's room too (Runway 2, Silo 8, Frigate 6, Depot 1); the pad's room was never wrong, so ask the prop its rooms first; `rw/padshot.py` takes the port's pad number (bound pad k is numpads + k); and ge-bean.md, "The shut door that was not drawn from the corridor facing it" (2026-09-22): a door prop's rooms come from its *middle*, which sits on the portal's plane and a hair past it, and a converted level's room boxes meet there instead of overlapping - Frigate's door 93 was the deck below's alone, so from the corridor the **shut** door was never drawn while its portal stayed correctly shut, which reads as an open doorway onto the sea; `geRoomDoorPortalRooms()` registers a door in both of its portal's rooms on a remake stage (five doors on four levels), and the earlier pad-room fix does not cover it
+- **A guard inside a converted door, and a destroyed prop that stayed whole** — ge-bean.md, "A guard inside the Cradle's door, and Surface's padlocks that stayed whole" (2026-09-26): with no portal to name the far side (the Cradle has none) a door was its middle's room alone and a guard from the other room never met it, so it was never opened and he ended inside the leaf - `geRoomDoorSideRooms()` adds the floor tile's room either side of every remake-stage door; and Perfect Dark's `objDeform()` barely moves a GoldenEye prop (ten units times a 0.1 scale) and blackens through a colour index a converted list does not share, so GoldenEye's own rule and seeds (`objDeformGe()`, `geexplosionseeds.h`) crumple it now - the padlock's black count matches the oracle exactly
+- **A converted level's vents and crawl spaces** — ge-bean.md, "Standing upright in Facility's vent: GoldenEye's force-crouch tiles": GoldenEye has no ceilings, its tile's special value 1 (`STANTILEFLAG_FORCECROUCH`) sets `autocrouchpos` on every move, and Perfect Dark kept the field and its reset but nothing that sets it - `geStanForcesCrouch()` from `bwalk0f0c63bc()` on a remake stage, no converter change (the graph file already had the byte); eight levels carry such tiles; Facility's spawn tile is not one, so probe by walking in (`crouchwalk.py`)
+- **A converted level's ladders** — ge-bean.md, "Dam's ladders: up was fine, down was a fall" (converter 51): Perfect Dark only takes hold of a ladder that reaches over the player's feet and GoldenEye's end level with the floor at their head, so every converted ladder climbed and none could be climbed down; **raising the head in the conversion does not work** (a ladder's normal is turned to face the player, so from behind the head is climbed and fallen off) - on a remake stage `bwalkUpdateVertical()` takes the ladder from the top where the second ladder test finds it and the ground is 30 below the feet, and it keeps its hold while the player keeps walking; an upright tile touching a ladder gets no climb wall
+- **An arena's weapon spots and ammo crates** — ge-bean.md, "Archives, Bunker ii and Egyptian had no guns or ammo" (converter 70): the multiplayer setup's items are walked through every object, not up to the first door; a crate takes the ammunition of the weapon spot written before it (GoldenEye's `lastmpweaponnum`, Perfect Dark's `g_SetupCurMpLocation`), so keep the setup's order; a pad from 10000 is a bound pad at numpads + k
+- **Anything that rolls the weapon table on a converted level** — ge-bean.md, "Start Armed's Random handed out a Mauler on Dam": `mpWeaponRowSuitsStage()` keeps a roll to GoldenEye's rows on a remake stage unless "GE Plus: Include Perfect Dark Guns" is on (one switch for the sets and the rolls), falling back to every row when GoldenEye's are all switched off - (the `XblaGoldenEye=0` in `build/gexrom`'s pd.ini did that until the switch went on 2026-09-21; it is dead now)
+- **The room a converted level's picture is drawn from** — ge-bean.md, "Sky round a stairwell: the room a picture is drawn from": GoldenEye does not draw from the tile's room - it starts there and follows a plumb line from the floor under the eye up to the eye, changing room at every portal that is not upright (`bgRoomVisibilityRelated()`), so a player two steps down a stairwell, standing on the stair's tiles with their eye over the deck, is drawn from the deck's room; without it the deck was reached through a doorway a storey down and drawn in that doorway's box, and the sky showed round the stairwell (`geRoomCamera()`, first person only; the prop stays in the tile's room); and a gdb Python `stop()` must never make an inferior call
+- **A converted level's portals are slabs** — ge-bean.md, "A portal is a slab: GoldenEye's thickness and its special portals" (converter 52): GoldenEye's portal record has a thickness byte (mantissa in quarters, doubled by an exponent) inside which the camera is in both rooms and the room beyond gets the whole screen, and a SPECIAL flag that gives the whole screen once the portal is in view - set in the file on Dam and Jungle and **by a table in the code** on Control and Jungle (`specialportalarray`); the conversion carries both (thickness re-coded in world units in the record's spare byte, the flag as `PORTALFLAG_02`) and bg.c follows GoldenEye's three rules behind `g_BgGePortals`, on a remake stage only; it is what "in the void until you keep stepping" was - a step past a doorway's plane with the floor still the first room's drew nothing but sky; **never judge a visibility change by pixel-diffing two runs** (more rooms on screen changes which guards tick as on screen, and the simulation diverges) - toggle inside one run (`portalab.py`, `padab.py`)
+- **GoldenEye's Japanese and PAL cartridges** — ge-bean.md, "The later cartridges' setups and portals" (converter 90): "GE Plus: Later Revision (JP/PAL)" loads a second converted setup where they changed one (`revsetup`/`revmpsetup`, Silo's five opening shots among them) and the PAL portal thicknesses (`revportals`), picked at each load; the decompilation's bg `j/` files are not Japan's (its bg files are the US ones) and its `portal_N` names are not table indices - read the ROMs
+- **A converted mission's civilian casualties** — ge-bean.md, "GoldenEye's civilian count is Perfect Dark's kill count" (converter 91): GoldenEye's `CHRFLAG_COUNT_DEATH_AS_CIVILIAN`, counter and `IFKilledCiviliansGreaterThan` (0xf7) are Perfect Dark's `CHRCFLAG_KILLCOUNTABLE`, `g_Vars.killcount` and `aiIfKillCountGreaterThan` (0x00fc) bit for bit, so row f7 maps to 0x00fc and nothing else was needed; the decompilation prints the flag as 0x00001000 (`CharArrayFrom32Rev`)
+- **A converted mission's switches and its truck's heading** — ge-bean.md, "Dam's truck drove sideways, and its gates had no switches" (converter 46): GoldenEye's `PROPDEF_SWITCH` (0x13, which the decompilation's setups mislabel `LinkProps`) is how a console opens a gate and was converted as nothing; Perfect Dark's `OBJTYPE_LINKLIFTDOOR` is the same record a word longer and `doorCallLift()`'s "unused" door-to-door branch is GoldenEye's behaviour, so it goes through as a short record; Dam's gates are an **airlock pair** and a guard shuts the first behind the truck at ~frame 259, which cancels a twin's wait - press a console after frame 600 or the probe reports GoldenEye's own behaviour as a fault; a vehicle's heading is not in its record - GoldenEye takes it on the first tick from the path or the placed matrix (`PROPFLAG_INMOTION` = `OBJFLAG_CHOPPER_INIT`) and rebuilds the matrix from the heading times the scale read off `realrot`
+- **A converted mission's truck is solid and waits at a shut gate** — ge-bean.md, "Dam's truck could be walked through, and drove through its shut gates": an object's collision block is built once at the load and only `func0f069c1c()` moves it, so the truck's stood at its spawn; GoldenEye opens no gate for the truck - its tick tests the truck's box against chrs, players, objects and doors after each step and takes a refused step back (`cdTestBlockOverlapsAnyProp()` here, the door's own test); and `bgFindEnteredRooms()` **adds** to the room list it is handed rather than finding one, so seed it with the middle's rooms or the truck keeps its spawn's rooms and meets nothing; `truckgate.py`, where a warp must set `roty` too
+- **GoldenEye's gadgets, the dive off Dam, and rooms named by a pad** — ge-bean.md, "Dam's dive, and the covert modem" and "The rest of GoldenEye's gadgets, and its own models in the hand" (`port/src/gegadgets.c`, converters 47-48): **Perfect Dark reads a "pad's room" argument as a room number unless it is pad + 10000** (`chrGetPadRoom()`), which meant no room trigger (264 `IFBondInRoomWithPad`) and no enter-room or deposit-in-room objective had ever fired on a converted mission; **a background chr's target is prop 0**, not the player; GoldenEye's thrown gadgets are mines to its own code (ECM mine hosts), six gadgets have no model in the hand and are only ever "equipped while the object is activated" (Data Uplink hosts, `WEAPONFLAG_FIRETOACTIVATE`), **a weapon number is an s8 so eleven items share seven numbers, two of them by mission**; the photograph check must run in the render (it reads prop matrices); `port/src/preprocess/filesetup.c` drops any record field it does not name (a throw-in-room record's weapon arrived as zero); and the in-hand model is measured and placed, because GoldenEye poses it with a hand animation and its WeaponStats position places nothing
+- **A converted mission's ending: the animation scale of four, and the room a cutscene camera draws from** — ge-bean.md, "Dam's outro: Bond to his knees in the platform" (converter 56): GoldenEye's PlayAnimation bit 0x20 multiplies the model's animation translation by four and stays on the model (`CHRANIMFLAG_GE_TRANSLATE4X` in `chrStartAnim()`; Dam's dive is authored a quarter size, and the conversion had dropped the bit on purpose); a cutscene camera's room is the **tile's**, walked to from its pad's tile in plan and carried up the plumb line (`geStanWalk()`, `geRoomCutsceneCamera()`, from `playerExecutePreparedWarp()`) - Perfect Dark's portal walk put Dam's last shot in a room that does not see the dam; the oracle runs an ending from `~/dam-oracle/geoutro.py`, with a pad script that does not press anything after the opening
+- **Bond seen twice through Dam's dive** — ge-bean.md, "Bond seen twice all the way down the dam": the doubling was in time - a cutscene forces the player's body to the ground every tick (`playerTickThirdPerson()`), and `chr0f01f378()`'s `CHRCFLAG_FORCETOGROUND` branch sets the root's base height to its goal, so the height is never tweened between animation frames; `dam_jump` plays at half speed and drops thirty units a frame, so y stepped at 30 Hz under a pose moving at 60; left out on a converted level; `doubleprobe.py`, and a **watchpoint** on the root's `unk34.y` found the writer after reading model.c found the wrong one twice
+- **Black mirrors floating in the air on Dam and Facility** — ge-bean.md, the section of that name (2026-09-22): GoldenEye's window glass (`Pgx104Z`) drew its material's 256x256 reflection map `_0x00B5FD45` opaque instead of its 32x32 tinted pane; `beanTexIsGlassOverlay()` skips it as it skips the scratch map; the panes' positions are GoldenEye's own (oracle-checked, all 20 Facility windows) - an object's first matrix never takes its root group's origin in either game, and the N64 look's "glass in the frame" is the portal's tint, not the pane
+- **The GoldenEye XBLA Community Edition's fixes, taken as GoldenEye's own** — ge-bean.md, the section of that name: the release's executable holds GoldenEye's setups and tile graphs byte for byte, so a CE data fix is a ROM bug unless it is a design change; `g_RomPatches` (converter 60) mends Bunker ii's stair links, Silo's armour model, Control's blast door clip, Surface's Klobbs and railing pad; a windowed door is `g_SkelWindowedDoor` now (glass takes and breaks under fire) and bullets pass a converted room's see-through list as in GoldenEye; the Python converter no longer matches the C byte for byte
+- **GoldenEye XBLA's skies over an HD level** — ge-bean.md, "GoldenEye XBLA's skies, from the Community Edition": `port/src/gebeansky.c` draws `files/new/skydome/` round the eye in `skyRender()`, the sea after it; the release's eleven skies are one placeholder, so only the Community Edition's are drawn; sky UVs are 1/16384; the CE's caps have no alpha and take Rare's fade; a `G_VTX` holds 16 vertices
+- **Guards invisible up close on an HD level** — ge-bean.md, "Invisible guards up close in HD" (2026-09-22): an HD level draws every room and that marked the whole level `ROOMFLAG_ONSCREEN`, so every guard in the view cone anywhere counted as on screen and `chrTick()`'s cap of 30 chrs a tick went to guards across the map instead of the ones in the player's room; the portal walk still runs and chrs ask `bgRoomIsPortalVisible()`; count the chrs on screen (`hdtree/toilet.sh`), the picture is order luck
+- **GoldenEye's own cameras outside an HD level** — ge-bean.md, "GoldenEye's own cameras outside the level in HD" (2026-09-24): GoldenEye stands opening shots, swirls and cutscene cameras under floors and inside rock and relies on culling its opaque rooms; an HD room is drawn two-sided because 4J's decks, treads and roofs are single planes, and Bean's file has no cull flag - so `gebeanStageTickCamera()` casts 48 rays against **GoldenEye's own** opaque room triangles while such a camera runs, and a mostly-back-faces answer culls the HD rooms that frame (`bgRenderRoomOpaque()`); `cam_look` is not a unit vector; and a Bean triangle on a surface GoldenEye draws unfogged (Caverns' water, a one-cycle `0x00502078`) is written unfogged too (ge-bean.md, "The surfaces GoldenEye draws without fog")
+- **An HD model's UV scale is in its vertex shaders** — ge-bean.md, "An HD model's UV scale is in its own vertex shaders" (2026-09-24): Bean's compiled Xenos shaders sit in `.data` (containers `0x102a1100`/`0x102a1141`) with their microcode and literal constants in `.gpu` past the buffers; the literal the UV is multiplied by (1/4096 for the truck) replaces `beanMeasureUvScale()`'s median guess for HD models (`beanShaderUvScale()`), which drew the truck's wheels and headlights a quarter of their picture; the N64-look originals' literals are per picture in texel units and are not read
+- **A converted level's own backdrop drawn over the HD level** — ge-bean.md, "A kept room of GoldenEye's backdrop drawn over the HD level" (2026-09-24): a room Bean dealt nothing to keeps the file's geometry, and on Dam that is GoldenEye's low-poly far cliffs, which the HD level draws (every room is drawn) as fog-coloured slivers against the sky past Bean's trees - the "sky tear"; a kept room none of whose triangles lies on Bean's mesh is not drawn in HD (`gebeanStageRoomHidden()`: Dam 38, Cradle's duct 2); find a stray triangle by skipping room ranges from gdb (`roomskip.sh`), not by reading the mesh
+- **The release's look on a screen that is not a level** — ge-bean.md, "The gun barrel's Bond was a black silhouette in the release's look" (2026-09-22): a **posed** release mesh drawn under `G_TF_POINT` draws black (a rigid one survives, and so does the N64 look), and GoldenEye's own 2D screens leave point sampling behind - the intro restored the texture perspective in 2026-09-18 and not the filter, so the gun barrel's Bond had no shirt and no hands; both are set per model in `introDrawModel()` now, as gewatch.c already did. A mesh that draws black is not evidence about the mesh: log the bind's `other_mode_h`, the prim/fog/env colours and the combiner and compare against a screen where the same model is right
+- **GE Plus's folder screens in the release's art** — ge-bean.md, "GE Plus's folder screens in the release's art" (`port/src/gefolder.c`): GoldenEye's own folder is repainted with the release's pictures rather than the release's folder being drawn, so everything gexfront.c measures against the model still stands; the swap is an entry per texture bound at the address the model's lists already name (`xblaTexBindPictureAt()`), it follows F6, and the table's traps are the release's row order, a stamp's pieces (GoldenEye fills each one, so they are fitted by ink), the two runs being in neither the ROM's order nor the model's (paired by correlation), a repeating tile needing a flattened seamless patch of a page-sized picture, the ROM's cutouts against opaque releases pictures (brightness becomes the alpha), and the padded row a 65 texel texture really has; `--dump-folder-pictures` and `--dump-texture` write both sides out
+- **The folder screens' second and third pass, and Bean's own menu files** — ge-bean.md, "The folder screens, second and third pass": GoldenEye's cover, paper and crest are intensity textures the vertex shade colours, so 4J's coloured pictures were tinted twice (`grey` rows); the crest lies over one repeat of the paper tile and is printed on it; portraits, stage icons (ROM 2578-2597 = the icons in alphabetical order), sprocket and cursor (blue in the file) from `files/texture/`; the release's backdrop is a generated dark desk, and a 2-D draw before the folder must restore `G_TP_PERSP` and the filter
+- **The GoldenEye XBLA Community Edition, applied by the game** — ge-bean.md, the section of that name: the player's updater zip in `added-content/`, HDiffPatch's patch half vendored (`port/src/external/hdiffpatch`), an overlay of changed *and renamed* files read first, reference files and renames' old names unpacked from an archive first, takes a restart (`Mod.GeXblaCommunityEdition`, Mods: Missions)
+- **A level's instancing records, and the pines that were one tree** — ge-bean.md, "Surface's and the Bunkers' pines" (2026-09-22): a Bean level's stream record 0x21 is a world matrix for the draws after it (row vectors, translation last) until a 0x25; Surface draws one tree 64 times and both Bunkers 6, and all of them had been drawn at the modelled tree; the tree buffers (stride 20 cards, stride 28 trunk - position, normal, tangent, binormal, colour) carry no UVs and the shaders are not in the file, so `beanTreeUvs()` makes them from the geometry; other stride 20 draws (Frigate's railings under sphere maps) are left as a flat colour
+- **A Xenos primitive 5 is a triangle fan, and the HD truck's wheels** — ge-bean.md, "A Xenos primitive 5 is a triangle fan: Dam's bungee platform" (2026-09-22): Bean's draw type 5 is a fan (Xenos: 4 list, 5 fan, 6 strip; Direct3D's 5 is the strip), read as a strip since the first model, which cut the triangles fanning from the first vertex out of every polygon in every HD level, prop and gun - decide such a question by winding consistency per draw, not by degenerate counts; and "The truck's wheels in the HD look": `gebeanBuildRigid()` lays a prop on the first list's matrix, so the HD truck's wheels never rolled or steered - a Bean bone that stands on a host part's axle line (x within 350: GoldenEye's rear wheel nodes are inboard of Bean's) now puts its vertices under that part's matrix, relative to the node; a mesh is built at its first *draw*, and a probe's `vv_theta` is `atan2(-dx, dz)`
+- **GoldenEye's sight at the edge of the view** — ge-bean.md, "GoldenEye's sight at the edge of a 4K view" (2026-09-22): a `gSPTextureRectangle` corner is twelve bits and a negative one wraps to the far side, which drew a screen of crosshairs when the sight reached the edge (any window - the vi is 320x220 at 4K); `hudImage()` uses the port's signed wide rectangle now
+- **Frigate's sky and water, and the port's flat sea** — ge-bean.md, "Frigate's sky and water: GoldenEye's fogless table" (converter 58): GoldenEye's second environment table (`fog_tables2[]`, 56-byte rows right after the fog table's end row) holds the levels drawn with no fog - Frigate and Cuba - and the converter never read it; a `fog` row may now begin `nofog` and becomes a `nofogenvironment`; the fog rows name GoldenEye's own three sky pictures as rows 3-5 of `g_TcSkyWaterConfigs` (only the clouds were the same picture as Perfect Dark's); and the port's water plane, which no stock level ever enabled, was textured at the clouds' density (a tenth) to fit a Vtx's s16 - `skyRenderWaterTri()` subdivides and re-bases instead; and ge-bean.md, "The sea was green, and the horizon was black" (2026-09-22): `sub_GAME_7F09343C()` reinterprets **nothing** - both its tiles are the picture's own format with a `line` of 4, which is half a row, so the sea is the blue picture sheared, and reading the port's CI8 copy of it as RGBA16 is what drew "toxic sludge"; TMEM is rebuilt from the format the `struct textureconfig` names (the decompilation's `s_skywaterimages[]` is the authority, the native GoldenEye port is not), the odd-row word swap applies twice because Rare swizzles in RAM and loads with `dxt` 0, and the ring plane reaches the N64's 300000 with its outermost vertices at the **eye's** height, which is where the horizon is at any camera height
+- **Runway's table in the air, its plane's ending, and an opening shot of nothing** — ge-bean.md, "Runway: the table in the air, the plane's ending, and the opening shot of nothing": GoldenEye never reads a pad's height for an object without an "in air" flag - the floor is the pad's tile - and Perfect Dark's same function asks its collision from the rooms the pad's *height* resolves to, so a set whose pads sit over its room's box found no floor and stayed in the air (`geStanWalk()` where the search finds nothing; it logs each: Runway 8, Facility 10, Control 3, Jungle 1); an aircraft flying an animation is posed under the **camera's** matrix alone, and Perfect Dark's branch for any animated object ticked it again, moved it again, freed its animation and posed it under the object's matrix (its own branch now, `gexPlusVehicleFliesAnim()`); `modelTickAnim()` steps once a **60th** and `modelTickAnimQuarterSpeed()` takes 240ths; the Cinema's Outro starts at a camera switch that comes before the `HideAllChrs` pair; an opening shot's room is its tile's by the walk from its pad (`geRoomCutsceneCamera()`), which only shows where a shot stands far from its pad - Runway's first, 6000 off; a model's matrices are per-frame memory, and a probe left running holds the old binary
+- **The tick a converted vehicle is given its animation** — ge-bean.md, "The tick an aircraft is given its animation": a vehicle's list runs from its own tick, *after* `objTickPlayer()`'s animated branch, so on that one tick the model was posed by plain `modelSetMatrices()`, which reads `anim->frameslot1` - written only by `modelSetMatricesWithAnim()`, and an anim slot comes back with its last owner's; crash 20260921-160755 in the frame bit reader; `build/gexrom/givenanim.gdb` reproduces it by poisoning the slot
+- **A long fall on a converted mission** — ge-bean.md, "The dive off Dam killed Bond": Perfect Dark kills a player four seconds into a fall (`TICKS(240)` in `bwalkUpdateVertical()`, forced, so invincibility does not stop it) and GoldenEye has no such clock - Dam's ending is 350 ticks of falling; off on a converted level's mission, kept in its arenas; the first dive probe's log showed the death and was read as a pass, so a mission-ending probe prints `isdead`
+- **Judging a conversion against GoldenEye itself** — ge-bean.md, "Dam against the oracle": the native GoldenEye port on `10.8.0.3` walks into solo Dam on a pad script and gdb warps Bond to every fifth waypoint's pad (`~/dam-oracle/getour.py`), ours does the same through `padUnpack()` (`build/gexrom/padtour.py`) - a converted level is GoldenEye's runtime world plus an offset, pad numbers and `vv_theta` mean the same in both, so pad N heading H is the same picture (164 pairs in `build/gexrom/tour/cmp*.jpg`); it found that **a GoldenEye path is a list of waypoints and Perfect Dark's of pads** (every patrol and the truck's route, all twenty missions), that the truck rode under the road (the "green slab"), that **Dam and the two Surfaces are drawn at a fifth of their size** so their fog row's distances are too, that the bg file's **visibility script was dropped** (Dam's cliffs are rooms no portal reaches; seven levels carry one) and that the intro's weapon was an item id (Bond's MagSec); and **on a remake stage the room is the floor tile's** (`port/src/geroom.c`), GE Plus lists GoldenEye's own fourteen weapon sets out of the ROM with Perfect Dark's behind `Mod.GePlusPdGuns`, and every GoldenEye gun reloads by lowering; the tower stairs are still blocked and the user's proposal - GoldenEye's own 2-D tile collision for bodies - is the way to end that class
+- **A converted GoldenEye level's floor vanishing under the player** — ge-bean.md, "Falling through a converted level's floor": GoldenEye's stan and its portals disagree about which room a place is in and Perfect Dark believes the portals, so where the floor's room is not one of the player's there is no floor at all and `bwalkUpdateVertical()` drops them out of the world (a strip of Runway's snow eight hundred wide is room 14's while a walker there is in room 13); asked again from `bgFindRoomsByPos()` where the first answer was nothing, on a remake stage only. The note also carries the gdb probes - the pure ground query rather than a teleport sweep, which is contaminated by the fall's own velocity - and what an F3 trace now says about which map a mod stage is
+- **A model whose two lists came out crossed at the load: Jungle's black vines** — ge-bean.md, "Jungle's vines drawn black: a model's two lists swapped at the load" (2026-09-24): `modeldef0f1a7560()` rewrites a model's lists in place and `modelNodeReplaceGdl()` asks the opa pointer first, which by a node's second list has already moved - onto the xlu list's old address whenever the lists before it grew by just that much, so the opa pointer took the xlu list (GoldenEye's jungle tree `Pgx108Z`: vines drawn opaque and black, trunk blended); `modelNodeReplaceXluGdl()` takes the second list; find a prop by leaving models out one at a time, and a list patched from gdb that changes no pixel is not the list being drawn
+- **An HD prop's logos fighting its own walls** — ge-bean.md, "Logos fighting their own prop: an HD model's decals" (2026-09-24): Bean's labels and stencils are triangles of the prop's own mesh exactly in its walls' plane, and only the level's triangles were ever given the decal z mode; `beanMarkDecals()` gives them a `XBLAMESH_MAT_DECAL` material and the list turns on `G_DECAL_EXT` (the renderer takes `ZMODE_DEC` while it is on); back-to-back pairs are left alone; find whether a stray surface is a prop by skipping `objRender()` from gdb before reading the level's mesh
+- **A helicopter's rotor is a held position** — ge-bean.md, "Surface 2's parked helicopter, and its dish in the distance" (2026-09-25): GoldenEye's aircraft hang their rotors on switch entries 2 and 3, which are `MODELNODETYPE_POSITIONHELD` nodes, and `vehPutPart()` and the HD rigid builder only knew positions, so no rotor ever turned in either look; a distant prop that vanishes while the HD rooms round it stay is the fog curve the props go by, not a draw distance
+- **A GE Plus guard kneeling with his gun upright** — ge-bean.md, "Aiming too high: the gun upright is GoldenEye's own kneel" (2026-09-25): frames 40 and 77 of GoldenEye's one-handed kneel (row 75) hold the gun straight up in its own game (the oracle's `geaimpose.py`); the aim joints are GoldenEye's and a hit never depends on the gun's pose
+- **GE Plus guards that never hit at all** — ge-bean.md, "Guards that never hit: GoldenEye's TARGET_BOND is not Perfect Dark's target" (2026-09-26): the converted attack commands carry GoldenEye's 0x0001, Perfect Dark's unread AIMATBOND, so chrTickShoot() never called chrCalculateHit() and the aim went at the eye; aiGeAttackFlags() makes it AIMATTARGET on a remake stage; measure with the guard's own list (aimprobe KEEPAI=1), never a forced attack
+- **Bullets through the HD look's railings** — ge-bean.md, "Bullets through the HD look's railings" (2026-09-26): a served (Bean) room draws railings/fences as cut-outs in its opaque leaf, which stopped shots; bgTriPassesShots() lets a shot through a served room's cut-out or translucent picture on a remake stage; the texture number a served room's G_SETTIMG gives is garbage, match the tile pointer
+- **How often a GE Plus guard hits** — ge-bean.md, "Guards that hardly hit: GoldenEye's shotbondsum, read out of its ROM" (2026-09-25): a hit is a running sum, not a trace; GoldenEye's shot adds two sixtieths' worth (`GE_FRAME60`), nothing adds up while its damage timer (held to 60/50/40... ticks, not the flash's end) is up, its accuracy/damage by difficulty are 0.6/0.75/1/1 and 0.5/0.75/1/1, shotguns hurt x3; all on GoldenEye's guns on a remake stage only; chrAttack() no longer waits out a merge on a GE Plus stage (GoldenEye starts the attack at once, 16 ticks an attack), and the 007 reaction slider is read there; the ROM's game segment is uncompressed at 0x34b30; the oracle enters on 00 Agent and rewrites the modifiers every frame
+- **A converted autogun, and a weapon standing on an object** — ge-bean.md, "Egyptian's Golden Gun room" (converter 67): an autogun's range, turn limits and speed are a tail GoldenEye and Perfect Dark lay out alike 0x24 apart, and the conversion copied none of it, so all 35 autoguns on eleven missions were blind; a weapon gets no slack standing on an object in Perfect Dark and GoldenEye's 4 on a remake stage now, or the Golden Gun lies under its plinth; **a decompiled setup prints AI bitfields, pads and distances byte-reversed** (`CharArrayFrom32Rev`) - read the ROM's bytes
+- **Bond's parka hood, and anything a head cut off a body carries on the body's picture** — ge-bean.md, "Bond's parka: the hood is the coat's, not the head's" (2026-09-25): a head cut off a whole character's neck is rigid, so the parka's hood (on the body's picture, its rim weighted to the back) rose off the collar and showed the neck through the slit; it is skinned with the body now in hood groups drawn only round its own head, the head keeping a face-and-hood group for other bodies; `beanSmoothNeckWeights()` must not touch it, and the collar round a foreign head keeps its old smoothed copy in a bare group; the "fur" on the crown is a blot in Rare's picture, cloned out at decode
+- **A GoldenEye gun's definition** — ge-bean.md, "A GoldenEye gun's definition is built, not copied from its host" (2026-09-24): `gegunsBuild()` sets every field from GoldenEye's row, the model it is drawn on, or the engine (the host), and says which; a copy of the host had silently kept its one-handed flag, sideways pistols, target box, "an", inventory description and split 9mm pool; `gegunsDump()` from gdb before `main` writes all 33 definitions, and a change here is checked by diffing two dumps; and ge-bean.md, "Step 2: the weaponHost() sites, audited against GoldenEye": where a host's rule is not GoldenEye's a GE number answers through `WEAPON_IS_GE()` (guards' single shots, sniper taper/zoom, knives, Enemy Rockets, simulants' own `AIBOTPREF()` rows), and what was left as PD's on purpose
+- **GE Plus in third person, and a converted pane's tail** — ge-bean.md, "Third person is broken sometimes" (converter 49): the solo converter carried no tail for tinted glass, so every pane was opaque at any distance and shut **portal 0** of its level every frame (Aztec's start doorway: nothing drawn from a camera beyond it), and the opening swirl's fade-out of Bond's body stays on the chr, so third person after a fully watched opening drew him at alpha 0; third-person.md, "The player's own tracers": the hand beams are drawn by `propsRenderBeams()` in third person and start at the body's gun
+- **HD light shafts, monitor recesses, cut-out rims and magenta placeholders** — ge-bean.md, "HD effects: Archives' shafts, Dam's modem screen, Jungle's vines and magenta fronds" (2026-09-26): a blended Bean level draw faded by its vertices is translucent whatever its picture, as the release draws it (Egyptian's pool included); Bean recess backs coplanar with a GoldenEye screen are pushed behind it only on lone-quad screens of basic-skeleton props with all four corners matched; binary-alpha pictures bleed colour into clear texels and 0..1 prop cut-out cards clamp; flat 16x16 magenta pictures are Rare's missing-art stand-ins, given a neighbouring cut-out's picture (else its colour)
+- **HD decal corners behind their wall, and GoldenEye's overlapping rooms** — ge-bean.md, "Train's plates and Aztec's vent: decal corners and faces over another room's space" (25th F3 pass): a decal kept in its mesh has its corners moved along its face just far enough that their whole-unit rounding is not behind its (rounded) base (`markDecalCorners()`), a shared corner only along the sharer's own plane; Bean faces lying on a GoldenEye face with a closed space of another room within 8-64 units behind are drawn culled (`markOverlaps()`), as GoldenEye relies on culling where its rooms overlap
+- **The N64 look's fog, Frigate's sea and the portal walk against the cartridge** — ge-bean.md, "Fog per vertex, the sea through the palette, GoldenEye's portal walk and the GE Plus timer" (2026-10-01, fid-look): a converted level in the N64 look is fogged per vertex as the RSP does it (`G_FOG_VERTEX_EXT`, set by `envStartFog()`; `gfx_emit_tri3()` clips at the eye plane and the FRUSTRATIO_2 guard band and works the new corners' fog out - not at the near plane, the cartridge draws nearer things); GoldenEye's `texSelect()` loads a picture in the texture's own format, so Frigate's sea is CI8 indices looked up in the TLUT by each 16-bit texel's upper byte; `bgTickPortalsWalkGe()` is GoldenEye's queue walk, which re-enters rooms and raises their draw order (Surface's fence under the trees); the mission timer sits under the bottom-message line and never moves the messages
+
+
 > **2026-09-21:** the checkbox and `Mod.XblaGoldenEye` are gone; everything
 > below that says "with the switch on" is now "with the release in
 > `added-content/` (or GoldenEye X installed)" - `gebeanGetEnabled()`. And the
@@ -1874,6 +1956,7 @@ the CRCs) and its size (12MB) - is converted at startup, once, into
   from it); build the C alone with `gcc -DGECONVERT_MAIN -Iport/include
   port/src/geconvert.c -lz -lm` and `diff -r` its output against
   `GE_ROM=... python3 tools/geconvert/geconvert.py OUT` after changing either.
+  (retired 2026-10-01: geconvert.c is the only converter; the Python twin `tools/geconvert/geconvert.py` is gone and the census reads the C - tools/gefidelity/census)
   The traps in matching numpy: a 1-D `np.mean` is numpy's **pairwise** sum and
   a mean down a column of an (n,3) array is a plain sum in order; rounding is
   half to even (`nearbyint`); `float(round(x))` goes through an int and so is
@@ -1945,7 +2028,7 @@ for when nothing is converted: it says a ROM is needed). While open,
 `menuTick()` and `menuRender()` hand over and return; the Perfect Menu stays
 open underneath and comes back as it was.
 
-**Everything is the ROM's.** The converter (C and Python, still byte for byte)
+**Everything is the ROM's.** The converter (C and Python, still byte for byte (retired 2026-10-01: geconvert.c is the only converter; the Python twin `tools/geconvert/geconvert.py` is gone and the census reads the C - tools/gefidelity/census))
 also writes: the folder, `PROP_WALLETBOND` = model 278 (`Pgx278Z`, into the
 `models` block like any prop); the crosshair (image 2236), the film strip's dot
 (2631), a stage picture for every level (2578-2597, 2686-2689, 2695 - the US
@@ -2256,8 +2339,9 @@ setup is `Usetupgs<key>Z`.
 **The guard record.** GoldenEye's is seven words and Perfect Dark's chr eleven,
 and they name most of the same things. Its setup flags are Perfect Dark's spawn
 flags for the three it uses - sunglasses 0x01, sunglasses half the time 0x02,
-invincible 0x08; its 0x04 is "this is a clone", which Perfect Dark has no spawn
-flag for. **The two fields the GoldenEye decomp calls `health` and
+invincible 0x08; its 0x04 is CHRFLAG_CLONE, "clone on heard gunfire", which is
+no spawn flag but Perfect Dark's CHRFLAG0_CAN_HEARSPAWN (converter 94, "GoldenEye's
+clones" below). **The two fields the GoldenEye decomp calls `health` and
 `ReactionTime` are the hearing scale and the vision range** - chraction.c reads
 them straight into `hearingscale` (over a thousand) and `visionrange` - which
 are Perfect Dark's own two fields. There is no health field.
@@ -3672,10 +3756,32 @@ wall. On Streets the first parked truck goes as the nose reaches it and the
 tank carries on through at 7.5. A hull in a narrow street often cannot turn
 where it stands - that is GoldenEye's rule too.
 
-Not done: the barrel's own collision (GoldenEye tests its tip and rolls the
-turret back; here the turret is the view, and holding the view is another
-matter) - it pokes into a wall the nose has stopped at; **the shell count on
-the HUD**, which goes with the GoldenEye HUD the user has asked for next.
+**The barrel's collision** (F3 20260930-235538, `tankBarrelBlocked()`): the end
+of `bondviewTankCollisionStatus()` is a flat line from Bond's seat to the
+barrel's tip, and a turret turn that fails it is put back. Here the turret is
+the view, so the view is held: the turn is walked in 5-degree steps (a mouse
+flick would jump a post) and stops at the last clear one; a barrel already in
+something is let out. The same line is part of `tankRectBlocked()`, so the hull
+neither drives nor turns the barrel into a wall, as GoldenEye's does not.
+
+**The engine's sound** (F3 20260930-235603, "still running after jumping out,
+heard from a distance"): GoldenEye's engine is TRUCK_START in
+`g_TankSfxState[0]` - it loops, so the TRUCK_RUN that waits for that slot to
+empty never plays - at 25000 idle to full by 0.9 of speed or turn, and the TANK
+treads 0 to full; out of the tank the treads stop and the engine loses 1000 a
+tick. The port had played TRUCK_START once as PSTYPE_NONE with PSFLAG_0400
+(volume worked out once, never again), so it ran on forever at the volume it
+had in the seat, and had TRUCK_RUN layered on top. Now 66 is the
+PSTYPE_CHOPPERHUM1 channel, volumes are GoldenEye's as a share of the
+channel's own (`tankSoundVolume()`), and `tankFadeEngine()` lets it die after
+`tankExit()`. Probes: `~/wt/f3-1001-tank-run/probe/{snd,turret}.py`.
+
+**The sight is held in the middle** with the shells in hand (F3 20260930-185749,
+`geTankHoldsSight()`): the shell leaves along the turret, never the sight, as
+GoldenEye's `gunFireTankShell()` does whenever the tank runs, so the sight takes
+Aim Lock's path in `bmoveProcessInput()` - no swing with the turn, no auto aim,
+and in aim mode the mouse turns the turret. Its HUD picture under the HD look is
+the release's own `bg/ammoicontankshell` (it had been the magnum round).
 
 Probes in `build/gexrom`: `tankfind.py` (which missions have one),
 `tankdrive.py` (in, drive, turn, fire, out, with pictures; `g_TankTestInput`
@@ -8545,7 +8651,8 @@ reproduces all 21 of the old arena rows to the last digit), and the **offset is
 the conversion's own re-centring**, which follows from the ROM's stan and level
 scale alone - so it cannot move when the geometry does. All 26 are recorded by
 `GE_ARENAS_JSON=... tools/geconvert/geconvert.py OUTDIR`, and the C converter
-writes the same room positions for every level (checked file by file).
+writes the same room positions for every level (checked file by file). (geconvert.py retired 2026-10-01: arenas.json stays as
+checked in; the offsets follow from the ROM alone, which the C converter computes the same way.)
 
 **What it gains.** 25 of GoldenEye's 26 levels have an HD mesh, where 21 did:
 
@@ -10079,6 +10186,34 @@ Probes: `~/wt/f3rocket/build/run/rk.sh <save> <single|mixed|mixedr> <tag> [binar
 (`probe/rk.py` beside it: `HIDE=1` zeroes the held rocket's matrix at
 bondgun.c's `objprop->z` line, `TP=1` third person, `FIRE2=1` a second shot).
 
+**Draws 3-6 are not the round (F3 20261001-000127).** They are four strips in
+the slots of the tube's middle (z -1446..-118, about 200 from the axis), the
+gun's outside, only sharing the rocket's picture. Taken with the round, the
+empty launcher showed the world through its middle. The round is now 1, 2
+(split at 1000) and 21-22. Found by dumping every draw's triangles with
+their z and radius and plotting the kept and the taken from the side
+(`~/wt/f3-1001-rl-run/rl.py` for the loaded/empty screenshots).
+
+Depot's rocket launcher on the floor beside the rockets' desk is GoldenEye's
+own placement (oracle `~/dam-oracle/rltable/gedesk.py`: pad 326 on the floor,
+the rockets on desk 304). It was 4 units low: GoldenEye puts every object
+not stood on another 4 over its floor, weapons too; Perfect Dark gives
+weapons 0. On remake stages func0f06a730() adds the 4 now.
+
+**Depot's rockets invisible in the HD look (F3 20261001-000059).** Not the
+placement: GoldenEye's PROP_CHRROCKET (Pgx202Z) has two distance nodes, the
+far list (near 3195) *first* and the near one second. gebeanBuildRigid() laid
+the whole HD mesh on the first list and gave every other list an empty group
+(which hides its N64 geometry); the port always draws the near model
+(modelDistanceIsFullDetail()), so the HD rocket sat on a list never drawn and
+the drawn one was empty - nothing at all, in place or moved into view. Now
+gebeanRigidPrimaryList() takes the first list not under a far distance node on
+the same matrix. A ROM scan of every GoldenEye prop (first list under a
+distance node with near > 0) finds only chrrocket; the other ammo pickups
+(m16mag, uzimag, goldenshells, wppkmag, tt33mag, chrgrenaderound, the crates)
+are laid out plainly. Probe: `~/wt/f3-1001-rl-run/mv.py` moves the three
+rockets in front of the camera, `nodes.py` dumps a model's node tree.
+
 Seen on the way, and fixed in the next commit: in third person the rocket
 launcher fired once. See third-person.md, "A launcher fired once in third
 person".
@@ -10798,6 +10933,21 @@ by model/pad and shoot it; `NOOPEN=1`), `listprops.py` (props by model),
 Open: stool1's 4 UVs; the impact surfaces of Caves/Complex (the CE set its hit
 meshes to all dirt/all metal - does ours spark metal on Caves' rock?); the
 user's calls above; the arena MP walk that stops at a door.
+
+**2026-10-01, converter 97: the data fixes moved to the HD look only** (the
+user: the N64 look is the cartridge as it is, judged against ares). The
+converter writes the cartridge's files and, where a `g_RomPatches` fix changes
+one, a `_ce` copy beside it (`romFileCe()`; Bunker ii's tiles and graph,
+Control's/Egyptian's/Silo's (+ its JP/PAL `_ce_j`) and Surface's setups,
+the Surfaces' pads, the Control and Surface arenas' pads/mpsetup), listed on
+the mission or map line as `ce "file copy ..."`. `geRoomCeData()` (the
+release's meshes on and the CE applied) makes setup.c, tilesreset.c and
+gestan.c load the copy (`modloaderGetStageCeFile()`), at the stage load: a
+look switch mid-mission takes effect at the next load. Every `_ce` file is
+byte for byte what the always-patched converter wrote. Checked: the wide world
+sweep's CE keys are gone in the N64 look, and an HD-look dump with the CE has
+them (Silo 59 model 628, Control 184 / Egyptian 45-48 doorflags 0x4, pads
+288/279 at z -549.7, Bunker ii tiles 794/796 linked).
 ## The Cradle could not be finished: Trevelyan's route, his waits, and his number (2026-09-25)
 
 Tester F3s 20260925-162651/162703/162754/162954 (LINKmendez, Windows 6b17756,
@@ -12360,6 +12510,49 @@ berets, one chr fewer at the frame); Surface has none in either. Probe
 `~/wt/f3-0927b-hats-rig/hats.py` (SHOOTHAT=1 hits the hat through
 `chrDamage(..., HITPART_HAT)`).
 
+### A GoldenEye hat on an HD head (25th F3 pass, 2026-09-30)
+
+F3 20260930-020448 and 022258 (Facility, HD look): "hat needs fixing on this
+head". The side caps of four heads in ten floated over the hair, tipped back
+(Duncan 47, Dwayne 49, B 50, Karl 42; Dave 51 with glasses in the second
+report). Not a regression: the table fit was right for the N64 heads and had
+been applied to the HD ones as they were.
+
+- **GoldenEye's table is the N64 heads'.** `headHat_array_8003E464` lifts the
+  side cap 25-39 units for 42/47/49/50 (their N64 crowns stand high). Bean's
+  image (dumped from Xenia like the PD release's, `.xbla-work` recipe; the
+  table sits at 0x82729b88) carries it **byte for byte**, but 4J's HD heads
+  are other shapes: worn as the hat model has it (no fit at all), the side cap,
+  helmet, beret and fur hat sit right on nearly every HD head, and the table's
+  lift is what floated them. The N64 look keeps the table (pixel-identical).
+- **What the HD heads do need:** hair standing through a side cap or a helmet
+  (Karl's quiff, Pete 44, Dave 51, Martin 45: 6-21 units).
+  `xblaMeshHatSeat()` (xblamesh.c) measures it: the head's mesh posed with
+  this frame's matrices into the frame of the joint the hat hangs on
+  (`hatmodel->attachedtonode` - the mesh's own palette entries are the
+  body's matrices, and "joint 0" is the body's root), rasterised into
+  2-unit columns (top and underside), against the hat's HD triangles facing
+  up; the third deepest vertex under the top and above the underside, at most
+  40 deep, is lifted 2 clear. chrRender() applies it as an offset in the hat's
+  space, where the table's went, cached per chr/head/hat for the stage.
+- **Traps met:** a plain drop test (every hat vertex over the head) caught the
+  cap's front tip on the forehead slope and lifted every cap 12-17; using only
+  the hat's upper half missed the band where the hair comes through; a
+  helmet's neck guard and peak under an overhang read 55-130 deep (hence the
+  40 cap and the underside test). **Berets' and fur hats' up-turned flaps
+  read 15-37** and lifted them off their heads - those two are worn as
+  modelled, unmeasured (`measure` 0). Heads 43 (Alan) and 67 (Ken) are the
+  same HD mesh.
+- **Measuring the N64 heads from a loaded modeldef does not work** here:
+  `headfitMeasureHead()` on a GE Plus head's loaded definition read the same
+  -199..949 for every head (the lists are rewritten), and `headfitLoadFile()`
+  loads none of the converted head files.
+- Probe: `~/wt/f3-0930b-caps-run/hats.py` + `run.sh` (seeded GE Plus mission,
+  `--rng-seed` picks the four heads: 3 = 42/51/52/53, 4 = 42-45, 7 = 47-50;
+  ONLY=chr numbers; the player is set in front of each guard with
+  chrMoveToPos() and the guard's facing). Guards in the toilet stalls show a
+  door - pick other chrs.
+
 ### 13th F3 pass: props with no HD row (fix/f3-0927b-hdprops, 2026-09-27)
 
 - **Jungle's drone guns "N64" (F3 20260927-192053)**: they are the release's own. `Pgx299Z <- new/prop/groundgun`
@@ -12888,6 +13081,23 @@ run dir). Facility's conveyor still lifts +118.9 (walk.py on 0x63). Probes:
 - **Muzzle flash room light** (3b8cd068a, 58b88a61e; F3 045427): stock light on PD's
   levels; off on `geRoomActive()` levels unless `Mod.GeMuzzleFlashLight` (menu:
   Muzzle Flash Lights GoldenEye Rooms). Body armour has no idle shimmer (15da2971a).
+- **Shot-out lights don't darken GoldenEye rooms** (F3 20260930-225233, Bunker).
+  GoldenEye's lightFixtureBreak() only takes the fixture's own vertices to a
+  quarter and sheds glass; the room stays lit. PD drops a room to br_base/2 once
+  every light is gone (roomsTickLighting()), and propRemakeRoomLightFrac() takes
+  props, guards and the gun down with it. On `geRoomActive()` levels a broken light
+  (healthy 0, room not ROOMFLAG_LIGHTSOFF) still counts as lit there unless
+  `Mod.GeShotLightsDim` (menu: Shot-Out Lights Darken GoldenEye Rooms, Extended
+  Options > Video; default off) - `modIsShotLightDimmingOn()`. gelights.c's fixture
+  darkening and glass are unchanged either way; script lights-off still darkens.
+  Not in any preset (owner: Dab's Settings leaves it off). A broken GoldenEye
+  fixture also makes no sound of its own now (gelights.c dropped PD's
+  SFX_HIT_GLASS; GoldenEye plays only the bullet's surface impact, which prop.c
+  still does) and `lightTickBroken()` returns false on remake stages. PD's
+  light sparks never actually ran there: glares (the only caller,
+  artifactsRenderGlaresForRoom()) are skipped on `geRoomActive()` levels since
+  F3 20260927-005229 and never calculated in MP. Sparks seen near a shot
+  light on a GE level are guards' bullet impacts (chrTickShoot()).
 - **HD Dam water** (4d53fdf84; F3 045552). gDPSetTileSize moves a corner by quarter
   texels only; Bean's reservoir moved 0.11/0.20 quarters a frame and jumped ~15 units
   every 5-9 frames. New `G_SETTILEOFFSET_EXT` (gbiex.h; 65536ths of a texel, cleared
@@ -12907,6 +13117,13 @@ run dir). Facility's conveyor still lifts +118.9 (walk.py on 0x63). Probes:
   the parka's bare collar leaves out the hood lining and Bond's own neck skin, and a
   made neck is drawn inside its open collar; Bond's own neck skin goes in the hood
   group. Probes: `~/wt/f3-0929c-heads-run/pairs.py`, `menushot.py`.
+  **"His own face" is any Bond head on any Bond outfit but the parka** (2026-09-30,
+  F3 20260930-031838, a regression of a0991794b): `gebeanRowKeepsHood()` compared
+  the two rows' sources exactly, so the cast reel's jungle fatigues under the suit's
+  head (`introCastStart()` pairs four outfits with `HEAD_BROSNAN_DEFAULT`, cut off
+  `suitbond`) left out the jungle's own neck skin and showed the room through the
+  shirt's open neck. `beanSourceIsBondOutfit()` counts djbond, boilerbond, suitbond
+  and timberbond as one man; not snowbond, whose hood group is the hood itself.
 - Also this pass (notes in their own files): tank shells in the weapon cycle and All
   Guns while driving (inv.c, afacc3408/c90303233), Randomizer disarm on every mission
   door (randomizer.md), third-person camera ease (third-person.md), the texture
@@ -13205,3 +13422,926 @@ Caves, Complex, Library/Basement/Stack, Cradle, Aztec. Before/after checked at
 the tester's Depot camera (closed, 0.34, 0.90 open) and Temple's big door;
 N64 look unchanged (gebeanstage.c only builds the HD level). **Needs an
 HDCACHE_VERSION bump** (left to the merge; done there: 7, with hdbright's rooms).
+
+## Sideways doors into Bean's wall, a cut-out donor, and a black blended shadow (24th F3 pass, 2026-09-30, fix/f3-0930-hdlevel)
+
+Follows "A raised door over Bean's wall". Three F3s on ad4d887:
+- **Depot (013827), a regression from 121866ef0.** The warehouse door at
+  158 126 -4618 took Depot's "C5" stencil as the donor picture for its wall
+  patch: the patch was a tiled cut-out and the raised door showed through its
+  holes. `slotDonor()` now skips cut-out and translucent pictures, and a cut-out
+  in front of the face no longer counts as Bean covering the cell. The C5 is
+  still brought forward over the patch as paint.
+- **Control's lift (013246, owner: "needs the door fix"; also 20260929-224058
+  on 1823231).** Not a regression: `fillDoorSlots()` took only doors sliding up
+  or down. It takes any slide axis now. Across the 26 arenas that adds about 50
+  sideways doors (Train's compartments 20+, Bunker II 8, Bunker I 4, Depot 2,
+  Silo 2, Dam 2, Egyptian, Cradle, Control 2). All shot from both faces with
+  the door open before and after (rig `~/wt/f3-0930-hdlevel-run`, `doorshots.py
+  <stage>:<x>` off a `sweep.sh` log): the door slides into wall now, no patch
+  over a doorway, nothing else changed. There is a log line per patched door
+  (`door at ... going (...) travel, through (...): N triangles of wall`).
+- **Bunker II's black strip (030521).** A pillar's shadow across the cell
+  corridor: a decal in the release's blended pass (`blend`), black at all three
+  corners, alpha 255, picture with no alpha, so drawn solid black. `markShadows()`
+  takes blended black decals as cast shadows too (alpha 0x80, the translucent
+  leaf); now like the N64 look's darkened floor. Pre-existing.
+- All three change the built level: **HDCACHE_VERSION bump needed** (left to
+  the merge).
+
+## Gadgets and sounds, seven faults (24th F3 pass, 2026-09-30, fix/f3-0930-gadsnd)
+
+- **A background list runs by its row, not its id.** GoldenEye makes a chr of
+  every AI table row of id 0x1000 and up, duplicates included
+  (deb_loadallmodels.c). The converter kept only the first row of a duplicate
+  id, so Surface's second 4106 - the grate's BIG_CLANK (261) 120 ticks after
+  the grate (door tag 5, DOORTYPE_FALLAWAY) opens - never ran. A duplicate
+  background row now takes the next free id (writeSoloAilists()). Needs a
+  GECONVERT_VERSION bump to reach players.
+- **The tank's shell is not a rocket**: gunFireTankShell() sets only
+  PROJECTILEFLAG_LAUNCHING, so it falls at 0.2778/tick^2 (Perfect Dark's own
+  1/3.6). Its Sound is tank_stats' 0xB (GUN_TANK2BIG_1); 12 is the grenade
+  launcher's.
+- **GoldenEye draws what it hides in the hand at once**: its raise states go
+  straight to idle for WEAPONSTATBITFLAG_HIDE_FIRST_PERSON_HAND. The ECM mine
+  host's 90-tick draw held a gadget's first throw back two seconds;
+  gegunsSwitchAtOnce() makes bgunTickIncChangeGun() quick for them.
+- **A hit sound's gun decides PD vs GE samples** (geSfxGunHitBegin()): the
+  autogun fires as the RC-P45, so a converted autogun (obj->pad >= 0) names
+  WEAPON_GE_RCP90 for its hit sounds.
+- **bgunSetAmmoQuantity() added both hands' magazines** for a throwable in the
+  right hand; a mixed Akimbo D5K's 30 took the knives to -21. Only a hand
+  loaded with that ammo type counts now.
+- A rename on a gadget's *prop* is not the weapon's once picked up
+  (invGetTextOverrideForWeapon() needs objoffset 0): gegadgetsTextOverride()
+  gives a shared number's "Gadget" the rename, and title-cases GoldenEye's
+  lower-case renames for Perfect Dark's fonts. The weapon wheel draws in
+  GoldenEye's font on GE HUD levels (geHudText()).
+
+## Guards through Frigate's doors, GoldenEye's grenades, Natalya's stair (24th F3 pass, 2026-09-30, fix/f3-0930-geai)
+
+**A door pad in a wall's thickness is filed on the deck below.** The
+converter's `roomsFind()` takes the highest tile under a point, and six of
+Frigate's upper-deck door pads (247, 248, 251, 262, 263, 266) have no tile of
+their own storey under them - so the pad's room, and every walk
+`geStanDoorSideRooms()` made from it, was the lower deck's. The door stood in
+lower-deck rooms only: nothing on its own deck (sight, shots, bodies) ever
+collected it, and it closed no portal (F3 20260930-004609 "guards walked
+through a closed door", 20260929-214745 "see the player through closed
+doors"). `geStanDoorSideRooms()` now takes the tiles either side of the leaf
+at the door's height when both are more than a stair's rise over the pad's
+tile; only those six doors change over the twenty missions and each closes
+the portal Perfect Dark's line finds. Probe: `run/geai/doorlos.py` in
+`~/wt/f3-0930-geai` - every shut door, a line of sight across it from sides
+found by the room boxes (not by the stan code under test); 6 leaks -> 0.
+
+**GoldenEye's grenade probabilities live in the setup, not the lists.** Its
+`GuardAttributeRecord` (propdef 0x12: header, s32 chr number, s8 probability
+at 0xb) is Perfect Dark's `OBJTYPE_GRENADEPROB`; the converter dropped it as
+`SOLO_AS_NOTHING`, so `TRYThrowingGrenade` never threw (Aztec's six opening
+guards are 127, Control's four by the mines 255). Converter 93.
+
+**A route is swept flat from the floor the guard stands on.**
+`chrNavCanSeeNextPos()`/`chrNavCheckForObstacle()` sweep the body box from
+manground+20; Control's central-room glass tops out at 58 under the head of a
+flight climbing 6 -> 90, so from the landing Natalya never "saw" the top pad
+and ran round the stair (F3 20260929-225110). On a converted level, where the
+next position is higher and `geStanReaches()` walks to it, the sweep starts at
+the destination floor + 20 (`chrNavSweepYMin()`, non-bots only).
+
+**Checked and GoldenEye's own, not changed:** Control's kiosk (ai_1 label
+0x06) resumes Natalya's typing only while `if_guard_is_on_screen`; Aztec's
+exhaust double door (GE pads 119/120) carries lock 2 and the level's one key
+is lock 1, and the desk terminal beside it has no tag (tag 11 is a monitor
+elsewhere) - guards opening it is the design. Control's tinted glass
+xlu/opa 0/10 is GoldenEye's own data. Trevelyan's Caverns list sets 0x800
+(no autoaim, the decomp's reversed macro prints it 0x00080000); he runs at a
+rifle guard's 8.7/frame.
+
+**Open:** Dam's tower-top patroller (chr 40, path 1) circles between the
+tower wall and a window pane (pad 452) on the leg 159 -> 151 - a gopos over
+the same leg gets round, the patrol does not. Control glass in the HD look
+(opaque shade; explosions: in the N64 look `explosionCreateSimple()` does
+destroy pane 103). Train's through-wall firing was not reproduced (the
+reported positions have no line of sight; the 2 s seen-recently rule is in).
+Statue's floating unconscious Natalya: see the 25th pass below.
+
+## 24th F3 pass on HD Dam (2026-09-30, fix/f3-0930-hddam)
+
+Stage 0x15 in these testers' traces is the **GoldenEye Arenas Dam map**; ids
+move with the mods installed (here the Dam *mission* was 0x15 and the arena
+0x51 - check `modloader:` lines, or `--boot-ge-mission N` / `--boot-map`).
+Rig: `~/wt/f3-0930-hddam-run` (`skip.sh` + `roomskip.py`: real player placed
+each 30 frames, `RANGES` skips rooms, `FIRE`/`FIRE0` hold the trigger,
+`EXPLODE=x,y,z`, `DOORGLASS=1` shatters nearby windowed doors, `PROPS=1` and
+`DSTATE=1` print tinted glass and door glass state, `CAMROOM=`; `FWD=197`
+with `--spectate` puts the spectator camera, which sits 197 behind its prop,
+at the trace's eye).
+
+- **Hut windows striped grey and black (20260929-213543).** Level mesh, not
+  the window prop: Bean's Dam pane is `_0x05D42F95.int.bin`, a 64x1 intensity
+  row of black and light bars in the release's *opaque* pass. The rule in
+  `beanLevelMaskTexture()` now also takes a one-row `.int` picture drawn only
+  opaque as see-through glass (alpha 40 at black, 140 at light). Only Dam has
+  such a picture. The HD cache hashes texAlpha/texSoft, so it rebuilds itself.
+- **Navy ring over Dam's sky with the CE off (20260930-013142).** GoldenEye's
+  cloud plane over Bean's daylit panorama; `releaseSkyNames[]` gains `dam`,
+  the release's own (placeholder) dome with Dam's horizon ring, as Surface.
+- **Holes in the far mountain down the gate tunnel (20260929-212942).** The
+  converted level's visibility commands (`BGCMD_DISABLEROOM*`, GoldenEye's
+  own) set `ROOMFLAG_DISABLEDBYSCRIPT` on rooms 51, 52, 60-80 from the gate
+  yard, and `bgSetRoomOnscreen()` refuses those, so every-room drawing lost
+  them; Bean's mountain is dealt into rooms 20-70 by position, interleaved.
+  `bgTickPortalsSpectate()` clears the flag under every-room drawing, after
+  the walk (which still honours it for which rooms' chrs are in view). The
+  spectator never showed it only because its camera sat in another room.
+- **Bunker's door windows stood whole after shattering (20260929-213924).**
+  A Bean door carries its pane in the one mesh as its fading span;
+  `xblaMeshRenderNode()` drops the fading span of a `g_SkelWindowedDoor`
+  model while its `MODELPART_WINDOWEDDOOR_0001` toggle is hidden. (Adding the
+  doors' scratch map `_0x0935E435` to `beanTexIsGlassOverlay()` was tried: the
+  pane then drew as milky white 119-alpha glass, worse than the dark tint.)
+- **Left as they are:** Control's central glass (20260929-224440) is
+  GoldenEye's data - TintDist 0, CullDist 10, opaque past 10 units, the same
+  in the N64 look; explosions do not break it (20260929-230523) because those
+  panes carry `OBJFLAG_INVINCIBLE` (0x20000) in GoldenEye's setup until the
+  mission's script breaks them, both looks. Barrels bright in a black room
+  (20260929-213203) is the lights shot out: `roomSetLightBroken()` darkens
+  the room (PD's brightness, both looks) while GoldenEye's props shade by
+  their tile alone (`propCalculateShadeColour()` on remake stages) - GoldenEye
+  itself darkens only the fixture's own vertices. The rock bank round the
+  reservoir and the big mountain face in the gap are Bean's own modelling.
+
+## Dam's circling tower guard, near misses, Control's glass: all GoldenEye's own (25th F3 pass, 2026-09-30, fix/f3-0930b-geai)
+
+**Dam's tower-top patroller (chr 40, path 1) circling is GoldenEye's.** On the
+leg 159 -> 151 the booth's corner blocks the route: the tile edge
+(14265,13921)-(14321,13977) (tile 862, unlinked) and glass pane 452 (GE prop
+82, the window model's zero-thickness footprint (14282,13938)-(14334,13990)).
+The native GE port's log on 10.8.0.3 (`~/claude-007/007/docs/port-log.md`,
+"The drift is one patrolling guard's cone crossing" onward) records the same
+guard in GoldenEye's own Dam 1 attract demo, replayed bit-exact against the
+N64 recording: chr 40 on patrol step 2 since block 104, "not walking a route
+at all ... stuck hunting a heading it never reaches", walking a ~25-unit
+circle, its probes blocked by that same edge (GE coords
+(17711.010,5392.913)-(17655.369,5337.272) = ours minus (-3390.3, 8584)) and by
+prop 82. Our pane placement matches the port's polygon to the unit, and
+`sub_GAME_7F03081C`'s tile lines (probe `run/geai/cansee.py`, both PD's
+`chrNavCanSeeNextPos()` and GoldenEye's lines through `geStanLinesClear()`)
+agree point for point on where the corner blocks. The guard is not stuck off
+screen: a patrol off screen goes magic and jumps pad to pad in both games.
+
+**Near misses match GoldenEye.** GoldenEye's `chrTestHit()` sets
+CHRFLAG_NEAR_MISS when the shot's ray passes the chr's bounding sphere
+(`BoundingVolumeRadius * scale` + held gun) while it is on screen and nearer
+than where the shot stopped; ours is the same test (`chrGetHitRadius()`, 130
+units on Dam's guards; the modeldef's `scale` is GoldenEye's bounding radius).
+Chr 40's list is the ROM's GAILIST_SIMPLE_GUARD (0x807), whose
+`IFBondMissedMe` is `aiIfNearMiss()`: setting the flag on the circling guard
+sends it running to Bond at once (`run/geai/nearmiss.py`). A shot stopped by a
+pane or a wall first is no near miss in either game.
+
+**Control's guards firing at the bulletproof glass are GoldenEye's script.**
+Control's lists ai_4/ai_7 (0x405/0x408, chrs 28/29) run to a pad preset and
+jump to ai_9 (0x40a), which fires at chr preset 0 - Natalya at her terminal in
+room 45 - with `guard_try_fire_or_aim_at_target(0x2400, 0xfc00)`. That is not
+an aim at Bond, so GoldenEye's `chrlvFireWeaponRelated()` fires with no
+seen-Bond gate (attacktype & 1 == 0), and so does ours (the two-second hold is
+only for ATTACKFLAG_AIMATTARGET at the player). The cage's panes (93-99,
+GoldenEye flags 0x10020b62: pathblocker, invincible, not AI-see-through) block
+a guard's sight of Bond in both games (GoldenEye's `chrCanSeeBond()` object
+test; ours `chrHasLosToChr()`, `run/geai/losgrid.py`), so a guard aiming at
+Bond holds its fire two seconds after losing him, as GoldenEye's does.
+
+## Bond's 0.97, and a held frame's height (25th F3 pass, 2026-09-30, fix/f3-0930b-gecine)
+
+- **Cuba's kiss, mouths apart (20260929-233818).** Positions and facing already
+  matched the oracle (18th pass; Natalya 24.47 from Bond, GoldenEye 24.46), but
+  GoldenEye's `solo_char_load()` scales the player's body by **0.97** after
+  building it (`modelSetScale(bodyModel, scale * 0.97f)`, model only, not the
+  animation's translation scale). Ours stood at the row's 0.100: Bond's root
+  3.5 units higher than Natalya's against GoldenEye's 6.22 (ours 9.68), his
+  mouth over her forehead. `playerTickChrBody()` scales Bond's own body
+  (the `gexPlusMissionBond()` pick) the same; root gap now 6.22. This is every
+  converted mission's Bond body - openings, endings, third person.
+  Oracle: `~/dam-oracle/gecuba3.py` on 10.8.0.3 run as
+  `PORT_PAD_SCRIPT=~/dam-oracle/dam2.padscript gdb -batch -x gecuba3.py --args ./build/port/ge007 --play`
+  from `~/claude-007/007` (prints `scale` per chr: Bond 0.097, Natalya 0.095).
+- **Statue's Natalya in the air by the helicopter (20260929-220547).** Her
+  list (0x416) sets frames 83-84 of GoldenEye's anim 30 every tick; the
+  same-animation shortcut in `aiChrDoAnimation()` (0fc8d534c) sets it again
+  with no merge, and `modelSetAnimation2()` starts the height tween from the
+  height the chr is at (`unk34.y = pos.y - ground`) with frac 0 - every
+  tick, so she kept her spawn's standing hip height (root 104.9 over the
+  floor; the frame's own is 10.05) forever. The shortcut now puts the tween's
+  start at the frame's height (`unk34.y = unk24.y`), as `isfirstanim` does.
+  Probe: `statue.py` (kick list 0x1001 at converted offset 59, the spawn;
+  `--spectate`, camera written to the tester's position). Off screen the chr
+  is not moved at all (GoldenEye's ACT_ANIM rule too), so look at her.
+
+## Train's plates and Aztec's vent: decal corners and faces over another room's space (25th F3 pass, 2026-09-30, fix/f3-0930b-hdlevel)
+
+Four HD geometry F3s. Rig `~/wt/f3-0930b-hdlevel-run` (`multi.sh <mNN|stage> <tag>` with `CAMS="x,y,z,th,va;..."`,
+`LOOK`, `BIN`, `SPEC=` + `FWD=0` for a first-person eye instead of the spectator 197 behind, `OPEN=r` opens doors,
+`TRACE=1`, `CAMS=spawn`; `sweep.sh <bin> <tag>` the 20 missions' spawn views; `props.sh` props near `AT=`).
+`--boot-ge-mission N` is 0-based (Control 15, Train 13, Aztec 18, Bunker II 8).
+
+- **Train's riveted plate (20260930-014411, "clipping at certain distances").** Two decal bands on a wall bent
+  along the plate's middle (`_0x052B8BF5` under the bend, `_0x0E037725` over it). They share corners with the
+  wall at the bend and with a fin inside the wall (`_0x03575425`, x = const), so `markDecalLifts()` keeps them
+  unlifted; their other corners, rounded to whole units by `writeLeaf()`, went up to half a unit behind the
+  wall's own rounded plane, and the wall covered most of the plate: a thin strip of rivets head on, the whole
+  plate at a slant. `markDecalCorners()` (after the dealing, so each triangle's room position is known) moves
+  such a corner along the decals' mean normal in quarter units up to `DECAL_LIFT` until its rounding is on or in
+  front of every base it lies on; a corner a non-decal shares moves only if the move lies in that triangle's
+  plane (the fin), else Depot's roof trim went missing from below. Moves 0-54 corners a level (Train 46, Frigate
+  54); spawn views identical elsewhere.
+- **Aztec's exhaust vent (20260929-234633).** GoldenEye's computer room (18, the armour's) is a box whose west
+  wall runs through the vent's last 50 units (rooms 44/45); GoldenEye shows the room through the back of that
+  wall. HD rooms are drawn two-sided (4J's single-plane decks, see "GoldenEye's own cameras outside the level"),
+  so Bean's wall (the room is a bare 18-triangle box in Bean too, in a mossy stone picture) was a stone face
+  across the vent. `markOverlaps()`: a solid Bean face lying on a GoldenEye face (same facing) is drawn culled
+  (`stri.overlap`) when the first GoldenEye face a line back from it meets is 8-64 units behind and faces the
+  same way, and the space there is closed on all six axes within 400 by GoldenEye faces turned into it. Without
+  the 8-unit floor (rooms sharing a wall have both faces within a unit) and the closed-space test, Depot's
+  warehouse trim and the Cradle's gantry panel vanished from below. Aztec 3 faces, Train 61, Frigate 109,
+  Bunker 74; spawn views identical. **A new stri field must be set in `collectTri()`** (the add at "t =
+  &c->tris[c->num++]"): left out, realloc garbage culled random faces (Depot's trim again).
+- **Control's kiosk (20260929-224150):** the monitor and tilted keyboard (`Pgx077Z` pad 391, `Pgx045Z` pad 400)
+  sit on the wall exactly as in the N64 look - GoldenEye's own setup, not changed.
+- **Bunker II's crates (20260929-215904):** labels showing through as X and ^ on black crates reproduced on the
+  tester's 1823231 (Vulkan) and gone on 35ead5d39 - 1b376fa56 ("Draw an object fading with distance as one
+  surface").
+- Needs an **HDCACHE_VERSION bump** (the built level changes; `sizeof(struct stri)` changed too).
+- Open: Bean's room 18 floor is drawn black from inside the room where GoldenEye's is grey, and its walls are
+  Bean's mossy stone where GoldenEye has computer racks (Bean's own placeholder art).
+
+
+## The watch laser, All Guns pairs and the thrown knife's sounds (26th F3 pass, 2026-09-30, fix/f3-0930c-gelaser)
+
+- **Watch laser (20260930-191858, Train, N64 look: "ejects shells, makes moonraker pullout sound, has
+  recoil").** `gegunsSetWatchLaser()` built its magazine by `memset`, and a `casingeject` of 0 is the
+  pistol's cartridge: every shot threw a case (10 at once in a 90-frame hold). Now -1, as
+  `watchlaser_stats`' NULL cartridge. Its shot kept the Moonraker host's `recoilsettings`
+  (`invrecoilsettings_default`, a random jitter of the gun's position while firing, bondgun.c's
+  `sp274`): NULL now, GoldenEye's recoil speeds and pull back are all nothing for it. The draw played
+  the host Laser's `SFX_PICKUP_LASER`: GoldenEye's equip sound switch has `ITEM_WATCHLASER` in the
+  silent case, so `gegunsEquipSilent()` answers yes while it is installed. And its hits are
+  GoldenEye's: nothing on a body or an object (`recall_joy2_hits_edit_detail_edit_flag()` returns
+  first for it), only the surface's sound on a wall (`recall_joy2_hits_edit_flag()`, no ricochet).
+- **All Guns pairs (20260930-190327, Archives: "can't dual wield the laser").** In a level GE Plus
+  started the cheat pairs by GoldenEye's `CAN_DUAL_WIELD` (`gegunsAllGunsPairs()`, inv.c's
+  `invAllGunsPairs()`: `invHasDoubleWeaponIncAllGuns()` and both cycles), one player only, as
+  `bondinvItemAvailableForHand()` does: every gun but the grenade and the mines. The host's
+  `WEAPONFLAG_DUALWIELD` had left out the Moonraker, both shotguns, the sniper rifle and both
+  launchers. Never the watch laser or the detonator (`gegunsNeverPairs()`). A pair picked up or
+  under Akimbo is unchanged.
+- **Thrown knife (20260930-190108, "knives use the wrong throwing sound").** GoldenEye's throwing
+  knife leaves the hand silently and whooshes (KNIFE_THROW1-3, 95-97) as it flies
+  (`generate_player_thrown_knife()`, `objUpdateThrowKnifeSound()`). Ours played Perfect Dark's
+  `SFX_THROW` at the release and never whooshed: `knifePlayWooshSound()` ran only for the combat
+  knife's *secondary* function, and the GE knife's throw is its first (`gegunsOwnTrigger()`). Now:
+  no release sound for it, the whoosh by weapon number, and on a converted level a GE weapon's other
+  throws leave with GRENADE_THROW_SFX (4); a knife strikes with KNIFE_HIT_WALL_SFX (3) and anything
+  else thrown lands with DROP_GUN_SFX (45), for `SFX_808B`/`SFX_EYESPYHIT`.
+- Probe: `~/wt/f3-0930c-gelaser-run/probe.py` (MODE=watch/knife/allguns; `run.sh BIN TAG MODE STAGE`,
+  Train 0x60, Archives 0x65; knife mode logs every `psCreate()` and its caller).
+
+## GoldenEye's clones (26th F3 pass follow-up, 2026-09-30, fix/f3-0930c-geclone, converter 94)
+
+No converted guard was ever cloned. Two halves of GoldenEye's rule were
+dropped by the conversion: `TRYCloningChr` (0xc1) was mapped to nothing, and
+the guard record's setup flag 0x04 was masked off (`flags & 0x000b`).
+
+**What GoldenEye does.** chraction.c: a guard record's 0x04 sets
+`CHRFLAG_CLONE` (0x02, "clone on heard gunfire"). chrai.c's `TRYCloningChr
+<chr> <list> <label>` asks for that bit, spawns the chr's body with a random
+head through `chrSpawnAtChr()` (nothing beside a chr that has ever been on
+screen, since dc227602e the port too) with spawn flags 0 (off screen only),
+gives the clone the chr's guns and hat and nothing else, and numbers it
+`chrnum + 10000`, which is what `CHR_CLONE` resolves to. Its user is the
+global `m_TryCloneSendOrRunToBond`: a standard guard that hears Bond and has
+never been seen sends one clone (only while `IFMyCloneDoesNotExist`) and
+stays put; a guard that cannot clone runs to Bond itself.
+
+**Perfect Dark's twin** is `aiDuplicateChr` (0x00ca), the same code with a
+spawn-flags word and `chrdup` in place of the +10000 number (CHR_CLONE is
+`chrdup` in `chrResolveId()`; the answer to "does my clone exist" is the
+same). The bit is the same one, `CHRCFLAG_CLONEABLE` 0x02, but a setup chr
+gets it from `CHRFLAG0_CAN_HEARSPAWN` (0x20000000) in its packed flags
+(body.c), so that is what the converter writes at packedchr 0x18.
+
+**Where the two differ, the converted mission takes GoldenEye's side**
+(`aiDuplicateChr`, `modloaderStageIsRemake`):
+- Perfect Dark copies the chr's `flags`, `flags2` and `padpreset1` to the
+  clone; GoldenEye does not.
+- **The count.** GoldenEye has its setup's guards plus ten slots and spawns
+  with three free, so at most seven characters beyond the setup's stand at
+  once. A converted mission has many more (`setupGeMissionChrReserve()` and
+  the player's slots, for its scripted spawns), and with those every unseen
+  guard on Jungle that heard a shot sent a clone - 20 in one test. The clone
+  now waits for GoldenEye's room (`aiGeHasCloneSlot()`: living chrs, not the
+  player's and not a kept body, against the setup's chr count + 7). Scripted
+  spawns keep the port's larger reserve.
+
+**Which missions clone** (ROM scan of the setups): Dam 5 guards, Bunker 18,
+Silo 7, Bunker 2 14, Archives 12, Jungle 33 (all on its own list 1037, whose
+heard-gunfire branch is the global clone list; its list 1041 also clones).
+Train's list 1027 calls `TRYCloningMe` but **no Train guard has the flag**,
+so on Train it always fails - in GoldenEye too. Nothing else carries it.
+
+**Testing.** No harness fires a gun; a gdb Python script calls
+`chrsCheckForNoise(r)` from a top-level loop (a call inside a breakpoint's
+`stop()` stalls the game for good) and breaks on `aiDuplicateChr`. With r=3000
+at frame 200-400: Jungle 33 cloneable, 8 clones (cap), each 60 units from a
+never-seen source; Bunker 1 8 clones; Dam 5; Train none. Chrs without the flag
+(Dam's 41-45, and every clone) try every few frames and fail - GoldenEye's own
+loop (fail, run to Bond, cannot reach, return, hear again).
+
+
+
+## Fog per vertex, the sea through the palette, GoldenEye's portal walk and the GE Plus timer (2026-10-01, fid-look)
+
+Four findings of tools/gefidelity's view diff against the cartridge in ares
+(FINDINGS V2, V3, row 15) and a tester's F3, each settled on the cartridge.
+
+**Fog is per vertex on the N64.** Surface 2's snow was far whiter than the
+cartridge's. The renderers evaluated the fog line per fragment from z/w; the
+RSP evaluates it per vertex, clamps it to 0-255, and the RDP carries it across
+the screen linearly in the shade alpha. GoldenEye's floors are few, big
+triangles and Surface 2's fog starts at 95.7% of the depth range, so a far
+corner deep in the fog greys the ground under Bond. Solving the fog factor
+from the cartridge's picture (pad 245 h180) gave 76, 97, 123, 142 up the
+screen's middle; the model that matches (81, 101, 122, 142) also clips like
+the RSP: at the eye's plane and at gSPClipRatio(FRUSTRATIO_2)'s guard band
+(twice the screen), with the fog worked out at the new corners. Without the
+guard band the corners off the bottom of the screen lend their far fog to the
+whole floor (147-169). **Not the near plane**: the cartridge draws a rock face
+nearer than Dam's near plane (pad 157), as our renderers do with depth clamp -
+clipping there cut the top off it. `G_FOG_VERTEX_EXT` (extra geometry mode)
+turns it on, `envStartFog()` sets it on a converted level in the N64 look
+only, and `gfx_emit_tri3()` does the clipping on the CPU; a corner carries
+`clamp(z/w * mul + off) * w` in the fog slot and the fragment divides by its
+interpolated w, which is linear on the screen (`SHADER_OPT_FOG_VERTEX`, GL and
+Vulkan alike). Surface 2's view median 0.206 -> 0.151.
+
+**A picture is loaded in its texture's format, not its config's.**
+GoldenEye's `texSelect()` (othermodemicrocode.c) takes `tex->gbiformat` when
+the texture is in the pool. Frigate's sea config says RGBA16, but image 1509
+is CI8 with a 24-colour RGBA16 palette in the ROM (and in the conversion,
+which writes images as they are), so TMEM holds indices with the TLUT on, and
+`sub_GAME_7F09343C()`'s RGBA16 tiles (a 32-byte line) look each 16-bit texel
+up by its **upper byte**: every other index of a picture row under s 0-15, the
+next row's under s 16-31. The earlier re-read of an RGBA picture streaked the
+sea along world x where the cartridge's waves are squeezed along it
+(`skyWaterTwinkleTexture()`).
+
+**GoldenEye's portal walk re-enters rooms.** Surface pad 262: the fence
+diamonds are the same size on both sides (texture 261, 64x32 IA8, same UVs);
+on the cartridge room 10's tree billboards cover the fence. The fence is room
+16's translucent list and writes no depth, and GoldenEye blends room 16 first
+because its walk comes back into the camera's own room through room 10 at
+depth 2 (the cartridge's draw list, `dword_CODE_bss_8007FFA0` at 0x8007ffa0,
+`g_BgNumberOfRoomsDrawn` 0x8004483c: (16,2) (10,1)). Perfect Dark's snake never
+walks back into the room it came from. `bgTickPortalsWalkGe()` is GoldenEye's
+queue of single portals, limits included (a room's ninth queued portal, depth
+15, rooms first reached by a special portal or the camera's), a portal whose
+points all lie past nine tenths of the far plane has no box
+(sub_GAME_7F0B5528), and a room's portals are queued in the order of their
+numbers, which is the order rooms of one depth are blended in. Surface 262 and
+Facility 72 now give the cartridge's draw lists room for room and in order
+(the cartridge's `g_BgRoomInfo` at 0x80041414, 0x50 a room: rendered 0x00,
+visits 0x03, disabled 0x34, told which rooms its tests rejected). Left: Dam's
+and Frigate's differences are in the rooms the visibility commands add (draw
+order 0). Not gameplay-neutral: the rooms on screen decide which chrs tick as
+on screen.
+
+**The view tour's AI freeze is not the same on both sides.** Aztec's
+"Exhaust bay opening." (FINDINGS V4) is ai_11's, reached from ai_10's
+if_bond_in_room_with_pad; ours prints it the moment Bond stands on pad 88, and
+the cartridge prints it even with every chr slot's list cleared, so whatever
+runs that chain there escapes `ares_side.freeze_ai()`. Not a game fault.
+
+**GoldenEye's sight follows the player's options** (F3 20261001-065320,
+the user's call). On the cartridge the watch's SIGHT ON-SCREEN shows the sight
+only while aiming: gunsightmode (0 = drawn, gunfire.c gunDrawSight()) reads
+0x2 (GUNSIGHTREASON_NOTAIMING) lowered and 0 with R held when it is on, 0x3 /
+0x1 when it is off. Ours is the same option (Sight on Screen), and Perfect
+Dark's Always Show Target, on by default, keeps the sight up with the gun
+lowered. The "GE Plus: Crosshair When Not Aiming" toggle is gone; a pd.ini
+that still has `Mod.GePlusSightAlways=1` turns Always Show Target on for every
+player at the next GE Plus level. `configRegisterIntRetired()` is how a
+setting that moved keeps its value: pd.ini drops every key nothing
+registers, so a retired key is registered, read, and written back only while
+it is not 0.
+
+**The view tour's camera.** A change that only moved which rooms are on
+screen (the portal walk) moved our camera by up to half a degree with theta
+and pitch unchanged: the head animation's look (Head Roll,
+`bmoveUpdateHead()`) has a phase the whole simulation feeds. Our side of
+`view/tour.py` now runs with Head Roll off, and with Always Show Target off
+(GoldenEye's sight is not up with the gun lowered); bases swept before that
+are not comparable.
+
+**The GE Plus mission timer** (F3 20261001-121337) stands under GoldenEye's
+bottom-message line (BONDVIEW_VIEW_TOP_OFFSET_1), where GoldenEye draws
+nothing, and the messages and opening lines no longer move for it; with a gun
+in the left hand it goes up to the raised line over that hand's ammunition.
+The release look's figures take their columns from the release font's widest
+digit (the countdown's 8/9 columns let them run together).
+
+## Dam's snow banks and its chasm walls in HD (28th F3 pass, 2026-10-01, fix/f3-1001b-hdlook)
+
+**Snow on the reservoir bank (F3 20261001-211323, the owner: "no snow on bank").**
+The bank is a stride 32 level draw whose material holds two solid pictures:
+slot 0 the snow (`_0x09C3D715`, 256x256, read at the vertex's first UV set,
++16) and slot 1 the mossy rock (`_0x0C2539F5`, 512x512, second UV set, +20).
+The blend word's alpha (+24) runs 0xff along the bank's top edge to 0x00 at
+the water: the release lerps snow over rock by it. `beanMaterialTexture()`
+took the bigger picture alone, and at the first UV set, so the bank was rock
+all the way up. `gebeanLevelTriangles()` now draws such a draw as the slot 1
+picture (second UV set) and lays the slot 0 picture over it as a blended twin
+(alpha = blend word), which `dropTwins()` keeps and `markDecals()` lays on it.
+Only where the blend word spans 0..255 within the draw and both pictures are
+solid: constant words (Silo 179, Aztec/Bunker II 128, Archives 143 - lightmaps
+and detail maps) and 0..63 (the four-way terrain shaders: Dam d380, Runway,
+Silo, Aztec) are other shaders and unchanged. Takes it: Dam 3 draws (banks +
+the rock/snow under the dam), Runway 2, Statue Park 5, Jungle 3, Caves 1,
+Temple 1, Egyptian 1, Surface/Surface 2 4. Biggest visible change outside Dam:
+Temple (multiplayer) and Egyptian floors gain the sand blended over their
+tiles. Probe: survey of every stride 32 two-picture draw (blend word range per
+draw) across the 26 arenas; the Xenia oracle could not run this pass
+(`/dev/uinput` lost sdg's ACL at the 21:15 reboot, pad.py cannot open it).
+
+**Chasm walls in patches (F3 20261001-211516, Dam bungee).** `matchN64Brightness()`
+took one factor per room and picture, and Bean's mountain is dealt into rooms
+by position: chasm rooms 17 (factor 0.56, left alone), 58 (3.1), 59 (2.6), 71
+(1.6) on the same cliff picture gave bright and dark rectangles along the
+rooms' bounds. Now triangles of one picture that meet at a corner (the corner
+cells `brightCorner()` already hashes) are one surface (union-find), and a
+surface takes one factor from all of it, in any room; the room's factor is
+the fallback for a surface under `BRIGHT_MIN_AREA`. Corner ceilings are taken
+from every paired triangle, not only the darker rooms'. Before/after:
+`~/wt/f3-1001b-hdlook-run/out/{base,fix}_chasm_0.png`; the 11-level brightness
+sweep (`bsweep.sh`) checked level ratios and screens.
+
+Checked against the release in Xenia (CE, `tools/gefidelity/xenia/pair.py`,
+triptychs Bean/base/fix in `~/wt/f3-1001b-hdlook-run/xp/<tag>/tri.png`): Dam pad
+271 h199 - Bean's bank is snow to the water, as the fix; Egyptian pad 110 h180
+v-30 - Bean's floor is sand over nearly all the tiles, base showed bare tiles,
+the fix sand over most (closer; the release is sandier still). Multiplayer
+Temple (same sand picture `_0x0612CF55`) could not be booted (local match needs
+two pads). The brightness pairs (Aztec 91, Train 150, Statue 112) did not line
+up - Bean's frame and ours were different views (null 0.35-0.72) - so they
+say nothing about the release; base-to-fix moved little at our own views.
+
+Both change the built level: **HDCACHE_VERSION bump needed** (left to the merge; done there: 14).
+
+## Stairs, a hatch, a tunnel and a scientist's head (29th F3 pass, 2026-10-03, fix/f3-1003-move)
+
+Probes in `~/wt/f3-1003-move-run`: `realwalk.py` (build/gexrom's, plus `BLOCKWHY=1`,
+`WALLQ=1` - a conversion wall of tile `WTILE` asked of geStanWallSkipped() where the
+walk ended - and `MARGIN=`, which set a debug copy of the margin), `walk.sh <bin>
+<stage> <tag>`, `tilesnear.py` (fixed for the six-argument geStanWallSkipped()),
+`place.py` (a camera at a trace's position), `chrstand.py` (the player put over the
+nearest standing chr's head), `fuzz.py` (random stick in a box, flags a ground drop).
+
+- **The flood's margin is gone** (`GESTAN_MARGIN` 8 -> 0 in collision.c;
+  `GESTAN_LINEREACH` stays 8). F3 20261002-153526 (Dam's outside tower stair, "stuck
+  at the end on the right, only the left lets you off", and the same on Frigate,
+  Caverns, Surface): the ground at the stair's foot (tile 366) has a wall on its
+  unlinked edge that runs under the flight on a diagonal from the bottom tread's
+  outer corner (13675, 28555). From the bottom tread the flood reached 366 round that
+  corner - tread -> riser uprights -> ground 364 -> 363 -> 367 -> 366, every link
+  only at the shared corner point, 38.6 from a body there - because the reach was the
+  radius plus 8, a leftover from when a tile was reached by its box. The 366 wall,
+  28 away, then stopped any move that came nearer the corner: realwalk down the
+  flight with SIDE 0.6 / 1 stood on the bottom tread for good, and up with SIDE -1
+  stood on the 13407 tread mid-flight. GoldenEye cannot be within 30 of that corner
+  (the tread's own unlinked edge ends there), so with the reach the bare radius the
+  flood never gets round it. Same fault on Cradle's hatch (F3 20261003-002353, "not
+  easy to get down this ladder to finish off Trevelyan"): the hatch rim (x -1618 to
+  -1448, z -1093 to -927) is unlinked except the ladder's 81 at x -1580..-1499, and
+  GoldenEye's radius 30 leaves a window x -1550..-1529 to walk into it; with the
+  margin walks at x -1550 and -1530 stopped 20 short of the edge and only -1540 went
+  in (tester stood at -1530.6, -1114.1). After: -1530 and -1550 drop into the shaft,
+  -1520 stops at the wall's end as GoldenEye's would.
+- **A ramp's height is asked where it is touched** (`geStanTouchesFloor()`). F3
+  20261002-211321 (Egyptian, "enter the sloped tunnels from the top and you end up
+  above them"): each tunnel is one ramp (tiles 62/63, 1150 at x 2257 down to 416 at
+  1246) whose top is a lip 90 over the floor (1060). The climb lifts the player onto
+  it and `g_GeClimbHold` keeps 1150 as his ground while his circle touches a floor
+  "at 1150" - and the test took a tile's whole span, so the ramp touched 1150
+  everywhere and he walked out level over the tunnel's roof. The height is now the
+  tile's surface under the middle, or the edge's height at its nearest point. Walk
+  from room 37 down the ramp: before ground 1150 to x 1375, after it follows the
+  ramp (916 at x 1920). Facility's conveyor lift identical (+118.9).
+- **Nobody stands on a body's head** (`bwalkGeSlipOffBody()`, converted levels). F3
+  20261003-000823 (Caverns stair, "stuck... going down quickly as a scientist was
+  coming up"): the trace has the player's eye 340 over the bottom tread with the
+  scientist (act GOPOS) 28 from him in plan. Perfect Dark's fall stops on any
+  cylinder, chrs included ("landed on top of a chr"), so he stood on the head;
+  GoldenEye's height is the tile alone. Held up 30 or more over the ground by a chr
+  or player, he now slides off away from its middle 4 a tick (a wall behind: either
+  way round), and falls. `chrstand.py` on Dam's chr 6: before stood on it for good
+  (ground 13267 over 13112), after off in 15 frames, on the floor, walks away.
+  Simply ignoring bodies in the fall was tried: he sank into the guard's cylinder
+  and then could not move at all.
+
+## Egyptian never ended: Mission Respawn freed the carried Golden Gun (29th F3 pass, 2026-10-03, fix/f3-1003-aiscript)
+
+**F3 20261002-100746/100932** ("objective A failed after the Golden Gun was taken"). Egyptian's A collects
+tags 4 (the Golden Gun) and 5 (its ammo box); a collected tagged object is carried as a child of the player's
+prop, and `objectiveCheck()` fails a collect objective once its object has no prop. The tester had
+`Mod.MissionRespawn=1`: `playerStartNewLife()` marks every child of a solo player's prop `OBJHFLAG_DELETING`
+for the first life, and Mission Respawn's new life went through the same branch. The mark is latent until
+the player's body ticks its children (`chr0f022214()`: third person, the death replay), then the objects are
+freed and A fails for good. Respawning now skips the mark. Probe `~/wt/f3-1003-aiscript-run/scen/egyptdie.py`
+(pick up, `playerDie(1)`, respawn, third person): base A 1 -> 2, fixed stays 1. With A and B complete the
+ending (bg 0x1009) runs as GoldenEye's.
+
+**Looked at, not changed:** Control's Trevelyan lift door (tag 0x1e) closes on base whether Bond walks up or
+shoots him, early or with the late stage flags 0x16dc00 (`scen/control2.py`); the testers' stuck door is
+unexplained. Cradle's Trevelyan skips "I was always better" when Bond is already in the rooms of pads
+0x73/0x74/0x94/0x6d as he stops at pad 0x96 - GoldenEye's own branch in ai_15 (0x410 -> 0x415 -> 0x417).
+Aztec 20261003-003005 is the same two doors (records 239/240, pads 297/298) and console as pass 28's notabug.
+Natalya at Control's kiosk stops on pad 225 (walk, typing and the off-screen teleport, `scen/natalya.py`); the
+tester's trace had her 58 units further on, at the console, not reproduced.
+
+## Round 2 of pass 29's AI items (2026-10-03, fix/f3-1003-aiscript)
+
+**Surface 2 ending stairs (F3 20261002-160950):** `playerTickThirdPerson()` set FORCETOGROUND on the body
+every cutscene tick, so a converted list's Bond (`chrIsGeListBody()`, now exported) snapped a whole 24-unit
+tread at a time down the bunker stairs. GoldenEye's guard is INIT once, then eased up / falls down. Forced
+now only on the first tick a list has him (a frame gap re-arms it). `scen/surf2end.py` (twin, `--pd-arg
+--cinema-ending`, mission surface2): base manground 168,168,...,144 per tread; fixed falls smoothly. Twenty
+endings at 120/250/400 frames base vs fixed: only Surface 2's stairs differ (`out/endsweep`).
+
+**Archives Natalya's guard (F3 20261002-231301/231349):** chr 9 (list 0x40a, then 0x808 RunToBond) cut
+straight to Bond past Archives' double swing doors (pads 409/410) and walked into the open leaf for good:
+the route follower's obstacle check leaves out AI-openable doors (stock and GoldenEye alike), which is fine
+for Perfect Dark's sliding doors. `cdExamCylMove03` at the stuck spot: doors collide at 40 units, BG clear.
+Converted levels add `CDTYPE_OPENDOORS` to `chrNavTickMain()`'s check. `scen/arch.py` (GF_GUARDS=9,
+GF_BOND=-1663,43,-139): base stuck at (-1317,-1408), the tester's position; fixed reaches Bond.
+
+**Not changed:** Control's dying guard (013938) - guards killed at (-1906,-200,874) lie at ground+15 like the
+tester's chr, no part under the floor in our shots. Boris at Bunker's doors (155647): the tester's shot has Bond
+standing in the doorway Boris is walking through. gdb trap: `$gs` is a register - name convenience variables
+otherwise ("Couldn't write registers").
+
+## Shots, mines and sight through GE Plus's doors, trees and railings (29th F3 pass, 2026-10-03, fix/f3-1003-los)
+
+**Caverns' eye and iris doors let every shot and thrown mine through.** Their
+models (Pdoor_eyelidZ, Pdoor_irisZ) carry the hit box *beside* the leaves, a
+childless bbox node, so the stock walk (`modelTestForHit()` finds a bbox, then
+`func0f0849dc()` tests only the lists under it) never met a triangle. GoldenEye
+has a door case for exactly this: `sub_GAME_7F04E720()` (a shot) and
+`projectileLineTestModel()` (a thrown object) test an eye or iris door (or a
+CLIP_TO_BBOX one) against the door's own box and then every list from the root.
+Perfect Dark dropped it with the door types. `doorGeTestWholeModel()`
+(propobj.c) is that case, for DOORTYPE_EYE/IRIS only (GE-only types), in
+`func0f0859a0()` and `func0f06b610()`. A survey of Caverns' props: only these
+two models have a childless bbox. Probe: `shot.py` with HOLDSHUT=1 (a doorTick
+breakpoint holds near doors shut) and `mine.py` (throws from inside
+handTickAttack and tracks the projectile) in `~/wt/f3-1003-los-run`.
+
+**Bullets at GoldenEye props in the HD look test the release mesh.** Jungle's
+thin trees: the release trunk is narrower than the ROM one and a shot past
+the drawn trunk stopped on the invisible N64 triangles (an AR33 went through,
+as through any object, which is how the tester knew it was a prop).
+`xblaMeshObjShotTest()` (xblamesh.c) notes the model's Bean lists the way
+`xblaMeshSurfaceAlong()` does (now `xblaMeshHitNoteModel()`), runs
+`xblaMeshHitTest()` and hands back the hit in the bbox matrix's own space;
+`func0f0859a0()` uses it whenever the model draws a GoldenEye release mesh.
+-1 (no release mesh) falls back to the ROM triangles, so the N64 look and
+Perfect Dark's props are unchanged.
+
+**Frigate's "doors that aren't in GoldenEye".** They are GoldenEye's (the
+cartridge's world dump has records 104 etc., `exists` 1) but the cartridge
+files six upper-deck doors (our pads 247-266) in the lower deck's rooms
+(record 104: rooms 14,15; a91f1c830 matched that). From their own deck the
+cartridge never draws them, and nothing there meets them: its guards' sight
+and shots (stanTestLineUnobstructed() collects props from the rooms of the
+tiles walked) and Bond walk through. The N64 look matched; the HD look draws
+every room, so the doors stood shut in open doorways. Doors now take
+`bgRoomIsPortalVisible()` in `func0f08e8ac()` like chrs (GoldenEye HD levels
+only). Cartridge picture at pad 62: `ares/padshot.py` GF_PAD=62.
+
+**GoldenEye's guard sees Bond only where its tile walk ends on Bond's tile.**
+`chrCanSeeBond()`: `stanTestLineUnobstructed(... CDTYPE_DOORS ...) && mystan ==
+bondprop->stan`. A converted level has no ceilings and its walls stop under
+the floor above, so Perfect Dark's 3-D line let Archives' guards see Bond on
+the stair below them and shoot over the railing. `chrHasLosToChr()` now also
+needs `geStanLinks(..., climbs true) != 0` for a non-bot guard looking at a
+player on a converted level.
+
+**Checked and GoldenEye's own:** auto-aim at a guard on the deck above or
+behind the bridge's walls (GoldenEye's auto-aim, chrprop.c, scores every armed
+chr on screen with no line test at all); auto-aim width on Agent (GoldenEye's
+`difficulty` 1.5 = our `g_AutoAimScale`, same box; GoldenEye's swivel is the
+faster of the two, 0.86 against Perfect Dark's 0.963-0.979). The Dam tunnel
+gates block a guard's sight and shots from the tester's spot with the real
+rooms (`los.py`); `doorlos.py`'s Dam "leaks" are its room-box sides (Dam's
+outdoor boxes overlap), not leaks.
+
+Round 2 (same branch):
+- **Auto-aim sight is GoldenEye's tile walk** (F3 20261002-160509, 155820).
+  chrpropScoreAutoAimTarget() scores a target only where
+  stanTestLineUnobstructed() from Bond ends on the target's tile; prop.c's
+  func0f06438c() now drops a candidate on a converted level when
+  `geStanLinks(player, vv_ground, target, chr->ground, true) == 0`. Probe
+  `~/wt/f3-1003-los-run/aim.py` at the report spots: base locked onto Frigate's
+  deck-above / bridge-interior guards, now none; a same-room guard still locks.
+- **Door case completed**: GoldenEye's shot case also takes DOORFLAG_CLIP_TO_BBOX
+  (PD DOORFLAG_0004) doors, and its projectile case every door; the box is the
+  DoorRecord bbox = doorGetBbox(). Converted levels only.
+- **xblaMeshObjShotTest()**: on a miss, a model with lists still drawn from the
+  ROM returns -1 and the stock walk tests those lists alone
+  (xblaMeshObjShotTestEnd()). No such model was found on Dam or Frigate.
+- **Dam's reservoir in HD** (F3 20260929-213318): Bean's stride-36 water is no
+  shot triangle, so shots hit the HD rock bed ~100 under GoldenEye's water
+  (which is in the room's *opaque* list) and gebeanStageHitTexture() found no
+  triangle within 8: default surface, a hole seen through the water. A hit under
+  one of the room's GoldenEye water triangles (surface 5/14) now takes its
+  texture (1511, no hole, water sound). The shell also keeps translucent
+  triangles (shellXlu[]) for the hit texture only.
+
+## Pass 29 merge: review fix-ups (2026-10-03, merge/f3-1003)
+
+- **geconvert 110, the muzzle-flash star's G_COL.** 2c1691a03 gave the star list
+  (modelLists() with `fours`) a G_COL on segment 6, which
+  modelRenderNodeStarGunfire() places 8-aligned after `unk00 * 4` vertices (12
+  bytes each). The record's count is clamped to the quads the list loads, so a
+  star with a smaller count would read colours out of the vertex table; case 0x16
+  now moves each G_COL on by `cat - ALIGN8(vat + quads * 48)` (0 on every GE gun).
+  **Trap:** segment 5 looks like the clean answer (COL1 = baseaddr = the colour
+  table at draw time) but the model preprocessor (port/src/preprocess/gbi.c)
+  rewrites every segment 5 address as a *file offset* and fails fatally on one
+  below the vertices: "Tried to load data from offset 0x0 but segment starts at
+  0x670" on Aztec's first model.
+- **HDCACHE 17** for the plain-black restore (3df5e2993) and the strip-pair decal
+  pick. The new black faces were looked at: Aztec's pit floor (-4800,-824,1120)
+  was a flat olive card in base and is black now, as the N64 look draws it;
+  Aztec's doorway pair (z -3159) and Train's pair (x 4250, y 80, under the floor)
+  showed no pixel change from any camera tried. Rule kept.
+- **markDecals strip pairs**: the strip test runs only when neither face's middle
+  lies on the other; a pair with one middle on the other is the middle rules'
+  from that face's pass. Otherwise both faces could become decals of each other.
+- **gebeanStageHitTexture**: translucent shell triangles count only when water;
+  a decal or pane over a wall no longer gives a wall hit its surface.
+- **xblaMeshObjShotTest**: with XBLAMESH_HITLISTS (32) notes full, a miss is a
+  miss (no ROM walk on lists past the cap). The cap stays 32 for PD's XBLA meshes.
+- **Ending list body**: the "last frame a list had him" is `player->gelistbodyframe`
+  (-10 from playermgr each level), not a function static.
+
+### The Cradle helicopter (F3 20261003-002429, 2026-10-03)
+
+The ending's helicopter (`PROP_HELICOPTER`, `Pgx282Z`; only Cradle's setup
+places model 282) had no HD row: propfit's fit is exact, but it scored 0.40
+because GoldenEye's body list carries the pilot, Natalya, and the release's
+helicopter is the aircraft alone. `gen_proptable.py` exempts it from the 0.6
+cut (`SCORE_EXEMPT`). Three things make it right in the HD look, all keyed on
+the row's source `prop/helicopter` (`gebeanRigidKeepsUncovered()`):
+
+- **The pilot stays GoldenEye's.** `beanUncoveredVertices()` lays the
+  release's N64-look copy by the row's fit and marks the body list's vertices
+  no Bean vertex lands on (within 2 units; the fit puts every Bean vertex
+  within 0.89): 1003 of 1624, exactly the pilot plus her visor in the
+  translucent list. `xblaMeshKeptLists()` makes a copy of the node's two lists
+  with every triangle that has a covered corner zeroed (577 opaque, 2
+  translucent), per stage, and model.c's `modelRenderNodeDl()` draws it as
+  the node's own (`modelRenderNodeDlLists()`) right after the mesh.
+- **The rotors turn about their own hubs.** The release remade the aircraft:
+  cabin, skids and nose lie on GoldenEye's (Bond hangs from the same skid),
+  but its mast is 816 units forward and its tail rotor 1711 from GoldenEye's
+  held positions, so neither bone was bound and both stood still. Each
+  non-body bone with vertices takes the nearest held position on the body's
+  matrix; its vertices are about its own bone, and `xblaMeshHubShift()` moves
+  that matrix by the hub's offset as the body's matrix turns it, so the
+  spin is GoldenEye's (`rotoryrot`) about the release's hub. The tail is
+  shorter than GoldenEye's: that is the release's model.
+- **The windows are glass.** They are stride-28 draws (colour, no UV) over
+  the aircraft's own landscape map, drawn as flat opaque slate; now looked up
+  by the normal and blended at the window prop's 0.56, so the pilot shows.
+
+The N64 look is unchanged (frame 520 pixel-identical to the base).
+
+
+## Dam's chasm slivers were a tunnel lamp's light; the watch arm on closing (30th F3 pass, 2026-10-03, fix/f3-1003b-gehd)
+
+**Dark slivers on the chasm cliff (F3 20261003-054133, "still more empty
+polygons in the bungee-jump chasm").** Not a build fault in the release's mesh
+and not the GPU: the same view on 613ea8f and d87d2def3 is clean until a room's
+light changes. The tester plays with `Mod.GeShotLightsDim=1`; the slivers are
+Bean cliff triangles dealt to room 101, a lamp-lit tunnel room on the dam's top
+10000 units away, so shooting that lamp darkened them (the HD colour pass in
+dlights.c keeps a shot lamp's share by design). Why 101: `tgridNearest()`'s
+cells are hashed (`gridKey()`), and with nothing of GoldenEye's within the
+rings searched (2 x 64 units) a triangle from a far cell sharing the bucket
+answered. `build()` now marks such deals (`farHit`, d past the rings' reach)
+and, after the dealing, moves those that landed in a room with lamps to the
+nearest-by-box room without lamps among those that already hold Bean
+triangles, and only out of a room that keeps triangles of its own - so the
+served/kept rooms, the backdrop and the fog bits are as they were (Dam: 816
+moved, 97 of 136 served, 246 backdrop, both before and after). The
+out-of-range move loop prefers a room without lamps too. Repro:
+`~/wt/f3-1003b-gehd-run/shot3.sh` with `DARK=<rooms>` (calls
+`roomSetLightsOn(r, 0)`) at the report's camera (spectate, prop at
+cam - (29.4, 14.9, -196), `FOV=75`). With every dam-top lamp out the base drew
+dozens of black slivers over the cliff and the dam's face; the fix none. Without
+lamps out, two views differ by under 0.2% of pixels (a few triangles' brightness
+factor, max 38/255). HDCACHE_VERSION 18.
+
+A first try re-dealt every far hit to `nearestRoomBox()`: 68222 triangles, 107
+rooms served, 29 kept - GoldenEye's kept backdrop rooms turned into Bean's.
+Do not do that without looking at every level.
+
+**Watch arm standing up after the pause (F3 20261003-055428, "put the watch
+hand at the original position").** The screenshot is the end of closing the
+watch with the view back at the floor (-72.7) and the arm still up, fist and
+watch in the middle. `WS_LOWERARM` tilted back at the tilt's own pace (33
+frames from -40) while the arm takes 40. GoldenEye's WATCH_ANIMATION_0x7 makes
+the unpause transition at least the arm's time + 20 (bondview2.c: `sp24 =
+max(setup, sp28 + 20)`), and 0x2 makes the opening one at least 30; gewatch.c
+now does both.
+
+**Crash 20261003-073032 (v3.13.0)** was 20261003-040138 again (stale
+`headfitNextBody` after the menu preview; fixed by 892ed66f7). The static is
+gone: the preview calls `bodyCalculateHeadOffsetForBody()` with its own body.
+
+## The pause watch's arm was a hundredth of its size (31st F3 pass, 2026-10-03, fix/f3-1003c-watch)
+
+**F3 20261003-133024 (Train, "the watch shrinks down instead of being to the
+left of the screen").** Not 61c37811f's: 613ea8f does the same. The floating
+arm's (Cgx041Z) scale 0.01 went on twice - `watchWristMatrix()` scaled the
+wrist matrix and `modelSetScale()` put it on the root again - so the posed arm
+was 100x too small and only `watchRelToPose()`'s move to the eye grew it: it
+rose out of a point below the middle of the screen and shrank back into it.
+GoldenEye swings it in and out at the lower left. The wrist matrix has no
+scale now, and its position is the prop's (GoldenEye's `collision_position`,
+11 units over the eye at -75), not `bond2.unk10` (the eye). Every bone then
+matches the cartridge's at -40 (shoulder (0,-42.5,-24.8), elbow
+(-20.2,-18.0,-4.2), the hand frame by frame). The arm is not drawn in
+`WS_RESTORE` (GoldenEye's 0x8 clears `pausing_flag`). GoldenEye moves only
+the root (the watch) to the eye and leaves the arm; ours still carries the
+whole pose (`watchApplyRel()`), the 16:9 choice, unchanged.
+
+Probes: `tools/gefidelity/view/watchpause_ares.py` (cartridge pictures through
+the pause, `WP_VERTA`), `watchprobe_ares.py` (the player's watch fields and the
+arm's nine matrices, decoded from the RSP's s15.16 `Mtx`; GoldenEye's
+`pause_watch_related_adjust` follows `pause_animation_counter`). Ours:
+`~/wt/f3-1003c-watch-run/{watch.sh,watch.py}` (`VA`, `LOOK`).
+
+Report 20261003-094539 (watch laser in N64 hands, 613ea8f) was 5c6920b6a's;
+the watch laser exists on Train only (`gegadgetsIsWatchLaser()`).
+
+
+## Control's windows a black wall in HD; three "is it right?" answers (31st F3 pass, 2026-10-03, fix/f3-1003c-hdlook)
+
+**Control's big panes drew as a flat black wall (F3 20261003-102904).** They are
+the window prop (`Pgx104Z`, tinted glass) with GoldenEye's `xludist 0, opadist 10`
+- opaque from any distance on the cartridge (ares, Control pad 106 heading 180:
+dark glass with the room's lights streaked over it, GoldenEye's flag 0x200
+environment mapping), the same two numbers in Bean's setup (`world/glassrec.py`,
+both sides). The HD look drew a tinted pane going opaque as a flat grey
+(`XBLAMESH_TINT_*` 22,21,20, measured on Facility's lab windows, which reflect
+little), so these were opaque in a colour with no reflection at all. Now a mesh
+that is nothing but tinted panes (`m->tintonly`, set by `xblaMeshTintCopy()`)
+hands its node back for GoldenEye's own pane at the same opacity
+(`tintStockNode`, drawn through `xblaMeshKeptLists()`): Control's panes are the
+cartridge's reflective glass, Facility's far lab windows the N64 pane they were
+measured from, partly-opaque ones the N64's blend. Meshes with more than panes
+(gas plant clear door, truck, jeep) keep the flat grey. N64 look unchanged
+(pixel-identical). Bean itself draws Control's panes see-through (its level is
+one mesh, no portal shuts behind them) - offered to the owner, not done.
+
+**Egyptian's door "is that door correct?" (20261003-102624).** `cryptdoor1a`
+(the grey hieroglyph slab) over `cryptdoor1b`, a 200x100 block. On the
+cartridge 1b wears the wall's sandstone (`original/prop/cryptdoor1b`: two 32x32
+sand pictures) and hides in the wall. Bean's `new/prop/cryptdoor1b` (retail and
+CE alike) puts a 512x512 photograph of an Akhenaten relief on its front and
+back at UV 0..1 - the whole square squashed into the 2:1 face - and a 512x512
+block-stone picture on its sides. **Fixed (owner's call):** `beanRepaints[]`
+in gebean.c swaps the front/back draws' relief (`_0x01460E75`) for the sides'
+block stone (`_0x08A255B5`) at load (`beanRepaintDraws()`, after the
+reflecting-surface pass, so everything after sees the new picture) and lays
+their UVs again from the file position (`beanRepaintUv()`): x across, y up,
+75 units a repeat from (2750, 400) - the sides' own vertical rate, so the rows
+meet theirs at the corners, square texels, 2.67 x 1.33 repeats on the face.
+Matched by picture name, not raw UV, so retail and CE (whose copy differs in
+six vertex colours only) both take it. Runtime prop mesh only: no HDCACHE
+bump. Shots: `~/wt/f3-1003c-hdlook-run/out/crypt_cmp.png` (report camera),
+`cryptc_cmp.png` (CE close), `cryptr_cmp.png` (retail close).
+
+**Caverns' lights (20261003-102652)** are level geometry (Bean's caged lantern
+on a chain), drawn as the release draws them; matched pads (Caverns pad 81)
+show ours brighter than Bean overall. **Depot's decals (20261003-103017):** the
+report's view has the cartridge's five tags one for one (PSYCHO, the kid, the
+pink tag, the face, the small red ring); the build keeps 800 decal triangles.
+Two Depot pictures are the release's magenta placeholders
+(`_0x02B70D55/_0x02B70D65 .inta_*_cut`), painted grey.
+
+**The red block on the left gun** is GoldenEye's shotgun shell carrier (parts
+18-27, `gegunsOwnModelParts()`), five shells while five or more are in reserve,
+on the mirrored left gun's inner side - in the N64 look too. Repro rig:
+`~/wt/f3-1003c-hdlook-run/gun2.sh` (KF7 right, auto shotgun left, ammo given,
+reload).
+
+## Shots through Cradle's catwalks; Caverns' iris; Aztec's mainframe doors (31st F3 pass, 2026-10-03, fix/f3-1003c-geshots)
+
+**Bond's shots went through a catwalk over his head (F3 20261003-154834).**
+`shotCalculateHits()` tests the rooms of the portal walk along the line
+(`portal00018148()`) plus the forced ones. A converted level's rooms overlap and
+Cradle's catwalk is a room of its own (27) that the walk from the deck (12)
+never enters: the shot tested room 12 alone and the catwalk's opaque underside
+(texture 630, 556 units up) was never met. GoldenEye's shot (chrprop.c) tests
+Bond's room, then the rooms connected to it one after another until one is hit
+(`chrpropFindFirstBgHitInConnectedRooms()`), then every room drawn this frame
+for a closer hit (`chrpropFindCloserBgHitInVisibleRooms()`); its triangle test
+(`intersectRayTriangle()`) is two-sided and its batches are the solid list
+only. `shotGeRooms()` (prop.c) adds every other room whose box the line enters,
+converted levels only; the nearest hit is kept as before. Probe:
+`~/wt/f3-1003c-geshots-run/cat.py` (logs the rooms tested and sweeps every room
+with `bgTestHitInRoom()`, xlu batches off and on): base `[12]`, no hit; fixed
+`[12, 27, 31]`, hole on the underside.
+
+Guards: GoldenEye's attack target test (chraction.c, the TARGET_BOND case)
+needs the tile walk from the gun to end on Bond's tile, as its sight does.
+`chrHasLosToEntity()` now asks `chrGeStanReachesPlayer()` (the same
+`geStanLinks()` test b07aa503a put in `chrHasLosToChr()`) before a non-bot
+fires at a player on a converted level. At the report spot Perfect Dark's own
+`cdTestLos05()` already stopped a guard on or under catwalk 27 (`glos.py`,
+`glos2.py`), so this closes the path where the 3-D line misses a floor's
+tiles, not one reproduced there.
+
+**Caverns' iris "yellow part" (F3 20261003-153948, on 83e7f24)**: fixed by
+b876a022e/0790a6ed7; a ZMG shot at the yellow centre from the tester's spot
+lands on Pdoor_eyelidZ at 269 (`shot.py`, HOLDSHUT=1, TH=109 VA=-13).
+
+**Aztec's "mainframe door" (F3 20261003-155527)** is GoldenEye's: setup records
+239/240 (our pads 297/298, Pgx332 mainframe cabinets made as doors) have
+keyflags 2, which no key in the level carries (the one key, record 142, is the
+smart card's 1), no one-way lock bits, and renames 237/238 give both the locked
+text 0x1426, "This mainframe is inoperative.". Locked from both sides on the
+cartridge and on ours (`azuse.py`).
+
+## HD meshes built while the stage loads, not on their first frame (31st F3 pass, 2026-10-03, fix/f3-1003c-hitch)
+
+F3 20261003-123556 (Steam Deck, GE Plus Dam, HD look): "the game briefly freezes every time a new model
+loads". A GoldenEye model's HD mesh is built on the game thread by `xblaMeshBuildBeanOnce()` ->
+`gebeanBuild()` the first frame it is drawn. Timed on the RX 580 box: 95-895 ms a first-person gun at
+4e98c8a, 4-15 ms a character, 0.2-10 ms a prop. Two parts:
+
+1. **Faster builds** (3df3ed836): `beanMarkDecals()` files triangles in a grid by their grown boxes
+   instead of trying every pair, and `fpRefineRoundsN()` (the first-person placement walk) sorts
+   Bean's points along the longest axis and scans outward. Both give bit-identical results (checked
+   beside the old loops: 0 triangles differ over every Dam gun and missions 1/2/4/7/12; 744 fits SAME).
+   Gun builds went to 18-93 ms.
+2. **Built at the load** (owner's choice, proposal A): `port/src/hdpreload.c`. `lvReset()` calls
+   `hdPreloadBegin()` before `setupLoadFiles()`; on a GE Plus or converted stage (`modloaderStageIsRemake`
+   + `modloaderDirIndexIsConversion`) in the HD look (`xblaMeshGetEnabled() && gebeanGetEnabled()`) it
+   switches `xblaMeshPreloadSet(1)`, and from then every model that registers
+   (`xblaMeshRegisterModel()`) is built at once through `xblaMeshPrebuildBean()` - the census path
+   (GEBEAN_CENSUS) without the census. That covers the setup's chrs, heads, props, the guards' guns and
+   the pickups (their third-person models). `hdPreloadEnd()` (after the players spawn) and
+   `hdPreloadTick()` for the first 10 ticks (the intro AI hands guards their guns and hats there:
+   Cradle's ZMGs and berets) gather the weapons in the players' inventories, on the floor and in the
+   guards' hands, and build each one's **first-person** model with `xblaMeshPreloadModelFile()`: the
+   file loaded the way `bgunTickGunLoad()` loads a gun (LOADTYPE_GUN, inflated size + 0x8000) into
+   malloc'd memory of its own, promoted, registered (which builds it), then `xblaMeshForgetModel()` and
+   freed, with `g_FileInfo[file]` put back so bondgun's own load is untouched. The players' own guns
+   also get their third-person model state loaded (`setupLoadModeldef()`). After tick 10 the switch goes
+   off and the log says `hdpreload: N HD meshes built while the stage loaded (M of them first-person
+   guns)`.
+
+Why it is safe: the meshes are the same `beanBuilt[look][fileid]` cache the draw fills, keyed by file,
+holding no pointer into the model (the draw-time ones - posedmodel, keptsrc, neckbackdef - are set at the
+draw and cleared at `xblaMeshResetBeanMeshes()`); the temporary model's hash/use entries are forgotten
+before its memory goes. **Mod swap:** `romdataResetFiles()` can give a file slot to another model, and
+every draw path reads `beanBuilt` by slot - a mesh now records `beangen` (`romdataFilesGeneration()`)
+and `xblaMeshResetBeanMeshes()` lets go of any built under an older generation at the next stage reset
+(leaked, not freed, as `xblaMeshDropStale()` does for packs: the render thread may be in its lists; GPU
+copies forgotten, kept lists freed). This was a latent bug before the preload too.
+
+Measured (instrumented copy, `--fixed-step --rng-seed 1`, Vulkan offscreen, RX 580; patch kept at
+`~/wt/f3-1003c-hitch-run/instrumented2.patch`, env PD_HITCH_NOPRELOAD for the A/B, PD_HITCH_GUNS for the
+25-gun walk):
+
+| stage | lvReset before -> after | meshes at load | RSS at frame 600 | first-frames spike (lv 6/7) |
+|---|---|---|---|---|
+| Dam | 24 -> 377 ms | 41 (5 fp guns) | 258 -> 297 MB | 246/102 -> 239/73 ms |
+| Facility | 52 -> 408 ms | 45 (5) | 186 -> 238 MB | 322 -> 108 ms |
+| Runway | 19 -> 247 ms | 27 (3) | 229 -> 249 MB | 169/120 -> 163/55 ms |
+| Cradle | 33 -> 205 ms (+~30 ms at tick 6) | 21 (4) | 230 -> 211 MB | 425/235 -> 155/71 ms |
+
+Mesh memory itself is 2.5-4 MB a stage; most of the RSS is the decoded pictures. In play nothing
+preloaded builds late: the starting gun's 45-55 ms spike at frame 23 is gone on all four, and on Dam's
+25-gun walk only the 17 guns Dam never hands out build on equip (the harness gives them). Still late:
+guns handed out after tick 10 (a later AI give, a mid-mission spawn's weapon), chrs that spawn
+mid-mission with a model the setup never loaded, the pause watch's bare gun copies
+(`GEBEAN_FPWATCH_BASE` rows, built on first pause), and the first frame's own spike (HD level setup and
+texture upload, not a model build). Build hashes (gebeanBuild output + material flags) are identical
+between preloaded and first-draw builds on all four stages (28/1/13/15 compared); `--state-hash 100`
+identical with and without the preload on Dam and Cradle in the HD look; replaytest compare
+(match/solo/gematch/gesolo) same against 4e98c8a. Stage change + a forced generation bump (gdb) dropped
+the 41 Dam meshes and rebuilt at the next load with no fault.

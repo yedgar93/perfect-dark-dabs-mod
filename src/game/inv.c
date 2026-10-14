@@ -6,6 +6,8 @@
 #include "gegadgets.h"
 #include "gexfront.h"
 #include "gexplus.h"
+#include "modloader.h"
+#include "geguns.h"
 #endif
 #include "game/cheats.h"
 #include "game/bondgun.h"
@@ -34,6 +36,32 @@ void invClear(void)
 }
 
 /**
+ * Where a weapon stands in the inventory's order: its number, except that
+ * GoldenEye's own inventory sorts by its item numbers (bondinv.c), which put
+ * the hunting and throwing knives straight after the fist and the watch's
+ * detonator and the tank's shells straight after the remote mine, where ours
+ * number them after the guns and the gadgets (F3 20261002-225441: "the
+ * throwing knife comes after the KF7"). Perfect Dark's own order is its
+ * numbers, unchanged, and so is a GoldenEye gun's on Perfect Dark's stages:
+ * the reorder is GoldenEye's, for its converted stages only.
+ */
+static s32 invOrderKey(s32 weaponnum)
+{
+#ifndef PLATFORM_N64
+	if (weaponnum >= WEAPON_GE_FIRST && modloaderStageIsRemake(g_Vars.stagenum)) {
+		switch (weaponnum) {
+		case WEAPON_GE_HUNTINGKNIFE:  return WEAPON_UNARMED * 4 + 1;
+		case WEAPON_GE_THROWINGKNIFE: return WEAPON_UNARMED * 4 + 2;
+		case WEAPON_GE_DETONATOR:     return WEAPON_GE_REMOTEMINE * 4 + 1;
+		case WEAPON_GE_TANKSHELLS:    return WEAPON_GE_REMOTEMINE * 4 + 2;
+		}
+	}
+#endif
+
+	return weaponnum * 4;
+}
+
+/**
  * Sorts subject into its correct position in the inventory list.
  *
  * Subject is expected to initially be at the head of the list. It works by
@@ -49,12 +77,12 @@ void invSortItem(struct invitem *subject)
 
 	// Prepare subject's properties for comparisons
 	if (subject->type == INVITEMTYPE_WEAP) {
-		subjweapon1 = subject->type_weap.weapon1;
+		subjweapon1 = invOrderKey(subject->type_weap.weapon1);
 	} else if (subject->type == INVITEMTYPE_DUAL) {
-		subjweapon1 = subject->type_dual.weapon1;
-		subjweapon2 = subject->type_dual.weapon2;
+		subjweapon1 = invOrderKey(subject->type_dual.weapon1);
+		subjweapon2 = invOrderKey(subject->type_dual.weapon2);
 	} else if (subject->type == INVITEMTYPE_PROP) {
-		subjweapon1 = 2000;
+		subjweapon1 = 2000 * 4;
 	}
 
 	candidate = subject->next;
@@ -65,12 +93,12 @@ void invSortItem(struct invitem *subject)
 		candweapon2 = -1;
 
 		if (subject->next->type == INVITEMTYPE_WEAP) {
-			candweapon1 = subject->next->type_weap.weapon1;
+			candweapon1 = invOrderKey(subject->next->type_weap.weapon1);
 		} else if (subject->next->type == INVITEMTYPE_DUAL) {
-			candweapon1 = subject->next->type_dual.weapon1;
-			candweapon2 = subject->next->type_dual.weapon2;
+			candweapon1 = invOrderKey(subject->next->type_dual.weapon1);
+			candweapon2 = invOrderKey(subject->next->type_dual.weapon2);
 		} else if (subject->next->type == INVITEMTYPE_PROP) {
-			candweapon1 = 1000;
+			candweapon1 = 1000 * 4;
 		}
 
 		// If the candidate should sort ahead of subject
@@ -401,6 +429,23 @@ static bool invAllGunsAreGe(void)
 }
 
 /**
+ * Whether the All Guns cheat holds `weaponnum` as a pair as well as single.
+ * In a level GE Plus started that is GoldenEye's own rule, its gun's
+ * CAN_DUAL_WIELD (bondinv.c's bondinvItemAvailableForHand() and the cycles,
+ * one player only): every gun but the grenade and the mines, the Moonraker
+ * among them, which its Perfect Dark host never pairs (F3 20260930-190327,
+ * "you can't dual wield the laser").
+ */
+static bool invAllGunsPairs(s32 weaponnum)
+{
+	if (invAllGunsAreGe() && WEAPON_IS_GE(weaponnum) && PLAYERCOUNT() == 1 && gegunsAllGunsPairs(weaponnum)) {
+		return true;
+	}
+
+	return weaponHasFlag(weaponnum, WEAPONFLAG_DUALWIELD);
+}
+
+/**
  * GoldenEye's list as the region's cartridge has it. The Japanese one leaves
  * the hunting knife out of everything the cheat hands over (bondinv.c's
  * bondinvItemAvailable(), bondinvItemAvailableForHand(), the cycles and the
@@ -567,13 +612,22 @@ bool invHasDoubleWeaponIncAllGuns(s32 weapon1, s32 weapon2)
 
 	if (g_Vars.currentplayer->equipallguns &&
 			weapon1 == weapon2 &&
+#ifndef PLATFORM_N64
+			invAllGunsPairs(weapon1) &&
+#else
 			weaponHasFlag(weapon1, WEAPONFLAG_DUALWIELD) &&
+#endif
 			invAllGunsGives(weapon1)) {
 		return true;
 	}
 
 	return invHasDoubleWeaponExcAllGuns(weapon1, weapon2);
 }
+
+#ifndef PLATFORM_N64
+// set while a stage's intro hands the player its starting weapons
+bool g_InvIntroGive = false;
+#endif
 
 bool invGiveSingleWeapon(s32 weaponnum)
 {
@@ -596,10 +650,18 @@ bool invGiveSingleWeapon(s32 weaponnum)
 		}
 
 #ifndef PLATFORM_N64
-		// GoldenEye gives the watch's detonator with the remote mines,
-		// however they come (propobj.c's add_ammo_to_inventory() and
-		// propPickupByPlayer(): ITEM_REMOTEMINE and ITEM_TRIGGER together)
-		if (weaponnum == WEAPON_GE_REMOTEMINE) {
+		// GoldenEye gives the watch's detonator with the remote mines
+		// picked up, as a gun or as ammunition (propobj.c's
+		// add_ammo_to_inventory() and propPickupByPlayer(): ITEM_REMOTEMINE
+		// and ITEM_TRIGGER together) - but not with a mission's own start
+		// (bondview2.c's intro: bondinvAddInvItem() alone). Surface 2's one
+		// mine is Q's ten-second fuse, and its list sets it off; with the
+		// detonator Bond set it off himself (F3 20261002-160906). On a
+		// converted stage only: anywhere else a mine in the starting kit
+		// (the Randomizer's, on Perfect Dark's own stages) still brings the
+		// detonator, without which it could never go off
+		if (weaponnum == WEAPON_GE_REMOTEMINE
+				&& (!g_InvIntroGive || !modloaderStageIsRemake(g_Vars.stagenum))) {
 			invGiveSingleWeapon(WEAPON_GE_DETONATOR);
 		}
 #endif
@@ -792,7 +854,7 @@ s32 invGiveWeaponsByProp(struct prop *prop)
 
 #ifndef PLATFORM_N64
 			// always allow picking up a second gun if dual wield cheat is on
-			if (!g_Vars.normmplayerisrunning && cheatIsActive(CHEAT_DUALWIELDALLGUNS)) {
+			if (!g_Vars.normmplayerisrunning && cheatIsActive(CHEAT_DUALWIELDALLGUNS) && !gegunsNeverPairs(weaponnum)) {
 				if (invHasSingleWeaponExcAllGuns(weaponnum) && !invHasDoubleWeaponExcAllGuns(weaponnum, weaponnum)) {
 					if (invGiveDoubleWeapon(weaponnum, weaponnum)) {
 						return 2;
@@ -846,7 +908,7 @@ s32 invGiveWeaponsByProp(struct prop *prop)
 				weapon->dualweapon->dualweaponnum = weaponnum;
 				weapon->dualweapon->dualweapon = NULL;
 				weapon->dualweapon = NULL;
-			} else if (weapon->dualweaponnum >= 0) {
+			} else if (weapon->dualweaponnum != 0xff) {
 #ifndef PLATFORM_N64
 				if (weapon->base.flags & OBJFLAG_WEAPON_LEFTHANDED) {
 					if (invGiveDoubleWeaponLinked(weapon->dualweaponnum, weaponnum)) {
@@ -894,7 +956,11 @@ void invChooseCycleForwardWeapon(s32 *ptr1, s32 *ptr2, bool arg2)
 	if (g_Vars.currentplayer->equipallguns) {
 		s32 candidate = *ptr1;
 
+#ifndef PLATFORM_N64
+		if (invAllGunsPairs(*ptr1) && *ptr2 != *ptr1
+#else
 		if (weaponHasFlag(*ptr1, WEAPONFLAG_DUALWIELD) && *ptr2 != *ptr1
+#endif
 #ifndef PLATFORM_N64
 				// the tank's driver has no left hand (bgunTickSwitch2()): the
 				// pair is refused and the cycle would ask for it for ever
@@ -930,7 +996,7 @@ void invChooseCycleForwardWeapon(s32 *ptr1, s32 *ptr2, bool arg2)
 
 		while (item) {
 			if (item->type == INVITEMTYPE_WEAP) {
-				if (INV_CYCLEABLE(item->type_weap.weapon1) && item->type_weap.weapon1 > weapon1) {
+				if (INV_CYCLEABLE(item->type_weap.weapon1) && invOrderKey(item->type_weap.weapon1) > invOrderKey(weapon1)) {
 					if (!arg2 || bgun0f0a1a10(item->type_weap.weapon1)) {
 						weapon1 = item->type_weap.weapon1;
 						weapon2 = WEAPON_NONE;
@@ -938,8 +1004,8 @@ void invChooseCycleForwardWeapon(s32 *ptr1, s32 *ptr2, bool arg2)
 					}
 				}
 			} else if (item->type == INVITEMTYPE_DUAL) {
-				if (item->type_dual.weapon1 > weapon1
-						|| (weapon1 == item->type_dual.weapon1 && item->type_dual.weapon2 > weapon2)) {
+				if (invOrderKey(item->type_dual.weapon1) > invOrderKey(weapon1)
+						|| (weapon1 == item->type_dual.weapon1 && invOrderKey(item->type_dual.weapon2) > invOrderKey(weapon2))) {
 					if (!arg2 || bgun0f0a1a10(item->type_dual.weapon1) || bgun0f0a1a10(item->type_dual.weapon2)) {
 						weapon1 = item->type_dual.weapon1;
 						weapon2 = item->type_dual.weapon2;
@@ -973,7 +1039,11 @@ void invChooseCycleBackWeapon(s32 *ptr1, s32 *ptr2, bool arg2)
 	if (g_Vars.currentplayer->equipallguns) {
 		s32 candidate = *ptr1;
 
+#ifndef PLATFORM_N64
+		if (invAllGunsPairs(weapon1) && weapon1 == weapon2) {
+#else
 		if (weaponHasFlag(weapon1, WEAPONFLAG_DUALWIELD) && weapon1 == weapon2) {
+#endif
 			// Switching from dual to single
 			weapon1 = candidate;
 			weapon2 = WEAPON_NONE;
@@ -981,7 +1051,7 @@ void invChooseCycleBackWeapon(s32 *ptr1, s32 *ptr2, bool arg2)
 		} else if (invAllGunsAreGe()) {
 			candidate = invAllGunsStep(weapon1, -1, arg2);
 			weapon1 = candidate;
-			weapon2 = weaponHasFlag(candidate, WEAPONFLAG_DUALWIELD) ? candidate : WEAPON_NONE;
+			weapon2 = invAllGunsPairs(candidate) && !geTankIsDriving() ? candidate : WEAPON_NONE;
 #endif
 		} else {
 			// Find prev weapon
@@ -1007,7 +1077,7 @@ void invChooseCycleBackWeapon(s32 *ptr1, s32 *ptr2, bool arg2)
 		while (true) {
 			if (item->type == INVITEMTYPE_WEAP) {
 				if (INV_CYCLEABLE(item->type_weap.weapon1)
-						&& (item->type_weap.weapon1 < weapon1 || (weapon1 == item->type_weap.weapon1 && weapon2 > 0))) {
+						&& (invOrderKey(item->type_weap.weapon1) < invOrderKey(weapon1) || (weapon1 == item->type_weap.weapon1 && weapon2 > 0))) {
 					if (!arg2 || bgun0f0a1a10(item->type_weap.weapon1)) {
 						weapon1 = item->type_weap.weapon1;
 						weapon2 = WEAPON_NONE;
@@ -1015,8 +1085,8 @@ void invChooseCycleBackWeapon(s32 *ptr1, s32 *ptr2, bool arg2)
 					}
 				}
 			} else if (item->type == INVITEMTYPE_DUAL) {
-				if (item->type_dual.weapon1 < weapon1
-						|| (weapon1 == item->type_dual.weapon1 && item->type_dual.weapon2 < weapon2)) {
+				if (invOrderKey(item->type_dual.weapon1) < invOrderKey(weapon1)
+						|| (weapon1 == item->type_dual.weapon1 && invOrderKey(item->type_dual.weapon2) < invOrderKey(weapon2))) {
 					if (!arg2 || bgun0f0a1a10(item->type_dual.weapon1) || bgun0f0a1a10(item->type_dual.weapon2)) {
 						weapon1 = item->type_dual.weapon1;
 						weapon2 = item->type_dual.weapon2;

@@ -1922,6 +1922,11 @@ void ragdollTick(void)
 
 	ragdollUpdateCeilings();
 
+	// CE body dragging: apply the pull before advancing physics.
+	if (g_Vars.lvupdate60freal > 0.0f) {
+		ragdollGrabTick();
+	}
+
 	ragdollTickAll();
 
 
@@ -2047,6 +2052,8 @@ void ragdollPresetApply(s32 preset)
 PD_CONSTRUCTOR static void ragdollConfigInit(void)
 {
 	configRegisterInt("Ragdoll.Ragdolls", &g_RagdollsEnabled, 0, 1);
+	RD_PRESET_INT("Ragdoll.RagdollGrab", &g_RagdollGrab, 0, 1);
+	RD_PRESET_FLOAT("Ragdoll.RagdollGrabStrength", &g_RagdollGrabStrength, 0.25f, 4.0f);
 	RD_PRESET_FLOAT("Ragdoll.RagdollPushScale", &g_RagdollPushScale, 0.0f, 10.0f);
 	RD_PRESET_INT("Ragdoll.RagdollMaxBodies", &g_RagdollMaxBodies, 0, RD_MAXBODIES_LIMIT);
 	RD_PRESET_INT("Ragdoll.RagdollMaxPhysical", &g_RagdollMaxPhysical, 0, RD_MAXBODIES_LIMIT);

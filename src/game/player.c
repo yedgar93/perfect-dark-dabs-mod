@@ -611,7 +611,17 @@ void playerStartNewLife(void)
 
 	g_Vars.currentplayer->dostartnewlife = false;
 
+#ifndef PLATFORM_N64
+	// Mission Respawn keeps what the player carries, and a collected
+	// objective item (Egyptian's Golden Gun and its ammo box, a key) is a
+	// prop carried as the player prop's child: marked for deletion here it
+	// was freed, and its collect objective failed at the first death (F3
+	// 20261002-100746/100932). Only the first life of a solo stage clears
+	// them.
+	if (g_Vars.coopplayernum < 0 && !modRespawnIsRespawning()) {
+#else
 	if (g_Vars.coopplayernum < 0) {
+#endif
 		struct prop *prop = g_Vars.currentplayer->prop->child;
 
 		while (prop) {
@@ -765,11 +775,17 @@ void playerStartNewLife(void)
 					break;
 				case INTROCMD_WEAPON:
 					if (cmd[3] == 0 && !MODRUN_SKIPS_MAP_KIT()) {
+#ifndef PLATFORM_N64
+						g_InvIntroGive = true;
+#endif
 						if (cmd[2] >= 0) {
 							invGiveDoubleWeapon(cmd[1], cmd[2]);
 						} else {
 							invGiveSingleWeapon(cmd[1]);
 						}
+#ifndef PLATFORM_N64
+						g_InvIntroGive = false;
+#endif
 					}
 					cmd += 4;
 					break;
@@ -1792,6 +1808,9 @@ void playerTickChrBody(void)
 
 		s32 weaponmodelnum;
 		s32 spectatorbody;
+#ifndef PLATFORM_N64
+		bool gebond = false;
+#endif
 		s32 weaponnum = bgunGetWeaponNum2(HAND_RIGHT);
 		s32 bodynum = MOD_PLAYER_BODY;
 		s32 headnum = MOD_PLAYER_HEAD;
@@ -1827,6 +1846,7 @@ void playerTickChrBody(void)
 					&& !modGhostGetMenuCharacter(&menubody, &menuhead)
 					&& gexPlusMissionBond(g_Vars.currentplayer->bondtype, &bodynum, &headnum)) {
 				sp60 = false;
+				gebond = true;
 			}
 		}
 
@@ -2062,6 +2082,18 @@ void playerTickChrBody(void)
 		}
 #else
 		g_Vars.currentplayer->model00d4 = body0f02ce8c(bodynum, headnum, bodymodeldef, headmodeldef, false, model, true, true);
+#endif
+
+#ifndef PLATFORM_N64
+		// GoldenEye makes Bond's body 3% smaller than the body's own row
+		// (solo_char_load(): modelSetScale(bodyModel, scale * 0.97f)), and
+		// its cinema is staged for that size: at the full row's size Cuba's
+		// Bond stood 3.5 units taller than GoldenEye's, his head over
+		// Natalya's rather than meeting it (F3 20260929-233818). The model
+		// alone, as GoldenEye does - not the animation's translation scale.
+		if (gebond && spectatorbody < 0) {
+			modelSetScale(g_Vars.currentplayer->model00d4, g_Vars.currentplayer->model00d4->scale * 0.97f);
+		}
 #endif
 
 		chr0f020b14(g_Vars.currentplayer->prop, g_Vars.currentplayer->model00d4, &g_Vars.currentplayer->prop->pos,
@@ -2707,6 +2739,15 @@ void playerTickCutscene(bool arg0)
 	if (arg0 && inputKeyJustPressed(VK_ESCAPE)) {
 		buttons |= START_BUTTON;
 	}
+
+	// --skip-cutscenes: START held for a headless run
+	{
+		extern s32 g_SkipCutscenes;
+
+		if (arg0 && g_SkipCutscenes) {
+			buttons |= START_BUTTON;
+		}
+	}
 #endif
 
 #if VERSION >= VERSION_NTSC_1_0
@@ -3195,8 +3236,81 @@ struct healthdamagetype g_HealthDamageTypes[] = {
  * Make the health bar appear. If called while the health bar is already open,
  * the health displayed will be updated and the show timer will be reset.
  */
+#ifndef PLATFORM_N64
+/**
+ * GoldenEye's gauges (bondview.c's g_HealthDisplayDurations, by eighths of
+ * health alone): the health before the hit until the first frame, then the
+ * health now - at once, no slide between them - until the second, then gone.
+ * record_damage_kills() starts it at 0 on every hit it lets through, with the
+ * health before that hit as the old one.
+ */
+static const u8 g_GeHealthDisplay[8][2] = {
+	{ 40, 100 }, { 30, 80 }, { 20, 60 }, { 20, 60 },
+	{ 20, 60 }, { 20, 50 }, { 20, 50 }, { 20, 50 },
+};
+
+static void playerTickGeHealth(void)
+{
+	struct player *player = g_Vars.currentplayer;
+	s32 type;
+
+	if (player->healthshowmode == HEALTHSHOWMODE_HIDDEN) {
+		return;
+	}
+
+	if (player->isdead) {
+		player->healthshowtime = -1;
+		player->healthshowmode = HEALTHSHOWMODE_HIDDEN;
+		return;
+	}
+
+	if (player->healthshowmode == HEALTHSHOWMODE_OPENING) {
+		type = (s32)(playerGetHealthFrac() * 8.0f);
+		player->healthdamagetype = type > 7 ? 7 : (type < 0 ? 0 : type);
+	}
+
+	type = player->healthdamagetype;
+
+	if (type < 0 || type > 7) {
+		type = 7;
+	}
+
+	player->healthshowtime += g_Vars.diffframe60freal;
+
+	if (player->healthshowmode == HEALTHSHOWMODE_OPENING
+			&& player->healthshowtime <= g_GeHealthDisplay[type][0]
+			&& !currentPlayerIsMenuOpenInSoloOrMp()) {
+		player->apparenthealth = player->oldhealth;
+		player->apparentarmour = player->oldarmour;
+		return;
+	}
+
+	player->healthshowmode = HEALTHSHOWMODE_CURRENT;
+	player->apparenthealth = player->bondhealth;
+	player->apparentarmour = playerGetShieldFrac();
+
+	if (currentPlayerIsMenuOpenInSoloOrMp()) {
+		player->healthshowtime = g_GeHealthDisplay[type][0];
+	} else if (player->healthshowtime > g_GeHealthDisplay[type][1]) {
+		player->healthshowtime = -1;
+		player->healthshowmode = HEALTHSHOWMODE_HIDDEN;
+	}
+}
+#endif
+
 void playerDisplayHealth(void)
 {
+#ifndef PLATFORM_N64
+	// GoldenEye's gauges start again from the health before this hit
+	if (geHudActive()) {
+		g_Vars.currentplayer->oldhealth = g_Vars.currentplayer->bondhealth;
+		g_Vars.currentplayer->oldarmour = playerGetShieldFrac();
+		g_Vars.currentplayer->healthshowtime = 0;
+		g_Vars.currentplayer->healthshowmode = HEALTHSHOWMODE_OPENING;
+		return;
+	}
+#endif
+
 	switch (g_Vars.currentplayer->healthshowmode) {
 	case HEALTHSHOWMODE_HIDDEN:
 		g_Vars.currentplayer->oldhealth = g_Vars.currentplayer->bondhealth;
@@ -3315,6 +3429,13 @@ void playerTickDamageAndHealth(void)
 			}
 		}
 	}
+
+#ifndef PLATFORM_N64
+	if (geHudActive()) {
+		playerTickGeHealth();
+		return;
+	}
+#endif
 
 	/**
 	 * Handle updating the health bar.
@@ -4857,7 +4978,11 @@ static void playerPullBackCameraNow(struct coord *campos)
 		struct coord eased;
 		f32 rate = THIRDPERSON_EASE_RATE * g_Vars.lvupdate60freal;
 
-		if (rate > 1) {
+		// Mods: Camera's live preview runs over a paused level, where no
+		// time passes and the ease never moved: a slider changed nothing
+		// on screen until the menu closed (F3 20260930-212705). There the
+		// camera goes straight to the new settings.
+		if (rate > 1 || optionsMenuWantsLiveWorld()) {
 			rate = 1;
 		}
 
@@ -7229,7 +7354,7 @@ Gfx *playerRenderHud(Gfx *gdl)
 		// and GoldenEye's death replay is a camera watching the body fall
 		// (gedeathcam.c)
 		const bool cinema = gecinemaIsOn() || gecinemaIntroIsOn() || geWatchIsOpen()
-			|| geDeathCamWantsBody(g_Vars.currentplayer);
+			|| geDeathCamRunning(g_Vars.currentplayer);
 		// and a death on a GE Plus mission takes the gun out of Bond's hands
 		// as he falls, with its sight and its ammo (bondview2.c)
 		const bool nogun = cinema || geDeathCamIsGoldenEye();
@@ -7368,6 +7493,11 @@ void playerDieByShooter(u32 shooter, bool force)
 		} else if (g_Vars.currentplayer->bondmovemode == MOVEMODE_BIKE) {
 			g_Vars.currentplayer->bondtankexplode = true;
 		}
+
+#ifndef PLATFORM_N64
+		// GE Plus's tank: blown up with him in it (getank.c)
+		geTankPlayerDied();
+#endif
 
 		bmoveSetMode(MOVEMODE_WALK);
 #ifndef PLATFORM_N64
@@ -8035,7 +8165,30 @@ s32 playerTickThirdPerson(struct prop *prop)
 		if (var80075d60 == 0
 				|| var80075d60 == 1
 				|| (player->cameramode == CAMERAMODE_THIRDPERSON && player->visionmode != VISIONMODE_SLAYERROCKET)) {
+#ifndef PLATFORM_N64
+			// A converted mission's list moving Bond's body (an ending's walk):
+			// GoldenEye makes him a guard, and a guard is put on the floor once
+			// (CHRFLAG_INIT) and then eased up a step and falls down one. Forced
+			// every tick his height snapped a whole tread at a time, and he was
+			// seen bobbing down the stairs into Surface 2's bunker (F3
+			// 20261002-160950). Forced on the first tick the list has him, as
+			// before, and whenever the list itself asks (a teleport's INIT).
+			// (player->gelistbodyframe, the frame it last had him: a gap is a
+			// new list; the player is made afresh, -10, each level)
+			if (!chrIsGeListBody(chr)) {
+				chr->chrflags |= CHRCFLAG_FORCETOGROUND;
+				player->gelistbodyframe = -10;
+			} else {
+				if (g_Vars.lvframenum < player->gelistbodyframe
+						|| g_Vars.lvframenum > player->gelistbodyframe + 2) {
+					chr->chrflags |= CHRCFLAG_FORCETOGROUND;
+				}
+
+				player->gelistbodyframe = g_Vars.lvframenum;
+			}
+#else
 			chr->chrflags |= CHRCFLAG_FORCETOGROUND;
+#endif
 
 			player->bondperimenabled = false;
 			tickop1 = chrTick(prop);

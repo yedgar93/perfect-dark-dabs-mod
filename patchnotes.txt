@@ -31,6 +31,246 @@
 # CMake reads the newest number when it configures, and configures again by
 # itself when this file changes, so an ordinary rebuild picks up an entry.
 
+notes 37 2026-10-03
+Goldfinger 64: gunshots are heard; most were cut off the moment they started, leaving only the ricochets
+GE Plus: the pause watch's arm swings in and out at the lower left as in GoldenEye, instead of shrinking into the middle of the screen (thanks Glazier)
+Goldfinger 64: guns on the watch keep their own size and names after playing a GE Plus level first, and the other way round
+Goldfinger 64 Monitor Programmes: the TV sets are the same size as GE Plus's and sit in their cells (thanks Shockwave S08)
+GE Plus Control, XBLA look: the big windows show GoldenEye's reflective glass instead of a flat black wall
+GE Plus Egyptian, XBLA look: the block under the hieroglyph door is stone like its sides, not a squashed picture
+GE Plus Cradle, N64 look: shots stop on the catwalks overhead, as in GoldenEye
+GE Plus: with Perfect Dark death animations on, a guard no longer freezes kneeling halfway through his fall
+GE Plus Control: the glass floor inside the upper-floor railing is drawn, not a hole showing the floor below
+GE Plus, XBLA look: no more brief freezes the first time a guard, prop or gun shows up; their HD models are built while the level loads (thanks Shockwave S08)
+
+notes 36 2026-10-03
+Goldfinger 64: guards' Luger and pistol shots play Goldfinger's own shots, not Perfect Dark's shield-damage sound (thanks Shockwave S08)
+Goldfinger 64: no more constant electric buzz; the MP40 and Luger, yours and guards' (the granny's on Foundry too), play their own shots
+Goldfinger 64: every gun has its firing sound (the M1 Carbine was silent, the MP40 buzzed)
+Goldfinger 64: barrels, crates and vehicles explode, with sound, when destroyed
+Goldfinger 64 Cartel: you can get into the first silo again; a strip of wall-top no longer boxes you in at the doorway (thanks Shockwave S08)
+GE Plus and Goldfinger 64 openings: Bond stands and looks around as in GoldenEye instead of side-stepping backwards
+Goldfinger 64: missions with many characters (Ranch) show Bond in third person, not Joanna
+Goldfinger 64: ammo icons are the hack's own, at its sizes (pistol, rifle, magnum, hat, mines), dual-wielded too (thanks Shockwave S08)
+Goldfinger 64: the watch is yellow like the cartridge's; GE Plus keeps GoldenEye's green (thanks Shockwave S08)
+Goldfinger 64: folder screens no longer use GoldenEye XBLA art when the release is installed (thanks Shockwave S08)
+GE Plus Dam, XBLA look: no dark triangles on the chasm cliffs after a light is shot out (thanks Shockwave S08)
+GE Plus: closing the watch lowers Bond's arm before the view returns, as in GoldenEye (thanks Glazier)
+
+notes 35 2026-10-03
+GE Plus: no invisible wall at one end of some outdoor stairs (Dam's tower) (thanks eCHOREMASTERED)
+GE Plus Cradle: the hatch down to Trevelyan is as easy to drop into as GoldenEye's (thanks eCHOREMASTERED)
+GE Plus: Bond slides off a guard's head instead of standing on it (thanks eCHOREMASTERED)
+GE Plus Egyptian: the sloped tunnels take you down the slope, not out over the roof (thanks dblaney1)
+Mission Respawn: coming back keeps the objective items you carried (Egyptian's Golden Gun)
+GE Plus Caverns: the round doors stop bullets and thrown mines when shut (thanks FireFlame and eCHOREMASTERED)
+GE Plus, XBLA look: bullets hit props where they are drawn (Jungle's trees) (thanks eCHOREMASTERED)
+GE Plus Frigate, XBLA look: open upper-deck doorways no longer show shut doors (thanks eCHOREMASTERED)
+GE Plus: guards no longer shoot you over railings or down stairwells (GoldenEye's can't) (thanks eCHOREMASTERED)
+GE Plus: auto-aim no longer locks onto guards through ceilings or walls (thanks eCHOREMASTERED)
+GE Plus: guards no longer get stuck on wide-open swing doors (Archives) (thanks eCHOREMASTERED)
+GE Plus endings: Bond walks smoothly down stairs, not a step at a time (Surface 2) (thanks eCHOREMASTERED)
+GE Plus tank: dying in it blows the tank up, and the replay shows it, as in GoldenEye (thanks Odeyseis)
+GE Plus tank: shells land where the sight points again (thanks eCHOREMASTERED)
+GE Plus: a guard killed after pulling the pin drops a live grenade (thanks Odeyseis)
+GE Plus: guards' punches no longer kill Bond in one hit (thanks Odeyseis)
+GoldenEye Arenas, Dam: the gates no longer lock you in when a simulant opens the other one (thanks dick)
+GE Plus: the knives come straight after the fist when you cycle weapons, as in GoldenEye (thanks eCHOREMASTERED)
+GE Plus: picking up throwing knives says throwing knives, not combat knives (thanks eCHOREMASTERED)
+GE Plus: the Moonraker Laser is lowered and raised when you switch weapons (thanks raffine52)
+Start Armed: GoldenEye's PP7s and DD44 start with full ammo (thanks raffine52)
+GE Plus Train, XBLA look: the watch laser shows the release's hands (thanks eCHOREMASTERED)
+GE Plus: the Laptop Gun's sentry shoots GoldenEye's guards (thanks Casey and dick)
+GE Plus: shooting an armoured enemy makes GoldenEye's puff, not Perfect Dark's sparks (thanks dblaney1)
+GE Plus: guards no longer die with Perfect Dark's gurgle or cough (thanks eCHOREMASTERED)
+GE Plus: sounds carry as in GoldenEye (far explosions, rocket launches) (thanks eCHOREMASTERED)
+GE Plus: the watch laser's sound plays for as long as it fires (thanks eCHOREMASTERED)
+GE Plus: a throwing knife in a body sounds as in GoldenEye, with no puff (thanks eCHOREMASTERED)
+GE Plus Facility: remote mines have GoldenEye's bigger blast (thanks eCHOREMASTERED)
+GE Plus Surface 2: the starting mine has no detonator, as in GoldenEye (thanks eCHOREMASTERED)
+GE Plus: guards' muzzle flashes no longer pick up stray colours (purple or faint) (thanks Graslu00)
+Report a Problem opens properly over the GE Plus folder after a mission (thanks Shockwave S08)
+GE Plus Monitor Programmes: every monitor is drawn the same way, square in its slot (thanks Shockwave S08)
+GE Plus: the multiplayer map pictures are the right way up in the N64 look (thanks Mike D)
+GE Plus intro: the logo and cast play at the right speed above 60 fps (thanks Casey)
+GE Plus intro, XBLA look: no more streaks down the right edge of the gun barrel (thanks Shockwave S08)
+With jump on, fire-to-use gadgets (GoldenEye's camera) no longer make you jump (thanks eCHOREMASTERED)
+Emulator texture packs made for GoldenEye now apply to GE Plus's own levels (thanks dick)
+Randomizer: a run no longer lands you on the Duel map beside doorways open to the sky (thanks Parabolee)
+Randomizer: landing between laser grids switches them off, so you can get out (thanks Parabolee)
+Randomizer: missions no longer ask you to fetch a gun the level keeps out of reach
+GE Plus: raising a gun with the other hand empty no longer crashes the game
+Mods: a cutscene giving a gun to a character with no body no longer crashes the game
+Mods: a very short voice line no longer crashes the game
+Starting a level after a character preview in the menus no longer crashes the game
+GE Plus Frigate, XBLA look: the deck checker and hull numbers are yellow again, not white
+GE Plus Cradle, XBLA look: the catwalks, stairs and lower floors are drawn again (thanks dblaney1 and eCHOREMASTERED)
+GE Plus intro, XBLA look: Bond in the parka wears his hood in the cast reel (thanks Odeyseis)
+GE Plus Dam, XBLA look: the reservoir water moves at GoldenEye's own speed again (thanks Shockwave S08 and Odeyseis)
+GE Plus Dam, XBLA look: no odd snow patches by the alarms and the manhole (thanks Shockwave S08 and eCHOREMASTERED)
+GE Plus Dam, XBLA look: shooting the reservoir no longer leaves dark marks under the water (thanks dab)
+GE Plus Frigate, XBLA look: no more flicker on the pipe room walls (thanks dab)
+GE Plus Aztec, XBLA look: the guidance computer room has its back wall again (thanks eCHOREMASTERED)
+GE Plus Silo, XBLA look: the steel door's hazard stripes are yellow again (thanks dick)
+GE Plus Bunker, XBLA look: the big monitor wall is black behind its screens (thanks dick and eCHOREMASTERED)
+GE Plus, XBLA look: screens show the release's pictures when it is installed as an archive (thanks eCHOREMASTERED)
+GE Plus Depot, XBLA look: the warehouse doors' arrow is yellow, as in GoldenEye (thanks eCHOREMASTERED)
+GE Plus Egyptian, XBLA look: the Golden Gun's case is clear glass (thanks dab)
+XBLA look: no see-through throat when Bond's head is on a uniform with a lower collar (thanks dab)
+GE Plus Cradle, XBLA look: the ending's helicopter is HD, rotors turning, Natalya at the controls (thanks eCHOREMASTERED)
+
+notes 34 2026-10-02
+Every character, gun and prop in the N64 look is drawn by the graphics card too: a crowded Combat Simulator match takes a fifth to a third less processor time (Video > GPU Vertex Shading)
+
+notes 33 2026-10-02
+Villa's ocean and the other levels' animated water are drawn by the graphics card too (Video > GPU Vertex Shading)
+
+notes 32 2026-10-02
+Every level's rooms are drawn by the graphics card too: GoldenEye's HD levels run about three times lighter on the processor (Video > GPU Vertex Shading)
+
+notes 31 2026-10-02
+XBLA and GoldenEye HD looks: characters, guns and props are posed and drawn by the graphics card, several times faster in big matches (Video > GPU Vertex Shading)
+
+notes 30 2026-10-01
+GE Plus: the KF7, AR33, RC-P90 and sniper rifle muzzle flashes keep a fixed turn lined up with the vents, as in GoldenEye (thanks dblaney1)
+GE Plus: a cutscene that puts your gun away while you are reloading no longer crashes the game
+Linux: leaving the game from fullscreen on Wayland no longer crashes on the way out
+GE Plus Cradle: bullet holes and blood are no longer black, in missions and multiplayer
+GE Plus Frigate: the doorway out to the deck and the doorway down to the pipe room no longer block you, as in GoldenEye
+GE Plus Complex: bullets go through the wall at the end of the dead-end catwalk, so you can hit players on the other side
+Simulants on the GoldenEye arenas (Complex, Cradle and the rest) find their way around instead of standing at their spawn points
+Randomizer: a run no longer lands you in Area 51's hangar on Rescue or Maian SOS, where its lifts and doors only exist in Infiltration (thanks Parabolee)
+Randomizer: Rescue and Maian SOS show Area 51's night sky during a run (thanks Parabolee)
+Randomizer: landing in a room with locked doors (Villa's interrogation room) unlocks the doors inside the area you are sealed in (thanks Parabolee)
+Institute: glass behind the metal-grating floors and ramps no longer shows through the solid metal (thanks Shockwave S08)
+Guards Alerted: the guards it calls in join the level's own guards on Chicago and Carrington Villa instead of attacking them (thanks chickensalad)
+GE Plus Dam, XBLA look: the reservoir banks are snow-covered, fading to rock at the water (thanks dab)
+GE Plus Dam, XBLA look: the chasm cliffs are evenly lit instead of patchy squares (thanks Shockwave S08)
+
+notes 29 2026-10-01
+GE Plus: guards that GoldenEye places at the start of a mission are no longer missing on Facility, Frigate, Caverns and Aztec, and they carry their guns and hats
+GE Plus: Bond's view sits at GoldenEye's eye height, standing and crouching (about 8 units higher than before)
+GE Plus: pads, crates and body armour sit where GoldenEye puts them (Archives, Frigate), and objects belong to the same rooms as in GoldenEye
+GE Plus Frigate: six upper-deck doors no longer hide the rooms behind them when shut, as in GoldenEye
+GE Plus: the Community Edition's fixes now apply only in the XBLA look; the N64 look plays GoldenEye's levels as the cartridge shipped them
+GE Plus Archives and Bunker II: the watch magnet has GoldenEye's 5 charges, counted on the HUD
+GE Plus: destroyed ammo crates drop their box as in GoldenEye
+GE Plus Dam: the truck no longer slips through the first gate or gets stuck in it, and it steers like GoldenEye's (thanks Shockwave S08)
+GE Plus guns: reloads, weapon switches and empty clicks follow GoldenEye's timing, and the automatic shotgun no longer ejects shells
+GE Plus: grenades take GoldenEye's time to throw and to explode, so Bond's own grenades no longer go off early (thanks Graslu00)
+GE Plus: mines are laid one after another while you hold fire, stick with GoldenEye's sound, and no longer all set each other off
+GE Plus: grenade launcher and rocket rounds fly and land as in GoldenEye
+GE Plus: the Moonraker leaves impact marks and the hunting knife makes its swipe sound
+GE Plus Jungle: the RC-P90 and grenade launcher can be held together as in GoldenEye, and switching weapons no longer sticks on the RC-P90 (thanks Graslu00)
+GE Plus: the laptop gun's sentry targets GoldenEye's guards
+Combat Simulator: a mod with its own weapon list (such as GoldenEye X) keeps it - GE Plus no longer adds its sets or shows empty slots as Nothing (thanks ElmoBear)
+GE Plus: the speedrun timer sits in the lower left and no longer pushes pickup text and subtitles up (thanks Shockwave S08)
+GE Plus: Always Show Target shows GoldenEye's sight with the gun lowered; the separate GE Plus crosshair option is gone
+GE Plus, N64 look: fog greys distant ground as on the cartridge (Surface II's snow), Frigate's sea ripples like GoldenEye's, and trees cover Surface's fence as in GoldenEye
+GE Plus, XBLA look: muzzle flashes, monitor screens and the watch's lamp are drawn as in the XBLA release
+GE Plus, XBLA look: guards' necks no longer show under their heads, and spent cartridges use the release's model
+GE Plus, XBLA look: no more flicker on Archives' notice board papers and bullet holes; Control's stripes and stains have the right transparency; Facility's stray hazard stripes are gone (thanks dab, Graslu00)
+GE Plus Aztec, XBLA look: the armour closet under the exhaust hatch is clear again (thanks savantique)
+GE Plus Statue Park, XBLA look: the strings of bulbs are lit (thanks dab)
+GE Plus, XBLA look: the rocket launcher and D5K sit in the hand where the release holds them (thanks dab)
+XBLA look: animated pictures play (Complex's beacon), Frigate's radars sweep and Dam's water moves as in the release
+
+notes 28 2026-10-01
+GoldenEye levels: hitting a body, wall or object now shows GoldenEye's own white impact puff at any range (HD art in the XBLA look) instead of Perfect Dark's sparks, and wall-hit flashes no longer vanish beyond 4 m (thanks Graslu00)
+
+notes 27 2026-10-01
+GE Plus tank: the barrel no longer passes through walls - it stops against them as in GoldenEye (thanks Graslu00)
+GE Plus tank: the engine sound fades out once you climb out instead of running on in the distance (thanks Graslu00)
+GE Plus, HD look: the rocket launcher no longer shows a gap in its middle after firing or when empty (thanks Graslu00)
+GE Plus Depot, HD look: the rockets on the desk can be seen again (thanks Graslu00)
+GE Plus: weapons lying around sit at GoldenEye's height instead of slightly sunk (thanks Graslu00)
+GE Plus: the mission timer uses GoldenEye's font and sits higher on the screen
+Third person: the camera shows your changes live again while you adjust it in the menu (thanks Parabolee)
+GE Plus: shot-out lights no longer darken the whole room, as in GoldenEye; turn it back on with Extended Options > Video > Shot-Out Lights Darken GoldenEye Rooms. No extra glass sound either (thanks dblaney1)
+GE Plus: the psychosis gun works on GoldenEye's guards
+GE Plus: guards' grenades have GoldenEye's 3-second fuse instead of going off early
+GE Plus Streets: Bond climbs in through the windows as in GoldenEye; other levels get the same rule for their low sills (thanks Graslu00)
+Carrington Institute, XBLA look: no more crash when aiming at the monitors
+Customize Character, XBLA look: no more crash after swapping heads many times
+Report a Problem (F3): reports now list the textures of the rooms around you, to help track down missing or wrong textures (thanks Odeyseis)
+
+notes 26 2026-09-30
+GE Plus: GoldenEye's guard clones happen again on Dam, Bunker 1 and 2, Silo, Archives and Jungle - an unseen guard who hears gunfire sends a clone out of sight, with GoldenEye's limit on how many (thanks Graslu00)
+GE Plus: the shotgun and automatic shotgun hide their side shells one by one as your reserve drops below five, in both looks (thanks Graslu00)
+
+notes 25 2026-09-30
+XBLA look: the file select's New Agent picture stays the original one instead of a red-haired Joanna (thanks Graslu00)
+GE Plus tank: the crosshair stays in the middle of the screen, and in the HD look the shell count shows a tank shell (thanks Graslu00)
+GE Plus Bunker 1 and Surface 2: guards no longer appear right beside a guard you have already seen (thanks Graslu00)
+GE Plus, HD look: destroyed crates and machines crumple and blacken as in the N64 look instead of standing whole and black (thanks Graslu00)
+GE Plus: the All Guns cheat lets you dual wield every gun GoldenEye does, including the Moonraker, shotguns, sniper rifle and launchers (thanks Graslu00)
+GE Plus: the watch laser no longer throws out spent shells, plays a draw sound or kicks when fired (thanks Graslu00)
+GE Plus: the throwing knife makes GoldenEye's sounds, silent from the hand and whooshing as it flies (thanks Graslu00)
+GE Plus: bullet holes and marks on walls fade into the fog with the walls (thanks Graslu00)
+Clip Decals at Edges: bullet holes and blood by the edge of a crate or other object are trimmed instead of hanging in the air (thanks Graslu00)
+GE Plus, HD look: Bond's trigger finger is back on the PP7, silenced PP7, Cougar Magnum and the gold and silver PP7s (thanks Graslu00)
+GE Plus, HD look: both shotguns show all five shells when full (thanks Graslu00)
+GE Plus, HD look: the Golden Gun no longer turns Bond's hand orange, and its gold shines with a reflection instead of flat paint (thanks Graslu00)
+GE Plus, HD look: the rocket launcher has its pistol grip back in first person (thanks dab)
+
+notes 24 2026-09-30
+GE Plus, HD look: GoldenEye's caps and hats sit properly on the HD heads, as on Facility's guards (thanks Odeyseis)
+GE Plus Cuba: in the ending Bond is GoldenEye's size, so he and Natalya line up for the kiss; Bond's body is GoldenEye's own 97% size on every mission (thanks savantique)
+GE Plus Statue Park: knocked-out Natalya by the helicopter lies on the ground instead of floating above it (thanks savantique)
+GE Plus, HD look: the watch detonator shows only the sleeve of the outfit you are wearing, not every outfit's at once (thanks Glazier)
+GE Plus Train, HD look: the riveted plates on the walls are no longer hidden by the wall behind them at some distances (thanks dab)
+GE Plus Aztec, HD look: the exhaust tunnel where the armor lies is no longer blocked by a stray piece of wall (thanks savantique)
+Report a Problem (F3): the report now says which gun you held and your aiming and crosshair options, to help track down crosshair problems (thanks pigtrough)
+
+notes 23 2026-09-30
+GE Plus: shooting out a room's lights darkens its barrels, crates, guards and your gun along with the room, in both looks (thanks dab)
+
+notes 22 2026-09-30
+GE Plus: Report a Problem (F3) can be seen and used over GoldenEye's main menu again (thanks Shockwave S08)
+GE Plus main menu: the cursor moves with either stick and with the D-pad, not just the right stick (thanks Shockwave S08)
+GE Plus: the 007 mode sliders can be dragged again (thanks dblaney1)
+GE Plus main menu: Bond and his outfits come first on the Characters page, and the HD level pictures are the right way up (thanks dick)
+GE Plus: finishing a mission no longer plays a Perfect Dark menu sound
+GE Plus watch: guns on the watch face no longer show their muzzle flash, in either look (thanks dab, thanks savantique, thanks Shockwave S08, thanks dick)
+GE Plus: the watch laser can no longer be held akimbo, and the watch shows GoldenEye's own watch for it (thanks dab)
+GE Plus: mines, gadgets and grenades picked on the watch can be thrown straight away, without a two-second wait
+GE Plus: Silo's telemetry item is named on the watch instead of "Gadget", and the weapon wheel uses GoldenEye's font and capitals (thanks Shockwave S08)
+Akimbo: throwing knives no longer count down below zero (thanks dab)
+GE Plus tank: it fires with GoldenEye's tank sound, and its shells drop in an arc instead of flying straight (thanks dblaney1, thanks savantique)
+GE Plus: the ceiling autoguns' bullets ricochet with GoldenEye's sounds (thanks dblaney1)
+GE Plus Surface: the grate clanks again when it lands on the platform (thanks dblaney1)
+GE Plus Frigate: guards no longer walk or shoot through the closed doors on the upper deck (thanks savantique)
+GE Plus: guards throw grenades where GoldenEye's do, such as at the start of Aztec and by Control's remote mines
+GE Plus Control: Natalya climbs the stairs out of the control room instead of running in circles (thanks savantique)
+GE Plus: the health and armor bars change at once when you are hit, as in GoldenEye (thanks Shockwave S08)
+GE Plus Bunker II: the watch magnet pulls the throwing knives up from the bottom of the drain (thanks savantique, thanks Odeyseis)
+GoldenEye guns: the Cougar Magnum fires as fast as GoldenEye's when you tap the trigger (thanks dblaney1)
+COD Style Aiming: the AR33 is lined up over its carry handle, so its front sight and the target are in view (thanks savantique)
+GE Plus, HD look: the rocket launcher no longer has an extra handle hanging under it (thanks dab)
+GE Plus Aztec: the shuttle's launch flames follow it all the way up instead of fizzling out half way (thanks savantique)
+GE Plus Dam, HD look: the far mountains seen through the gates no longer have holes in them (thanks dab)
+GE Plus Dam, HD look: without the Community Edition the sky is the release's own, with no dark ring over it (thanks dick)
+GE Plus Dam, HD look: the guard huts' windows are see-through streaked glass instead of grey and black stripes (thanks dab)
+HD look: a door window shot out goes with its shards, as on Bunker's cell doors (thanks savantique)
+GE Plus, HD look: doors that slide sideways, like Control's lift doors, go into the wall instead of over it (thanks dab)
+GE Plus Depot, HD look: the wall above the warehouse door is solid instead of showing through a stencil pattern (thanks dab)
+GE Plus Bunker II, HD look: the pillar's shadow in the cell corridor is see-through instead of solid black (thanks Odeyseis)
+GE Plus cast reel: Bond's head sits on his body with no gap at the neck (thanks savantique)
+Customize Character, HD look: heads sit down in the collar of the Dinner Jacket and the other bodies that floated them (thanks savantique)
+XBLA look: half-see-through hair no longer shows the background straight through, the fringe stays thin, and glasses no longer show the sky (thanks Parabolee, thanks dab)
+Glass See-Through: Area 51's lasers fade out and back in again, and switched-off lasers disappear instead of staying lit in the wrong place (thanks savantique)
+Randomizer: in Defection you land in the room the run says instead of always the same one (thanks Odeyseis)
+Randomizer: Maian soldiers bleed green like the other Maians (thanks Odeyseis)
+Menus: English (US) spells color, center and gray the American way; English (UK) keeps the British spellings (thanks Shockwave S08)
+F8 (texture packs on/off) and F6 (XBLA assets on/off) now say so on screen (thanks dick)
+Stage Loader and Load Mods: their descriptions use the small font and fit in the box (thanks Shockwave S08)
+GE Plus watch: the Ratio row is gone, since the PC version keeps the picture's shape by itself (thanks dick)
+GE Plus: GoldenEye's sight shows only while you aim, as in GoldenEye; GE Plus: Crosshair When Not Aiming (Mods: Missions) keeps it up with the gun lowered
+
+notes 21 2026-09-30
+Simulants: new "Simulant AI" option on Dab's Mod's Player page. Modern Movement lets simulants find their way with a map of each arena, so they get stuck far less (most on Warehouse, Area 52 and Grid, and with fast simulants), use ladders, lifts and drops, and step aside for each other in doorways. They still choose what to do the way they always have. Stock is the default and plays exactly as before; GE Plus arenas stay on Stock for now
+Simulants, Modern Movement: the first time you play an arena it builds its map, about a second on most arenas; after that it loads at once
+
 notes 20 2026-09-30
 Updates: the game now tells you on the main menu when a newer build of your channel is out, with Update Now, Later, Skip This Version and a way to turn the notices off (also on the Check for Updates page)
 Updates: Check for Updates can now switch between Stable and Dev: it shows both channels' latest build and backs up your settings and saves before switching. Dev gets fixes first; Stable is the safe fallback

@@ -6,6 +6,8 @@
 #ifndef PLATFORM_N64
 #include "headfit.h"
 #include "gexplus.h"
+#include "gestan.h"
+#include "modloader.h"
 #endif
 #include "system.h"
 #include "game/modghost.h"
@@ -494,6 +496,9 @@ void bodyAllocateChr(s32 stagenum, struct packedchr *packed, s32 cmdindex)
 	s32 headnum;
 	f32 angle;
 	s32 index;
+#ifndef PLATFORM_N64
+	s32 legal;
+#endif
 
 	padUnpack(packed->padnum, PADFIELD_POS | PADFIELD_LOOK | PADFIELD_ROOM, &pad);
 
@@ -504,14 +509,29 @@ void bodyAllocateChr(s32 stagenum, struct packedchr *packed, s32 cmdindex)
 	g_BodySpawnStats.entries++;
 #endif
 
+#ifndef PLATFORM_N64
+	// A converted GoldenEye mission's guard is made where GoldenEye makes it:
+	// at its pad where the pad passes GoldenEye's own test of a circle of 20
+	// there (getposstan(), gestan.c's geStanSpawnLegal()), and not at all
+	// where it fails. Perfect Dark's test left out guards GoldenEye makes
+	// (Facility 51, Frigate 26, Caverns 10 and 33, Aztec 9) and made one it
+	// does not (Caverns 41). -1 is no answer: Perfect Dark's own test.
+	legal = modloaderStageIsMission(stagenum) ? geStanSpawnLegal(&pad.pos, pad.room, 20) : -1;
+
+	if (legal == 0 || (legal < 0
+				&& cdTestVolume(&pad.pos, 20, rooms, CDTYPE_ALL, CHECKVERTICAL_YES, 200, -200) == CDRESULT_COLLISION
+				&& packed->chair == -1
+				&& (packed->spawnflags & SPAWNFLAG_IGNORECOLLISION) == 0)) {
+		g_BodySpawnStats.collision++;
+		return;
+	}
+#else
 	if (cdTestVolume(&pad.pos, 20, rooms, CDTYPE_ALL, CHECKVERTICAL_YES, 200, -200) == CDRESULT_COLLISION
 			&& packed->chair == -1
 			&& (packed->spawnflags & SPAWNFLAG_IGNORECOLLISION) == 0) {
-#ifndef PLATFORM_N64
-		g_BodySpawnStats.collision++;
-#endif
 		return;
 	}
+#endif
 
 	if (packed->spawnflags & (SPAWNFLAG_ONLYONA | SPAWNFLAG_ONLYONSA | SPAWNFLAG_ONLYONPA)) {
 		if ((packed->spawnflags & (SPAWNFLAG_ONLYONA | SPAWNFLAG_ONLYONSA | SPAWNFLAG_ONLYONPA)) == 0) {
@@ -781,7 +801,28 @@ void body0f02ddbf(void)
  * any tweaking. This function is used in multiplayer where players can put any
  * heads on any bodies.
  */
+#ifndef PLATFORM_N64
+static void bodyCalculateHeadOffsetOn(struct modeldef *headmodeldef, s32 headnum, s32 bodynum, struct modeldef *bodymodeldef);
+
 void bodyCalculateHeadOffset(struct modeldef *headmodeldef, s32 headnum, s32 bodynum)
+{
+	bodyCalculateHeadOffsetOn(headmodeldef, headnum, bodynum, g_HeadsAndBodies[bodynum].modeldef);
+}
+
+/*
+ * A body loaded somewhere of its own (the menu's preview), named in the call:
+ * a pointer kept between calls outlived the preview and the next spawn read
+ * its freed model (crashes 20261003-040138, 20261003-073032)
+ */
+void bodyCalculateHeadOffsetForBody(struct modeldef *headmodeldef, s32 headnum, s32 bodynum, struct modeldef *bodymodeldef)
+{
+	bodyCalculateHeadOffsetOn(headmodeldef, headnum, bodynum, bodymodeldef);
+}
+
+static void bodyCalculateHeadOffsetOn(struct modeldef *headmodeldef, s32 headnum, s32 bodynum, struct modeldef *bodymodeldef)
+#else
+void bodyCalculateHeadOffset(struct modeldef *headmodeldef, s32 headnum, s32 bodynum)
+#endif
 {
 	struct modelnode *node;
 	struct modelnode *prev;
@@ -829,7 +870,7 @@ void bodyCalculateHeadOffset(struct modeldef *headmodeldef, s32 headnum, s32 bod
 		// A head on a body it was not made for is seated by measuring the two
 		// rather than by the table of the game's own types (port/src/headfit.c)
 		if (headfitWanted(headnum, bodynum)) {
-			offset = headfitOffset(headmodeldef, headnum, bodynum, g_HeadsAndBodies[bodynum].modeldef);
+			offset = headfitOffset(headmodeldef, headnum, bodynum, bodymodeldef);
 			headfitNoteApplied(headmodeldef, 0, 1);
 			goto apply;
 		}

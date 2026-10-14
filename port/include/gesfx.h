@@ -13,6 +13,11 @@
  * bank's sound id - 1 (gesfx.c).
  */
 
+#define GESFX_ROCKET_LAUNCH     1   // a rocket leaving the launcher
+#define GESFX_KNIFE_HIT_WALL    3   // a thrown knife striking
+#define GESFX_GRENADE_THROW     4   // anything thrown but the throwing knife
+#define GESFX_DROP_GUN          45  // anything else thrown, landing
+#define GESFX_HIT_BULLET_FLESH  69  // a shot, or a thrown knife, in a body
 #define GESFX_OPTION_CLICK2     18
 #define GESFX_OPTION_CHOOSE     43  // an option's value changed on the watch
 #define GESFX_PAPER_TURN        77  // a difficulty picked
@@ -23,6 +28,7 @@
 #define GESFX_WATCH_STATIC      236
 #define GESFX_WATCH_ON          237
 #define GESFX_WATCH_OFF         238
+#define GESFX_ATTACH_MINE       241 // a thrown mine sticking where it lands
 
 // GoldenEye plays a sound effect at full volume over music at its track's own
 // default (g_musicDefaultTrackVolume[]: M_INTRO 0x7332, the folders, the watch
@@ -77,6 +83,11 @@ s32 geSfxOurs(s32 id, s32 pdsound);
 // as it starts a sound: the link was taken off the key map (gesfx.c).
 s32 geSfxChain(s32 ours);
 
+// Whether `ours` is a sound appended out of a converted mod's bank (GoldenEye's
+// or a ROM hack's), so played by GoldenEye's rules where they differ from
+// Perfect Dark's player (n_sndplayer.c's sndpEnvTooLong())
+s32 geSfxIsBankSound(s32 ours);
+
 // GoldenEye's guns on a stage of Perfect Dark's (gesfx.c): whether the
 // conversion has the bank for their sounds, loading it the first time
 s32 geSfxGuns(void);
@@ -85,6 +96,12 @@ s32 geSfxGuns(void);
 // psCreate() take on any stage - the id itself on a converted level, its
 // sample heard as geSfxNum() describes on any other; 0 without the bank
 s32 geSfxGunShot(s32 id);
+
+// Whether `num` is one geSfxGunShot() gave on a converted level for a slot the
+// remap leaves Perfect Dark's (a ROM hack's gun firing with 55, 100 or 101): it
+// is heard at the remap's share of full and with GoldenEye's falloff, as a
+// remapped number is.
+s32 geSfxHeardAsRemapped(s32 num);
 
 // A sound one of GoldenEye's guns makes in the hand (a reload's clicks from
 // its host's animation, an empty click), as a converted level would play it:
@@ -123,5 +140,14 @@ s32 geSfxDoor(s32 moment, s32 soundtype, struct prop *prop);
 // converted level: the body armour, a key, a gun, ammunition. From `prop`, or
 // as the player's own with none. 1 when it was played, 0 for Perfect Dark's.
 s32 geSfxPickup(s32 pdsound, struct prop *prop);
+
+// Whether a chr's shot of this gun is GoldenEye's rocket launch on a converted
+// level: no shot sound of its own, and the launch heard at full wherever he
+// is (geSfxPlay(GESFX_ROCKET_LAUNCH)), as GoldenEye's guard plays it.
+s32 geChrRocketLaunchSilent(s32 weaponnum);
+
+// GoldenEye's volume for a sound `dist` from Bond (sub_GAME_7F0537B8(): full to
+// 200, a root curve to 10000/32767 at 5000, out by 6000), as a share of `full`.
+s32 geSfxCurveVolume(f32 dist, s32 full);
 
 #endif

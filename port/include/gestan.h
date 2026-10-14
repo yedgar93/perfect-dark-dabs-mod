@@ -84,6 +84,13 @@ bool geStanFloorAhead(s32 playernum, struct coord *pos, struct coord *to, f32 gr
 /** The player's tile is to be found afresh: they fell, climbed a ladder or rode. */
 void geStanForgetPlayerTile(s32 playernum);
 
+/**
+ * The player whose own move the walls are asked about next, or -1 when done:
+ * the tile their cylinder stands on is the one GoldenEye's walk from their
+ * tile reaches (geStanFloorAhead() kept it), not the one nearest by height.
+ */
+void geStanSetMover(s32 playernum);
+
 /** The `rise` for a body's cylinder: a couple of steps where the limit is its foot, else none. */
 f32 geStanRise(bool checkvertical);
 
@@ -118,11 +125,40 @@ bool geStanWalkFromRoom(struct coord *from, s32 fromroom, struct coord *to, s32 
 s32 geStanRoomUnder(struct coord *pos, f32 ground, s32 prefer);
 
 /**
+ * GoldenEye's prop->stan and prop->pos for an object set down from a pad: the
+ * pad's tile walked to the object, or the pad's own where the walk fails.
+ */
+bool geStanObjectTile(struct coord *padpos, s32 padroom, struct coord *centre, struct coord *objpos,
+		s32 *tile, struct coord *seed);
+
+/** A tile's room, or -1. */
+s32 geStanTileRoom(s32 tile);
+
+/** The rooms of the tiles within `radius` of x/z, walking from `tile` (stan.c's sub_GAME_7F0B21B0()). */
+s32 geStanLocusRooms(s32 tile, f32 x, f32 z, f32 radius, s32 *rooms, s32 max);
+
+/**
  * Whether a guard standing at `from` on the floor at `ground` may run straight
  * to `to`, past waypoints: GoldenEye's walk along the tile graph from its tile
  * ends on the tile under `to` (sub_GAME_7F030128). True with no graph.
  */
 bool geStanReaches(struct coord *from, f32 ground, struct coord *to);
+
+/**
+ * Whether a body could walk the straight line from `from`, on its floor at
+ * `fromground`, to `to` on its floor at `toground`, by GoldenEye's tile graph:
+ * the walk from the tile under the one ends on the tile under the other (or
+ * one at the same height there), crossing no unlinked edge, and no link the
+ * conversion raised a climb wall on unless `climbs`. 1 yes, 0 no, -1 not
+ * known: no graph, or no tile under either end.
+ */
+s32 geStanLinks(struct coord *from, f32 fromground, struct coord *to, f32 toground, bool climbs);
+
+/**
+ * The surface of the tile under `pos` at or under its height (a pad's floor),
+ * or -1e30 where there is no graph or no tile.
+ */
+f32 geStanFloorAt(struct coord *pos);
 
 // GoldenEye's own truck test: whether lines laid end to end in plan (x, z pairs)
 // cross no wall of the tile graph, starting on the tile under the first at y
@@ -138,6 +174,9 @@ bool geStanLinesClear(const f32 (*pts)[2], s32 n, f32 y);
  */
 #define GESTAN_NOCLIMBFLOOR (-1e30f)
 f32 geStanClimbFloor(struct coord *pos, struct coord *to, f32 ground, f32 radius);
+
+/** Whether a body's circle at `pos` touches a floor at height `y` (the climb's hold). */
+bool geStanTouchesFloor(struct coord *pos, f32 radius, f32 y);
 
 /**
  * Whether a body at `pos` is on, or within `reach` of an edge linked to, a tile
@@ -164,6 +203,21 @@ bool geStanSightClear(struct coord *a, struct coord *b);
  * or either end is over no tile.
  */
 s32 geStanAutogunSees(struct coord *from, s32 fromroom, struct coord *to, f32 toground);
+
+/**
+ * GoldenEye's pickup test (propobj.c's objTestForPickup()): the tile graph
+ * walked in plan from the player's tile to the object, taking it only where the
+ * walk ends on the object's tile. 1 may, 0 may not, -1 no graph here.
+ */
+s32 geStanPickupReaches(struct coord *from, f32 ground, struct coord *to);
+
+/**
+ * GoldenEye's test of a guard's pad as its setup is loaded (expand_09_characters()'s
+ * getposstan(&pad->pos, pad->stan, 20, ...), which is stanTestVolume()): 1 the
+ * guard is made at the pad, 0 it is not made at all, -1 where the level has no
+ * graph or the pad is over no tile.
+ */
+s32 geStanSpawnLegal(struct coord *pos, s32 padroom, f32 radius);
 
 extern s32 g_GeStanAsked;
 extern s32 g_GeStanSkipped;

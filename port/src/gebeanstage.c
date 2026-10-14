@@ -7,6 +7,7 @@
 #ifndef PLATFORM_N64
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <math.h>
 #include <ultra64.h>
@@ -67,6 +68,9 @@
 #define FIGHT_DEPTH_BIAS 8
 
 #define MAXPALETTE 64
+// seeds kept for colours far from the heaviest ones (buildPalette()), and how far
+#define PALETTE_FAR 8
+#define PALETTE_FAR_DIST 64
 #define BATCHVERTS 16
 
 struct stagerow {
@@ -102,6 +106,11 @@ struct stri {
 	u8 blend;   // drawn in the release's blended pass (triFades())
 	u8 undersea; // the reflection under a sea, faded and culled (markUnderSea())
 	u8 plain;   // of a draw with no UV and no picture of its own (gebeanlevelvtx)
+	u8 overlap; // a face with another room's space behind it, drawn culled (markOverlaps())
+	u8 painted; // under a later blended decal that covers it wholly: never seen (markDecals())
+	u8 unlitplain; // a black face of a plain draw paintUnlit() lit (build() may put its black back)
+	u8 alphatest; // its draw's alpha test, against alpharef (alphaTested())
+	u8 alpharef;
 };
 
 // The level being served, built when its first room is asked for
@@ -130,6 +139,21 @@ static u8 texClampV[GEBEAN_MAXMATS];
 static s16 texClampShift[GEBEAN_MAXMATS];
 // The reservoir's picture: Bean's water buffers (stride 36) draw it
 static u8 texWater[GEBEAN_MAXMATS];
+
+// How the file scrolls a picture, in repeats a second (gebeanLevelTextureScroll(),
+// the release's texture matrix): its rooms draw it by moving its tile, which a
+// list of its own does each frame (scrollSlot())
+static f32 texScroll[GEBEAN_MAXMATS][2];
+
+#define SCROLL_SLOTS 8
+
+static struct {
+	s32 tex;
+	s32 w;
+	s32 h;
+	Gfx gdl[6];
+} scrollSlots[SCROLL_SLOTS];
+static s32 numScrollSlots;
 
 // The level's backdrop: a picture whose every triangle stands outside the
 // level (gebeanStageRenderBackdrop())
@@ -754,6 +778,7 @@ static s32 shellNum;
 static s32 shellCap;
 static s32 *shellFirst;
 static s32 *shellCount;
+static s32 *shellXlu;  // each room's translucent ones after its opaque ones, for gebeanStageHitTexture() alone
 static s32 cullOutside;
 static s32 shellHits;  // the last test's rays that met the level, and of those its back
 static s32 shellBacks;
@@ -824,20 +849,39 @@ static void shellTake(u8 **filerooms, u32 *filelens, s32 n)
 {
 	shellFirst = calloc(n + 1, sizeof(*shellFirst));
 	shellCount = calloc(n + 1, sizeof(*shellCount));
+	shellXlu = calloc(n + 1, sizeof(*shellXlu));
 
-	for (s32 r = 1; r < n && shellFirst && shellCount; r++) {
+	for (s32 r = 1; r < n && shellFirst && shellCount && shellXlu; r++) {
 		if (filerooms[r]) {
+			s32 two;
+
 			shellFirst[r] = shellNum;
 			fileRoomTrianglesEach(r, filerooms[r], filelens[r], 0, fileTriToShell, NULL);
 			shellCount[r] = shellNum - shellFirst[r];
+
+			// and the translucent ones, for a shot's texture only: Dam's and
+			// Frigate's water is translucent, and a shot that met it found no
+			// texture, so took the default surface and left a hole on it
+			// where GoldenEye's HIT_WATER leaves none (F3 20260929-213318)
+			two = shellNumTwo;
+			fileRoomTrianglesEach(r, filerooms[r], filelens[r], EACH_XLU_ONLY, fileTriToShell, NULL);
+			shellXlu[r] = shellNum - shellFirst[r] - shellCount[r];
+			shellNumTwo = two;
 		}
 	}
 
-	if (!shellFirst || !shellCount) {
+	if (!shellFirst || !shellCount || !shellXlu) {
 		shellForget();
 	} else {
-		sysLogPrintf(LOG_NOTE, "gebeanstage: %d of GoldenEye's opaque triangles for the camera test, %d of them unculled",
-				shellNum, shellNumTwo);
+		s32 opaque = 0;
+
+		for (s32 r = 1; r < n; r++) {
+			opaque += shellCount[r];
+		}
+
+		sysLogPrintf(LOG_NOTE, "gebeanstage: %d of GoldenEye's opaque triangles for the camera test, %d of them unculled;"
+				" %d translucent ones for shot textures",
+				opaque, shellNumTwo, shellNum - opaque);
 	}
 }
 
@@ -849,6 +893,8 @@ static void shellForget(void)
 	shellTex = NULL;
 	free(shellFirst);
 	free(shellCount);
+	free(shellXlu);
+	shellXlu = NULL;
 	shellTri = NULL;
 	shellTwo = NULL;
 	shellNumTwo = 0;
@@ -1405,6 +1451,42 @@ static s32 buildPalette(const struct stri *tris, const s32 *list, s32 num, u32 *
 			}
 		}
 
+		// The last few seeds go to the colours furthest from every seed so
+		// far, when one is far: a handful of yellow vertices among a room's
+		// hundreds of greys (Frigate's yellow and black deck checker, a
+		// decal over the plate, F3 20261002-030343; Depot's yellow door
+		// arrows) were merged into the nearest grey and drew white
+		if (numcols > MAXPALETTE && i >= MAXPALETTE - PALETTE_FAR) {
+			s32 far = -1;
+			s32 fard = PALETTE_FAR_DIST * PALETTE_FAR_DIST;
+
+			for (s32 j = i; j < numcols; j++) {
+				const u32 c = cols[order[j]];
+				s32 nd = 0x7fffffff;
+
+				for (s32 q = 0; q < i; q++) {
+					s32 d = 0;
+
+					for (s32 k = 0; k < 24; k += 8) {
+						const s32 a = (palette[q] >> k) & 0xff;
+						const s32 b = (c >> k) & 0xff;
+						d += (a - b) * (a - b);
+					}
+
+					nd = MIN(nd, d);
+				}
+
+				if (nd > fard || (nd == fard && far >= 0 && counts[order[j]] > counts[order[far]])) {
+					far = j;
+					fard = nd;
+				}
+			}
+
+			if (far >= 0) {
+				best = far;
+			}
+		}
+
 		{
 			const s32 tmp = order[i];
 			order[i] = order[best];
@@ -1481,7 +1563,7 @@ static s32 texHasAlpha(s32 tex)
  */
 static s32 triCulled(const struct stri *t)
 {
-	return t->backed || t->fights;
+	return t->backed || t->fights || t->overlap;
 }
 
 // Below this a vertex alpha is a fade and not a rounding, as xblamesh.c's
@@ -2186,6 +2268,11 @@ static void collectTri(void *arg, s32 tex, const struct gebeanlevelvtx *v)
 	t->fights = 0;
 	t->undersea = 0;
 	t->plain = v[0].plain;
+	t->overlap = 0;
+	t->painted = 0;
+	t->unlitplain = 0;
+	t->alphatest = v[0].alphatest;
+	t->alpharef = v[0].alpharef;
 }
 
 /*
@@ -2548,6 +2635,8 @@ static s32 triOther(const struct stri *t, const struct stri *u)
  */
 #define UNLIT_SHARE 0.05f   // a picture black on more than this share of its faces is dark on purpose
 #define UNLIT_REACH 400.0f  // how far a lit face is looked for
+#define UNLIT_GE_DARK 4.0f  // GoldenEye's brightness under which a plain draw's black stays (build())
+#define UNLIT_GE_NEAR 32.0f // and how near its surface must be to be the one asked
 
 static const f32 (*unlitMid)[3];
 
@@ -2716,6 +2805,7 @@ static s32 paintUnlit(struct collect *c)
 				tri->argb[k] = argb;
 			}
 
+			tri->unlitplain = tri->plain;
 			painted++;
 		}
 	}
@@ -2735,7 +2825,10 @@ static s32 paintUnlit(struct collect *c)
  * - and draws it solid, a hard black cut-out on the floor ("a strange texture
  * of the shadow of the fan", F3 20260929-011949). GoldenEye's shadow there is
  * a see-through darkening of the floor. Such a decal is drawn half through,
- * in the translucent leaf (triFades()).
+ * in the translucent leaf (triFades()). So is a black decal in the release's
+ * blended pass whose picture has no alpha of its own: Bunker II's pillar
+ * shadow across the cell corridor came out a solid black strip (F3
+ * 20260930-030521), where GoldenEye darkens the floor.
  */
 #define SHADOW_ALPHA 0x80
 
@@ -2746,7 +2839,7 @@ static s32 markShadows(struct stri *tris, s32 num)
 	for (s32 t = 0; t < num; t++) {
 		struct stri *tri = &tris[t];
 
-		if (!tri->decal || !texHasAlpha(tri->tex) || texIsXlu(tri->tex)
+		if (!tri->decal || (!tri->blend && (!texHasAlpha(tri->tex) || texIsXlu(tri->tex)))
 				|| (tri->argb[0] & 0xffffff) || (tri->argb[1] & 0xffffff) || (tri->argb[2] & 0xffffff)
 				|| (tri->argb[0] >> 24) < FADE_ALPHA || (tri->argb[1] >> 24) < FADE_ALPHA || (tri->argb[2] >> 24) < FADE_ALPHA) {
 			continue;
@@ -2850,13 +2943,41 @@ static s32 markDecals(struct stri *tris, s32 num, const struct tgrid *g)
 			mid[j] = (t->pos[0][j] + t->pos[1][j] + t->pos[2][j]) / 3.0f;
 		}
 
-		for (s32 e = g->head[gridKey((s32)floorf(mid[0] / g->cell), (s32)floorf(mid[1] / g->cell), (s32)floorf(mid[2] / g->cell))];
-				e >= 0 && !t->decal; e = g->entnext[e]) {
+		// The cells of its middle and of the points the strip test below
+		// takes: a face overlapping it along a strip need not touch the
+		// middle's cell
+		u32 keys[7];
+		s32 numkeys = 0;
+
+		for (s32 k = 0; k < 7; k++) {
+			f32 p[3];
+			u32 key;
+			s32 seen = 0;
+
+			for (s32 j = 0; j < 3; j++) {
+				const f32 from = k == 0 ? mid[j] : k < 4 ? t->pos[k - 1][j] : (t->pos[k - 4][j] + t->pos[(k - 3) % 3][j]) * 0.5f;
+
+				p[j] = from + (mid[j] - from) * 0.1f;
+			}
+
+			key = gridKey((s32)floorf(p[0] / g->cell), (s32)floorf(p[1] / g->cell), (s32)floorf(p[2] / g->cell));
+
+			for (s32 q = 0; q < numkeys; q++) {
+				seen |= keys[q] == key;
+			}
+
+			if (!seen) {
+				keys[numkeys++] = key;
+			}
+		}
+
+		for (s32 c = 0; c < numkeys && !t->decal; c++)
+		for (s32 e = g->head[keys[c]]; e >= 0 && !t->decal; e = g->entnext[e]) {
 			const s32 o = g->room[g->enttri[e]];
 			const struct stri *u = &tris[o];
 			const s32 alphai = texHasAlpha(t->tex), alphau = texHasAlpha(u->tex);
 			f32 nu[3], au, cosang, d;
-			s32 flat = 1;
+			s32 flat = 1, strip = 0;
 
 			if (o == i || !triOther(t, u)) {
 				continue;
@@ -2888,15 +3009,81 @@ static s32 markDecals(struct stri *tris, s32 num, const struct tgrid *g)
 
 			d = pointTriDist(mid, u->pos[0], u->pos[1], u->pos[2]);
 
+			// Two faces in one plane that overlap along a strip, neither's
+			// middle on the other: Frigate's pipe wall is bands of two
+			// pictures, and one band runs 9 units into the next along half
+			// the wall, where the two fought (F3 20261002-035958). A point a
+			// tenth of the way in from one of its corners or edges lying
+			// inside the other counts (in the plane: a face beside it,
+			// sharing an edge, never does). A pair where the other's middle
+			// lies on this one is not a strip: the other's own pass decides
+			// it by the rules below, and deciding it here by the strip's
+			// rule as well could make each the decal of the other
 			if (d > DECAL_DIST * DECAL_DIST) {
+				s32 inside = 0;
+				f32 umid[3];
+
+				for (s32 j = 0; j < 3; j++) {
+					umid[j] = (u->pos[0][j] + u->pos[1][j] + u->pos[2][j]) / 3.0f;
+				}
+
+				if (pointTriDist(umid, t->pos[0], t->pos[1], t->pos[2]) <= DECAL_DIST * DECAL_DIST) {
+					continue;
+				}
+
+				for (s32 k = 0; k < 6 && !inside; k++) {
+					f32 p[3], rel[3], off;
+
+					for (s32 j = 0; j < 3; j++) {
+						const f32 from = k < 3 ? t->pos[k][j] : (t->pos[k - 3][j] + t->pos[(k - 2) % 3][j]) * 0.5f;
+
+						p[j] = from + (mid[j] - from) * 0.1f;
+						rel[j] = p[j] - u->pos[0][j];
+					}
+
+					off = dot3(rel, nu);
+
+					for (s32 j = 0; j < 3; j++) {
+						p[j] -= nu[j] * off;
+					}
+
+					inside = pointTriDist(p, u->pos[0], u->pos[1], u->pos[2]) <= 0.0001f;
+				}
+
+				if (!inside) {
+					continue;
+				}
+
+				strip = 1;
+			}
+
+			// Two blended draws: the release's blended pass writes no depth,
+			// so the later one paints over the earlier wherever they share,
+			// whichever is smaller or lies wholly on the other (Archives'
+			// bulletin board, a blended cork over three blended papers drawn
+			// before it: the release shows the board bare, and ours drew the
+			// papers on it - fighting it, F3 20261001-043410). Of a pair
+			// with an opaque face, or two, the rules below, as before
+			if (t->blend && u->blend && i < o) {
+				// and wholly under one with no alpha anywhere, it is never seen
+				if (full && full[i] && !texHasAlpha(u->tex) && (u->argb[0] >> 24) == 0xff
+						&& (u->argb[1] >> 24) == 0xff && (u->argb[2] >> 24) == 0xff) {
+					t->painted = 1;
+				}
+
 				continue;
 			}
 
-			if (full && full[i] != full[o] ? full[i]
+			// Along a strip (neither middle on the other), the one with a
+			// cut-out picture, else the one Bean draws later, as the release's
+			// depth test (less or equal) has it - the same pick from either
+			// face's pass, so only one of the pair is ever the decal
+			if ((t->blend && u->blend) || (strip ? (alphai != alphau ? alphai > alphau : i > o)
+					: full && full[i] != full[o] ? full[i]
 					: alphai != alphau ? alphai > alphau
 					: full && full[i] ? i > o
 					: ai < au * 0.999f ? 1
-					: ai <= au * 1.001f && i > o) {
+					: ai <= au * 1.001f && i > o)) {
 				t->decal = 1;
 				t->decalbase = o;
 				count++;
@@ -3076,6 +3263,216 @@ static s32 markDecalLifts(struct stri *tris, s32 num)
 	return lifted;
 }
 
+static f32 cornerNormal(const f32 (*p)[3], f32 *n)
+{
+	const f32 a[3] = { p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2] };
+	const f32 b[3] = { p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2] };
+	f32 len;
+
+	n[0] = a[1] * b[2] - a[2] * b[1];
+	n[1] = a[2] * b[0] - a[0] * b[2];
+	n[2] = a[0] * b[1] - a[1] * b[0];
+	len = sqrtf(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+
+	if (len > 0.0f) {
+		n[0] /= len;
+		n[1] /= len;
+		n[2] /= len;
+	}
+
+	return len;
+}
+
+/** A triangle's corners as writeLeaf() will write them: whole units from its room's position. */
+static void cornersRounded(const struct stri *t, f32 (*out)[3])
+{
+	const s32 r = t->room;
+
+	for (s32 k = 0; k < 3; k++) {
+		for (s32 j = 0; j < 3; j++) {
+			const f32 rp = j == 0 ? g_BgRooms[r].pos.x : j == 1 ? g_BgRooms[r].pos.y : g_BgRooms[r].pos.z;
+
+			out[k][j] = roundf(t->pos[k][j] - rp) + rp;
+		}
+	}
+}
+
+/**
+ * The corners of a decal kept in its mesh (markDecalLifts()) moved out along
+ * the decal's face just far enough that the whole-unit corner writeLeaf()
+ * makes of them is not behind its base as that is written.
+ *
+ * Train's riveted plates are two decal bands on a wall bent along the
+ * middle of the plate, pinned to the mesh by corners they share with the
+ * wall at the bend and with a fin inside the wall. Their other corners,
+ * rounded to whole units, went up to half a unit behind the wall (itself
+ * rounded), so the wall was drawn over most of the plate: a thin strip of
+ * rivets seen head on, the whole plate at a slant (F3 20260930-014411
+ * "clipping at certain distances").
+ *
+ * A corner that rounds onto its base's plane is not moved, so a decal on its
+ * base's own corners (Surface's snow drifts) stays in the mesh. A corner is
+ * moved the same for every decal it belongs to, and one a triangle other
+ * than a decal shares only along that triangle's plane (a crack would open
+ * otherwise: Depot's roof trim went missing from below).
+  */
+static s32 markDecalCorners(struct stri *tris, s32 num)
+{
+	struct liftcorner *corners;
+	s32 numcorners = 0;
+	s32 moved = 0;
+	s32 i;
+	s32 j;
+
+	if (num <= 0) {
+		return 0;
+	}
+
+	corners = malloc(sizeof(*corners) * num * 3);
+
+	if (!corners) {
+		return 0;
+	}
+
+	for (i = 0; i < num; i++) {
+		for (s32 k = 0; k < 3; k++) {
+			for (s32 m = 0; m < 3; m++) {
+				corners[numcorners].key[m] = (s32)roundf(tris[i].pos[k][m]);
+			}
+
+			corners[numcorners].tri = i * 3 + k;
+			numcorners++;
+		}
+	}
+
+	qsort(corners, numcorners, sizeof(*corners), liftCornerCmp);
+
+	for (i = 0; i < numcorners; i = j) {
+		s32 usable = 1;
+		s32 shared = 0;
+		s32 count = 0;
+		f32 dir[3] = { 0.0f, 0.0f, 0.0f };
+		f32 len;
+		f32 by = -1.0f;
+
+		for (j = i; j < numcorners && memcmp(corners[j].key, corners[i].key, sizeof(corners[i].key)) == 0; j++) {
+			const struct stri *t = &tris[corners[j].tri / 3];
+			f32 n[3];
+
+			if (!t->decal) {
+				shared++;
+				continue;
+			}
+
+			if (t->lift || t->decalbase < 0 || t->decalbase >= num || t->room <= 0
+					|| tris[t->decalbase].room <= 0 || cornerNormal((const f32 (*)[3])t->pos, n) <= 0.0f) {
+				usable = 0;
+				continue;
+			}
+
+			dir[0] += n[0];
+			dir[1] += n[1];
+			dir[2] += n[2];
+			count++;
+		}
+
+		if (!usable || count == 0) {
+			continue;
+		}
+
+		len = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+
+		if (len < 0.5f * count) {
+			continue;
+		}
+
+		dir[0] /= len;
+		dir[1] /= len;
+		dir[2] /= len;
+
+		// A corner another triangle shares moves only along that triangle's
+		// own plane, so it stays on it and no crack opens (Train's plates
+		// share corners with a fin inside the wall, square to them); one on
+		// a surface it would leave stays where it is
+		for (s32 q = i; q < j && shared; q++) {
+			const struct stri *t = &tris[corners[q].tri / 3];
+			f32 n[3];
+
+			if (!t->decal && cornerNormal((const f32 (*)[3])t->pos, n) > 0.0f && fabsf(dot3(n, dir)) > 0.05f) {
+				usable = 0;
+				break;
+			}
+		}
+
+		if (!usable) {
+			continue;
+		}
+
+		// Steps of a quarter unit up to DECAL_LIFT; the first that leaves the
+		// corner on or in front of every base it lies on
+		for (s32 step = 0; step <= 8 && by < 0.0f; step++) {
+			const f32 s = step * (DECAL_LIFT / 8.0f);
+			s32 ok = 1;
+
+			for (s32 q = i; q < j && ok; q++) {
+				const struct stri *t = &tris[corners[q].tri / 3];
+
+				if (!t->decal) {
+					continue;
+				}
+
+				const struct stri *b = &tris[t->decalbase];
+				const s32 k = corners[q].tri % 3;
+				f32 bc[3][3], nb[3], nt[3], w[3], rel[3];
+
+				cornersRounded(b, bc);
+
+				if (cornerNormal((const f32 (*)[3])bc, nb) <= 0.0f && cornerNormal((const f32 (*)[3])b->pos, nb) <= 0.0f) {
+					continue;
+				}
+
+				cornerNormal((const f32 (*)[3])t->pos, nt);
+
+				for (s32 m = 0; m < 3; m++) {
+					const f32 rp = m == 0 ? g_BgRooms[t->room].pos.x : m == 1 ? g_BgRooms[t->room].pos.y : g_BgRooms[t->room].pos.z;
+
+					w[m] = roundf(t->pos[k][m] + dir[m] * s - rp) + rp;
+					rel[m] = w[m] - bc[0][m];
+				}
+
+				ok = dot3(rel, nb) * (dot3(nt, nb) >= 0.0f ? 1.0f : -1.0f) >= -0.01f;
+			}
+
+			if (ok) {
+				by = s;
+			}
+		}
+
+		if (by <= 0.0f) {
+			continue;
+		}
+
+		for (s32 q = i; q < j; q++) {
+			struct stri *t = &tris[corners[q].tri / 3];
+			const s32 k = corners[q].tri % 3;
+
+			if (!t->decal) {
+				continue;
+			}
+
+			t->pos[k][0] += dir[0] * by;
+			t->pos[k][1] += dir[1] * by;
+			t->pos[k][2] += dir[2] * by;
+		}
+
+		moved++;
+	}
+
+	free(corners);
+
+	return moved;
+}
+
 // What build() leaves, the level it read left open
 static void forgetBuilt(void)
 {
@@ -3118,6 +3515,11 @@ static void forget(void)
 	level = NULL;
 	row = NULL;
 	built = 0;
+	numScrollSlots = 0;
+
+	for (s32 t = 0; t < GEBEAN_MAXMATS; t++) {
+		texScroll[t][0] = texScroll[t][1] = 0.0f;
+	}
 }
 
 /**
@@ -3131,6 +3533,191 @@ static void forget(void)
  * round alike.
  */
 #define WELD_DIST 0.25f
+
+/*
+ * The release's alpha test on its opaque level draws: greater than the
+ * draw's reference (127 on every level draw that sets one), of the picture's
+ * alpha times the vertex's. Control's hazard markings are cut-outs of one
+ * picture on vertices of alpha 0x80 (the cross on its floor: drawn whole)
+ * and 0x7f (the yellow stripes down its stairs: 127 is never greater than
+ * 127, so never drawn). Ours drew both faded into the translucent leaf by
+ * their vertex alpha (triFades()), half there each ("wrong opacity on the
+ * stripes and stains", F3 20261001-001258). So a triangle whose vertex alpha
+ * never passes is left out, and one that does is a cut-out of its picture
+ * with its vertex alpha whole, as the release draws it. Not a blended draw's,
+ * whose vertex alpha blends as well.
+ */
+static s32 alphaTested(struct collect *c)
+{
+	s32 kept = 0, dropped = 0;
+
+	for (s32 t = 0; t < c->num; t++) {
+		struct stri *tri = &c->tris[t];
+		u32 amax = 0;
+
+		if (tri->alphatest && !tri->blend) {
+			for (s32 k = 0; k < 3; k++) {
+				amax = MAX(amax, tri->argb[k] >> 24);
+			}
+
+			if (amax <= tri->alpharef) {
+				dropped++;
+				continue;
+			}
+
+			for (s32 k = 0; k < 3; k++) {
+				tri->argb[k] |= 0xff000000u;
+			}
+		}
+
+		c->tris[kept++] = *tri;
+	}
+
+	c->num = kept;
+
+	return dropped;
+}
+
+/*
+ * Opaque triangles the release's draws repeat corner for corner in another
+ * picture, of which it shows only the first it draws. Its level draws in its
+ * stream's order, the opaque pass before the blended one, the opaque pass
+ * with the depth test LESS (RB_DEPTHCONTROL 0x00700716 on every opaque level
+ * draw in a Xenia draw log of Facility, Bunker and Archives): a second
+ * triangle at exactly the first one's depth fails it everywhere and is never
+ * seen. Facility's walls carry GoldenEye's yellow and black hazard stripes
+ * this way, under the concrete the release shows (pad 72's low wall,
+ * tools/gefidelity view diff V5), and Dam's, Runway's and Frigate's have
+ * more: 445 twin triangles over the levels, most of them opaque and drawn
+ * after their twin. markDecals() took both as lying wholly on each other and
+ * drew the later one on top. A blended twin is not dropped: the blended pass
+ * wins its ties with what is behind it (Archives' cork board, blended, at the
+ * wall's depth to the bit, is drawn whole), so markDecals() decides it.
+ * Read before weldVertices(), which moves corners onto their neighbours': a
+ * twin is the same three corners to the bit, as the release's buffers have
+ * them.
+ */
+struct twinkey {
+	f32 c[9];
+	s32 tri;
+};
+
+static int twinCmp(const void *a, const void *b)
+{
+	const struct twinkey *x = a, *y = b;
+	const s32 r = memcmp(x->c, y->c, sizeof(x->c));
+
+	return r ? r : (x->tri > y->tri) - (x->tri < y->tri);
+}
+
+static int cornerCmp(const void *a, const void *b)
+{
+	return memcmp(a, b, 3 * sizeof(f32));
+}
+
+/** Drops the twins the release never shows; the count dropped. */
+static s32 dropTwins(struct collect *c)
+{
+	struct twinkey *keys = malloc((c->num > 0 ? c->num : 1) * sizeof(*keys));
+	u8 *drop = calloc(c->num > 0 ? c->num : 1, 1);
+	s32 dropped = 0;
+	s32 kept = 0;
+
+	if (!keys || !drop) {
+		free(keys);
+		free(drop);
+		return 0;
+	}
+
+	for (s32 t = 0; t < c->num; t++) {
+		f32 corner[3][3];
+
+		memcpy(corner, c->tris[t].pos, sizeof(corner));
+		qsort(corner, 3, sizeof(corner[0]), cornerCmp);
+		memcpy(keys[t].c, corner, sizeof(keys[t].c));
+		keys[t].tri = t;
+	}
+
+	qsort(keys, c->num, sizeof(*keys), twinCmp);
+
+	for (s32 a = 0; a < c->num; ) {
+		s32 b = a + 1;
+		s32 first, second;
+
+		while (b < c->num && memcmp(keys[b].c, keys[a].c, sizeof(keys[a].c)) == 0) {
+			b++;
+		}
+
+		// Of the opaque ones, the one the release draws first (LESS); a
+		// blended twin is drawn over them all and kept (its pass writes no
+		// depth and wins its ties: Archives' cork board over its wall), and
+		// left to markDecals()
+		first = -1;
+
+		for (s32 k = a; k < b; k++) {
+			const s32 t = keys[k].tri;
+
+			if (!c->tris[t].blend && (first < 0 || t < first)) {
+				first = t;
+			}
+		}
+
+		// A first twin that is a cut-out under the alpha test writes no depth
+		// where its picture is clear, and the next twin drawn shows there:
+		// the Cradle's walkway floors are a diamond plate drawn after a
+		// cut-out of the crossbraces under it, corner for corner, and with
+		// the plate dropped the walkways were black braces over the drop
+		// (F3 20261002-171636, 20261003-002151). That one is kept as well;
+		// markDecals() lays the cut-out on it
+		second = -1;
+
+		if (first >= 0 && c->tris[first].alphatest && texHasAlpha(c->tris[first].tex)) {
+			for (s32 k = a; k < b; k++) {
+				const s32 t = keys[k].tri;
+
+				if (t != first && !c->tris[t].blend && c->tris[t].tex != c->tris[first].tex
+						&& (second < 0 || t < second)) {
+					second = t;
+				}
+			}
+		}
+
+		for (s32 k = a; k < b && first >= 0; k++) {
+			const s32 t = keys[k].tri;
+
+			if (t == second) {
+				continue;
+			}
+
+			// a twin in the same picture and colour is drawn the same anyway.
+			// Of another vertex shader too: Control's floor stains, twins of
+			// their floor drawn by another shader, are not in the release
+			if (t != first && !c->tris[t].blend
+					&& (c->tris[t].tex != c->tris[first].tex
+						|| memcmp(c->tris[t].argb, c->tris[first].argb, sizeof(c->tris[t].argb)) != 0)) {
+				drop[t] = 1;
+				dropped++;
+			}
+		}
+
+		a = b;
+	}
+
+	for (s32 t = 0; t < c->num && dropped; t++) {
+		if (!drop[t]) {
+			c->tris[kept++] = c->tris[t];
+		}
+	}
+
+	if (dropped) {
+		c->num = kept;
+	}
+
+	free(keys);
+	free(drop);
+
+	return dropped;
+}
 
 static s32 weldVertices(struct collect *c)
 {
@@ -4215,8 +4802,12 @@ static s32 closeDoorGaps(struct collect *c)
  * behind the door's face, so the raised door was drawn over the wall: a
  * hazard-striped shutter over Depot's corrugated metal (F3 20260929-192603).
  *
- * For each door that slides up or down into the level, the band it travels
- * through past its opening is looked at from each face, cell by cell: a line
+ * A door that slides sideways into the wall beside its doorway is the same:
+ * Control's lift doors went over the corrugated wall either side of the lift
+ * (F3 20260930-013246), and Train's compartment doors, Bunker's, Egyptian's.
+ *
+ * For each door that slides into the level, up, down or sideways, the band it
+ * travels through past its opening is looked at from each face, cell by cell: a line
  * from a little in front of the face to the door's far face. Where GoldenEye's
  * room has a triangle on that line (the wall the door goes into) and Bean's
  * has none in front of the door's face, the cell gets wall a hair in front of
@@ -4321,6 +4912,8 @@ static s32 slotPatch(struct collect *c, const struct doorbox *b, s32 t, s32 w, s
 	u32 argb = donor->argb[0] & 0xff000000;
 	s32 added = 0;
 
+	patch.unlitplain = 0;
+
 	for (s32 k = 0; k < 4; k++) {
 		const f32 cu = k == 1 || k == 2 ? u1 : u0;
 		const f32 ca = k >= 2 ? a1 : a0;
@@ -4391,7 +4984,9 @@ static const struct stri *slotDonor(const struct collect *c, const struct doorbo
 		f32 nrm[3], mid[3], at[3];
 		f32 dw, da, dist;
 
-		if (triNormal(tri, nrm) <= 0.0f || dot3(nrm, d) > -0.9f) {
+		// a cut-out is no wall: Depot's "C5" stencil over a warehouse door
+		// was taken, and the raised door showed through its holes
+		if (texHasAlpha(tri->tex) || texIsXlu(tri->tex) || triNormal(tri, nrm) <= 0.0f || dot3(nrm, d) > -0.9f) {
 			continue;
 		}
 
@@ -4445,7 +5040,7 @@ static s32 fillDoorSlots(struct collect *c, u8 **filerooms, u32 *filelens, s32 n
 		f32 cw, ca, extent;
 
 		for (s32 k = 0; k < 3; k++) {
-			if (k != t && b->slide[k] && fabsf(b->axis[k][1]) > 0.7f && b->travel[k] > 1.0f) {
+			if (k != t && b->slide[k] && b->travel[k] > 1.0f) {
 				a = k;
 			}
 		}
@@ -4535,7 +5130,7 @@ static s32 fillDoorSlots(struct collect *c, u8 **filerooms, u32 *filelens, s32 n
 			for (s32 q = 0; hdfaces && q < numnear; q++) {
 				f32 nrm[3];
 
-				hdfaces[q] = triNormal(&c->tris[near[q]], nrm) > 0.0f && dot3(nrm, d) < 0.0f;
+				hdfaces[q] = !texHasAlpha(c->tris[near[q]].tex) && triNormal(&c->tris[near[q]], nrm) > 0.0f && dot3(nrm, d) < 0.0f;
 			}
 
 			if (!hdfaces) {
@@ -4665,6 +5260,8 @@ static s32 fillDoorSlots(struct collect *c, u8 **filerooms, u32 *filelens, s32 n
 					f32 lo[3] = { 1e30f, 1e30f, 1e30f }, hi[3] = { -1e30f, -1e30f, -1e30f };
 					f32 by;
 
+					copy.unlitplain = 0;
+
 					if (copy.tex == donor.tex || triNormal(&c->tris[near[q]], nrm) <= 0.0f || dot3(nrm, d) > -0.9f) {
 						continue;
 					}
@@ -4706,13 +5303,18 @@ static s32 fillDoorSlots(struct collect *c, u8 **filerooms, u32 *filelens, s32 n
 			free(hdfaces);
 
 			if (gecov > hdcov) {
-				sysLogPrintf(LOG_NOTE, "gebeanstage: door at %.0f %.0f %.0f, side %d (%.2f %.2f %.2f): GoldenEye's wall over %d of %d cells of its rise, Bean's in front of it at %d",
+				sysLogPrintf(LOG_NOTE, "gebeanstage: door at %.0f %.0f %.0f, side %d (%.2f %.2f %.2f), going (%.2f %.2f %.2f): GoldenEye's wall over %d of %d cells of its rise, Bean's in front of it at %d",
 						b->mid[0], b->mid[1], b->mid[2], face, face * b->axis[t][0], face * b->axis[t][1], face * b->axis[t][2],
+						b->slide[a] * b->axis[a][0], b->slide[a] * b->axis[a][1], b->slide[a] * b->axis[a][2],
 						gecov, cells, hdcov);
 			}
 		}
 
 		if (patched > before) {
+			sysLogPrintf(LOG_NOTE, "gebeanstage: door at %.0f %.0f %.0f going (%.2f %.2f %.2f) %.0f, through (%.2f %.2f %.2f): %d triangles of wall",
+					b->mid[0], b->mid[1], b->mid[2],
+					b->slide[a] * b->axis[a][0], b->slide[a] * b->axis[a][1], b->slide[a] * b->axis[a][2], b->travel[a],
+					b->axis[t][0], b->axis[t][1], b->axis[t][2], patched - before);
 			doors++;
 		}
 
@@ -4958,7 +5560,7 @@ static s32 markWaterPictures(const struct collect *c, u8 **filerooms, u32 *filel
  * taken again each load.
  * ------------------------------------------------------------------------- */
 
-#define HDCACHE_VERSION 7
+#define HDCACHE_VERSION 18
 #define HDCACHE_MAGIC "GEHDLVL"
 
 struct hdcachehead {
@@ -5759,6 +6361,21 @@ static struct brightcell *brightCorner(const f32 *p, s32 tex, s32 add)
 	return NULL;
 }
 
+// One surface's sums (matchN64Brightness()): its area, the HD side's brightness and GoldenEye's under it
+struct brightcomp {
+	f64 area, sum, go;
+};
+
+static s32 compFind(s32 *parent, s32 i)
+{
+	while (parent[i] != i) {
+		parent[i] = parent[parent[i]];
+		i = parent[i];
+	}
+
+	return i;
+}
+
 static void brightForget(void)
 {
 	free(brightFileTex);
@@ -5792,6 +6409,9 @@ static s32 matchN64Brightness(struct collect *c, u8 **filerooms, u32 *filelens, 
 	u8 *under1 = calloc(n + 1, 1);
 	f64 hdall = 0.0, hdallarea = 0.0, fileall = 0.0, fileallarea = 0.0;
 	s32 on = 0, changed = 0, under = 0, measured = 0, clamped = 0, paired = 0;
+	s32 allpaired = 0;
+	s32 *compParent = NULL;
+	struct brightcomp *comp = NULL;
 	char list[1536];
 	s32 at = 0;
 
@@ -5864,8 +6484,17 @@ static s32 matchN64Brightness(struct collect *c, u8 **filerooms, u32 *filelens, 
 			}
 		}
 
-		// the corners: three a triangle at most, at most a third full
-		for (brightCellMask = 1024; brightCellMask < (u32)paired * 9; brightCellMask <<= 1);
+		// the corners, of every paired triangle in any room (a surface's
+		// component reaches past the darker rooms): three a triangle at most,
+		// at most a third full
+		for (s32 t = 0; t < c->num; t++) {
+			const struct stri *tri = &c->tris[t];
+
+			allpaired += hdTriMeasured(tri) && tri->room < n && target[t] >= 0.0f
+				&& tri->tex >= 0 && tri->tex < GEBEAN_MAXMATS;
+		}
+
+		for (brightCellMask = 1024; brightCellMask < (u32)allpaired * 9; brightCellMask <<= 1);
 		brightCells = malloc(sizeof(*brightCells) * brightCellMask);
 		brightCellMask--;
 
@@ -5877,7 +6506,7 @@ static s32 matchN64Brightness(struct collect *c, u8 **filerooms, u32 *filelens, 
 		for (s32 t = 0; brightCells && t < c->num; t++) {
 			const struct stri *tri = &c->tris[t];
 
-			if (hdTriMeasured(tri) && tri->room < n && under1[tri->room] && target[t] >= 0.0f
+			if (hdTriMeasured(tri) && tri->room < n && target[t] >= 0.0f
 					&& tri->tex >= 0 && tri->tex < GEBEAN_MAXMATS) {
 				const f32 area = triArea3(tri->pos);
 				const f32 mine = hdTriBright(tri);
@@ -5894,28 +6523,113 @@ static s32 matchN64Brightness(struct collect *c, u8 **filerooms, u32 *filelens, 
 			}
 		}
 
+		// The surfaces: triangles of one picture meeting at a corner are one
+		// piece, whatever rooms they were dealt to, and a piece takes one
+		// factor from all of it. Dealt by position, Dam's chasm walls fell in
+		// rooms of factors from 1 to 3, and the cliff came out in bright and
+		// dark rectangles along the rooms' bounds (F3 20261001-211516)
+		if (brightCells) {
+			compParent = malloc(sizeof(s32) * (brightCellMask + 1));
+			comp = calloc(brightCellMask + 1, sizeof(*comp));
+		}
+
+		if (compParent && comp) {
+			for (u32 i = 0; i <= brightCellMask; i++) {
+				compParent[i] = (s32)i;
+			}
+
+			for (s32 t = 0; t < c->num; t++) {
+				const struct stri *tri = &c->tris[t];
+				s32 at[3];
+				s32 ok = 1;
+
+				if (!hdTriMeasured(tri) || tri->room >= n || target[t] < 0.0f
+						|| tri->tex < 0 || tri->tex >= GEBEAN_MAXMATS) {
+					continue;
+				}
+
+				for (s32 k = 0; k < 3 && ok; k++) {
+					const struct brightcell *e = brightCorner(tri->pos[k], tri->tex, 0);
+
+					ok = e != NULL;
+					at[k] = ok ? (s32)(e - brightCells) : -1;
+				}
+
+				if (!ok) {
+					continue;
+				}
+
+				for (s32 k = 1; k < 3; k++) {
+					const s32 a = compFind(compParent, at[0]);
+					const s32 b = compFind(compParent, at[k]);
+
+					if (a != b) {
+						compParent[b] = a;
+					}
+				}
+			}
+
+			for (s32 t = 0; t < c->num; t++) {
+				const struct stri *tri = &c->tris[t];
+				const struct brightcell *e;
+				f32 area;
+
+				if (!hdTriMeasured(tri) || tri->room >= n || target[t] < 0.0f
+						|| tri->tex < 0 || tri->tex >= GEBEAN_MAXMATS
+						|| !(e = brightCorner(tri->pos[0], tri->tex, 0))) {
+					continue;
+				}
+
+				area = triArea3(tri->pos);
+				comp[compFind(compParent, (s32)(e - brightCells))].area += area;
+				comp[compFind(compParent, (s32)(e - brightCells))].sum += area * hdTriBright(tri);
+				comp[compFind(compParent, (s32)(e - brightCells))].go += area * target[t];
+			}
+		}
+
 		for (s32 t = 0; t < c->num; t++) {
 			struct stri *tri = &c->tris[t];
 			const s32 r = tri->room;
 			f32 gain = 1.0f;
 			f32 vgain[3];
 			s32 any;
+			s32 have = 0;
 
 			// Blended triangles keep their colours: glows, lamp flares, glass
 			// and water are the release's own, not light it baked too dark
 			if (r <= 0 || r >= n || tri->plain || tri->blend || tri->undersea
-					|| (tri->tex >= 0 && tri->tex < GEBEAN_MAXMATS && texWater[tri->tex])
-					|| rhd[r].area < BRIGHT_MIN_AREA || rhd[r].sum <= 0.0) {
+					|| (tri->tex >= 0 && tri->tex < GEBEAN_MAXMATS && texWater[tri->tex])) {
 				continue;
 			}
 
-			gain = rgo[r].sum / rhd[r].sum;
+			// the surface it is a piece of, where that is big enough to measure
+			if (compParent && comp && tri->tex >= 0 && tri->tex < GEBEAN_MAXMATS) {
+				const struct brightcell *e = brightCorner(tri->pos[0], tri->tex, 0);
 
-			if (tri->tex >= 0 && tri->tex < GEBEAN_MAXMATS) {
-				const s32 k = r * GEBEAN_MAXMATS + tri->tex;
+				if (e) {
+					const struct brightcomp *p = &comp[compFind(compParent, (s32)(e - brightCells))];
 
-				if (phd[k].area >= BRIGHT_MIN_AREA && phd[k].sum > 0.0) {
-					gain = pgo[k].sum / phd[k].sum;
+					if (p->area >= BRIGHT_MIN_AREA && p->sum > 0.0) {
+						gain = (f32)(p->go / p->sum);
+						have = 1;
+					}
+				}
+			}
+
+			// else its room's, in a room darker than GoldenEye's
+			if (!have) {
+				if (rhd[r].area < BRIGHT_MIN_AREA || rhd[r].sum <= 0.0) {
+					continue;
+				}
+
+				gain = rgo[r].sum / rhd[r].sum;
+
+				if (tri->tex >= 0 && tri->tex < GEBEAN_MAXMATS) {
+					const s32 k = r * GEBEAN_MAXMATS + tri->tex;
+
+					if (phd[k].area >= BRIGHT_MIN_AREA && phd[k].sum > 0.0) {
+						gain = pgo[k].sum / phd[k].sum;
+					}
 				}
 			}
 
@@ -5958,6 +6672,8 @@ static s32 matchN64Brightness(struct collect *c, u8 **filerooms, u32 *filelens, 
 
 		free(brightCells);
 		brightCells = NULL;
+		free(compParent);
+		free(comp);
 
 		{
 			struct brightsum *post = calloc(n + 1, sizeof(*post));
@@ -5992,6 +6708,355 @@ static s32 matchN64Brightness(struct collect *c, u8 **filerooms, u32 *filelens, 
 	return changed;
 }
 
+/** Where a ray from o along d (unit) meets triangle v, or -1. */
+static f32 rayTriT(const f32 *o, const f32 *d, const f32 *v0, const f32 *v1, const f32 *v2)
+{
+	const f32 e1[3] = { v1[0] - v0[0], v1[1] - v0[1], v1[2] - v0[2] };
+	const f32 e2[3] = { v2[0] - v0[0], v2[1] - v0[1], v2[2] - v0[2] };
+	const f32 p[3] = { d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0] };
+	const f32 det = dot3(e1, p);
+	f32 s[3], q[3], u, v, inv;
+
+	if (fabsf(det) < 1e-6f) {
+		return -1.0f;
+	}
+
+	inv = 1.0f / det;
+	s[0] = o[0] - v0[0];
+	s[1] = o[1] - v0[1];
+	s[2] = o[2] - v0[2];
+	u = dot3(s, p) * inv;
+
+	if (u < 0.0f || u > 1.0f) {
+		return -1.0f;
+	}
+
+	q[0] = s[1] * e1[2] - s[2] * e1[1];
+	q[1] = s[2] * e1[0] - s[0] * e1[2];
+	q[2] = s[0] * e1[1] - s[1] * e1[0];
+	v = dot3(d, q) * inv;
+
+	if (v < 0.0f || u + v > 1.0f) {
+		return -1.0f;
+	}
+
+	return dot3(e2, q) * inv;
+}
+
+#define OVERLAP_REACH 64.0f
+#define OVERLAP_SPACE 400.0f
+
+/**
+ * The first of GoldenEye's triangles (the grid of them) a ray from o along
+ * unit d meets within reach, leaving out those in the plane n.x = pd (the
+ * face under test): its index, *t its distance and nf its normal, or -1.
+ */
+static s32 rayFirst(const struct tgrid *g, const f32 *o, const f32 *d, f32 reach, const f32 *n, f32 pd, f32 *t, f32 *nf)
+{
+	s32 hit = -1;
+	f32 best = reach;
+
+	for (f32 step = 0.0f; step <= best + g->cell; step += g->cell * 0.5f) {
+		const f32 at[3] = { o[0] + d[0] * step, o[1] + d[1] * step, o[2] + d[2] * step };
+		const s32 cx = (s32)floorf(at[0] / g->cell);
+		const s32 cy = (s32)floorf(at[1] / g->cell);
+		const s32 cz = (s32)floorf(at[2] / g->cell);
+
+		for (s32 e = g->head[gridKey(cx, cy, cz)]; e >= 0; e = g->entnext[e]) {
+			const s32 u = g->enttri[e];
+			const f32 *v = g->tri + u * 9;
+			f32 tt;
+
+			if (fabsf(dot3(n, v) - pd) < 1.0f && fabsf(dot3(n, v + 3) - pd) < 1.0f && fabsf(dot3(n, v + 6) - pd) < 1.0f) {
+				continue;
+			}
+
+			tt = rayTriT(o, d, v, v + 3, v + 6);
+
+			if (tt > 0.0f && tt < best) {
+				best = tt;
+				hit = u;
+			}
+		}
+	}
+
+	if (hit >= 0) {
+		const f32 *v = g->tri + hit * 9;
+		const f32 p[3][3] = { { v[0], v[1], v[2] }, { v[3], v[4], v[5] }, { v[6], v[7], v[8] } };
+
+		if (cornerNormal(p, nf) <= 0.0f) {
+			return -1;
+		}
+
+		*t = best;
+	}
+
+	return hit;
+}
+
+/**
+ * Rooms of GoldenEye's that the release's other rooms are kept out of: what
+ * of Bean's mesh is dealt to another room and stands inside this one's space
+ * is left out, so the room reads as on the cartridge.
+ *
+ * Aztec's room 45 is the closet under the exhaust hatch, a box of metal panels
+ * with the body armour on its floor. The release runs the stone wall of the
+ * room beside it (room 18's, x = -1641, three triangles) down the middle of
+ * the box - the solid wall a Xenia capture of the release shows there - so in
+ * the HD look a mossy slab stood across the closet beside the armour, with
+ * the sky over its top edge (F3 20260928-213437, "weird geometry in area
+ * underneath exhaust hatch where the body armor is"). GoldenEye shows the
+ * whole closet and, from the vent, the closet through that wall's back
+ * (markOverlaps()). The user: the Bean release was unfinished, and what looks
+ * wrong in its data is fixed rather than copied.
+ */
+/*
+ * The props of the rooms beside it are kept out too, while the camera is in
+ * the closet (gebeanStageHidesProp()): the release's monitors on room 18's
+ * wall (pads 261 and 262, 7 units under the closet's ceiling) have bigger
+ * screens than GoldenEye's, which hang into the closet's top - the black and
+ * white shapes under its ceiling - and the release's mesh of the white post at
+ * pad 139 stands through its east wall. From outside the closet its own box
+ * hides those parts of them, as it should.
+ */
+/*
+ * The wall is room 18's (to) and is dealt there and drawn, but only where
+ * GoldenEye's portal walk reaches room 18 - not from the closet - and the
+ * closet's own mesh only where the walk reaches the closet - not from room
+ * 18, inside whose box half the closet stands (gebeanStageRoomByPortals()).
+ * Left out, room 18 had no back wall: from the guidance room's glass the
+ * closet's metal box stood in it and the rooms past it showed through (F3
+ * 20261003-002919, "missing wall textures in the guidance DAT room"); the
+ * release draws the stone wall there, and no box.
+ */
+static const struct { const char *key; s16 room; s16 to; } keptOutOf[] = {
+	{ "azt", 45, 18 },
+};
+
+#define KEPTOUT_MARGIN 4.0f // inside the room's box by this much: its own walls are its neighbours' too
+#define KEPTOUT_STEPS  12   // points across a face, a side
+#define KEPTOUT_PROPREACH 48.0f // a prop of another room this far outside the room's box across is kept out too
+
+struct boxacc {
+	f32 lo[3];
+	f32 hi[3];
+};
+
+static void boxAdd(void *arg, const f32 v[3][3], s32 room)
+{
+	struct boxacc *b = arg;
+
+	for (s32 k = 0; k < 3; k++) {
+		for (s32 j = 0; j < 3; j++) {
+			b->lo[j] = MIN(b->lo[j], v[k][j]);
+			b->hi[j] = MAX(b->hi[j], v[k][j]);
+		}
+	}
+}
+
+/** Leaves out (room 0) what other rooms' triangles stand inside a keptOutOf[] room; the count. */
+static s32 keepOutOfRooms(struct collect *c, u8 **filerooms, u32 *filelens, s32 n, s32 *listlen)
+{
+	s32 count = 0;
+
+	for (s32 i = 0; i < (s32)ARRAYCOUNT(keptOutOf); i++) {
+		const s32 r = keptOutOf[i].room;
+		struct boxacc b = { { 1e30f, 1e30f, 1e30f }, { -1e30f, -1e30f, -1e30f } };
+
+		if (strcmp(keptOutOf[i].key, row->key) != 0 || r <= 0 || r >= n || !filerooms[r]) {
+			continue;
+		}
+
+		fileRoomTrianglesEach(r, filerooms[r], filelens[r], 1, boxAdd, &b);
+
+		for (s32 t = 0; t < c->num; t++) {
+			struct stri *tri = &c->tris[t];
+			s32 inside = 0;
+
+			// any of it inside, sampled across the face: the slab over the
+			// closet's top has its middle above the ceiling and its lower edge
+			// well inside
+			for (s32 a = 0; a <= KEPTOUT_STEPS && !inside && tri->room != 0 && tri->room != r && tri->room != keptOutOf[i].to; a++) {
+				for (s32 bb = 0; a + bb <= KEPTOUT_STEPS && !inside; bb++) {
+					const f32 wa = (f32)a / KEPTOUT_STEPS;
+					const f32 wb = (f32)bb / KEPTOUT_STEPS;
+					s32 in = 1;
+
+					for (s32 j = 0; j < 3 && in; j++) {
+						const f32 p = tri->pos[0][j] * wa + tri->pos[1][j] * wb + tri->pos[2][j] * (1.0f - wa - wb);
+
+						in = p > b.lo[j] + KEPTOUT_MARGIN && p < b.hi[j] - KEPTOUT_MARGIN;
+					}
+
+					inside = in;
+				}
+			}
+
+			if (inside) {
+				const s32 to = keptOutOf[i].to > 0 && keptOutOf[i].to < n ? keptOutOf[i].to : 0;
+
+				listlen[tri->room]--;
+				tri->room = to;
+
+				if (to) {
+					listlen[to]++;
+				}
+
+				count++;
+			}
+		}
+	}
+
+	return count;
+}
+
+/**
+ * Bean's solid faces drawn culled where GoldenEye's own face under them has
+ * another room's space behind it: the first of GoldenEye's faces a line
+ * back from it meets, within OVERLAP_REACH, faces the same way (a wall of
+ * the space behind), not back at it (the far side of a slab, a deck's
+ * underside, which Bean draws with its one plane from both sides), and that
+ * space is closed on all six sides by GoldenEye's faces turned into it, not
+ * the open air under a roof's edge or behind a gantry's panel (Depot, the
+ * Cradle), which Bean draws with one plane and GoldenEye leaves open.
+ *
+ * GoldenEye's rooms overlap and rely on their faces being culled: Aztec's
+ * computer room by the exhaust vent is a box whose west wall runs through
+ * the vent's last 50 units, and from the vent GoldenEye shows the room
+ * through the back of that wall, the body armour on the floor. Bean's wall,
+ * drawn two-sided like every HD room (writeLeaf()), was a stone face across
+ * the vent (F3 20260929-234633 "disjointed geometry/texture within exhaust
+ * tunnel, where the armor would normally be").
+ */
+static s32 markOverlaps(struct stri *tris, s32 num, const struct tgrid *filetris)
+{
+	static const f32 axes[6][3] = { { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } };
+	s32 count = 0;
+
+	for (s32 i = 0; i < num; i++) {
+		tris[i].overlap = 0;
+	}
+
+	for (s32 i = 0; i < num; i++) {
+		struct stri *t = &tris[i];
+		f32 n[3], mid[3], o[3], back[3], nf[3], d, pd;
+		f32 best = OVERLAP_REACH;
+		s32 closed = 1;
+		s32 g;
+
+		if (t->decal || t->blend || t->backed || t->fights || t->undersea || texHasAlpha(t->tex) || triNormal(t, n) <= 0.0f) {
+			continue;
+		}
+
+		for (s32 j = 0; j < 3; j++) {
+			mid[j] = (t->pos[0][j] + t->pos[1][j] + t->pos[2][j]) / 3.0f;
+			back[j] = -n[j];
+			o[j] = mid[j] - n[j] * 1.0f;
+		}
+
+		pd = dot3(n, mid);
+
+		// GoldenEye has a face here, facing the same way
+		g = tgridNearest(filetris, mid, 0, &d);
+
+		if (g < 0 || d > 4.0f) {
+			continue;
+		}
+
+		{
+			const f32 *v = filetris->tri + g * 9;
+			const f32 p[3][3] = { { v[0], v[1], v[2] }, { v[3], v[4], v[5] }, { v[6], v[7], v[8] } };
+
+			if (cornerNormal(p, nf) <= 0.0f || dot3(nf, n) < 0.9f) {
+				continue;
+			}
+		}
+
+		// The first of GoldenEye's faces behind it faces the same way
+		// (a space: GoldenEye's rooms sharing a wall have their two faces
+		// within a unit of each other, and Depot's warehouse wall's top edge
+		// went missing from below when such a pair was taken for one)
+		if (rayFirst(filetris, o, back, OVERLAP_REACH, n, pd, &best, nf) < 0 || dot3(nf, n) < 0.5f || best < 8.0f) {
+			continue;
+		}
+
+		// and the space between is closed all round
+		{
+			const f32 in[3] = { o[0] + back[0] * best * 0.5f, o[1] + back[1] * best * 0.5f, o[2] + back[2] * best * 0.5f };
+
+			for (s32 a = 0; a < 6 && closed; a++) {
+				f32 far = OVERLAP_SPACE;
+				f32 na[3];
+
+				closed = rayFirst(filetris, in, axes[a], OVERLAP_SPACE, n, pd, &far, na) >= 0 && dot3(na, axes[a]) < 0.0f;
+			}
+		}
+
+		if (!closed) {
+			continue;
+		}
+
+		t->overlap = 1;
+		count++;
+	}
+
+	return count;
+}
+
+/**
+ * PD_HDPICK="x,y,z,r" (a probe for finding which of Bean's faces a report
+ * shows): every collected triangle lying within r of the point is logged,
+ * once as collected (tag hdpick0) and once dealt (hdpick), and the level is
+ * built afresh rather than read from the disk cache. Read once.
+ */
+static const f32 *hdPickPoint(void)
+{
+	static s32 read = 0;
+	static s32 have = 0;
+	static f32 pk[4] = { 0, 0, 0, 100 };
+
+	if (!read) {
+		const char *e = getenv("PD_HDPICK");
+
+		read = 1;
+		have = e && sscanf(e, "%f,%f,%f,%f", &pk[0], &pk[1], &pk[2], &pk[3]) >= 3;
+	}
+
+	return have ? pk : NULL;
+}
+
+static void hdPick(const struct collect *c, const char *tag)
+{
+	const f32 *pk = hdPickPoint();
+
+	for (s32 t = 0; pk && t < c->num; t++) {
+		const struct stri *tri = &c->tris[t];
+
+		if (pointTriDist(pk, tri->pos[0], tri->pos[1], tri->pos[2]) < pk[3] * pk[3]) {
+			sysLogPrintf(LOG_NOTE, "%s %d tex %d %s alpha %d soft %d room %d decal %d blend %d backed %d overlap %d plain %d at %d/%d argb %08x %08x %08x pos (%.0f %.0f %.0f) (%.0f %.0f %.0f) (%.0f %.0f %.0f) uv %.3f,%.3f %.3f,%.3f %.3f,%.3f",
+					tag, t, tri->tex, tri->tex >= 0 ? gebeanLevelTextureName(level, tri->tex) : "-",
+					tri->tex >= 0 ? texAlpha[tri->tex] : -1, tri->tex >= 0 ? texSoft[tri->tex] : -1,
+					tri->room, tri->decal, tri->blend, tri->backed, tri->overlap, tri->plain, tri->alphatest, tri->alpharef,
+					tri->argb[0], tri->argb[1], tri->argb[2],
+					tri->pos[0][0], tri->pos[0][1], tri->pos[0][2], tri->pos[1][0], tri->pos[1][1], tri->pos[1][2],
+					tri->pos[2][0], tri->pos[2][1], tri->pos[2][2],
+					tri->uv[0][0], tri->uv[0][1], tri->uv[1][0], tri->uv[1][1], tri->uv[2][0], tri->uv[2][1]);
+		}
+	}
+}
+
+/** PD_UNLITLOG=1: each plain draw's black face build() looks at logged (a probe for F3 work). Read once. */
+static s32 unlitLogOn(void)
+{
+	static s32 on = -1;
+
+	if (on < 0) {
+		on = getenv("PD_UNLITLOG") != NULL;
+	}
+
+	return on;
+}
+
 static s32 build(void)
 {
 	const u64 start = sysGetMicroseconds();
@@ -6003,7 +7068,8 @@ static s32 build(void)
 	struct collect c;
 	s32 **lists;
 	s32 *listlen;
-	s32 kept = 0, dropped = 0, moved = 0, farOff = 0, decals = 0, backed = 0, fights = 0, nofogs = 0, plainDecals = 0;
+	s32 kept = 0, dropped = 0, moved = 0, farOff = 0, decals = 0, backed = 0, fights = 0, nofogs = 0, plainDecals = 0, paintedOver = 0, plainUntextured = 0, plainBlack = 0, unlampLit = 0;
+	u8 *farHit = NULL;
 	u32 bytes = 0;
 	const char *levelname;
 	u64 key = 0;
@@ -6035,7 +7101,11 @@ static s32 build(void)
 
 	for (s32 t = 0; t < gebeanLevelNumTextures(level) && t < GEBEAN_MAXMATS; t++) {
 		texTile[t] = gebeanLevelTexture(level, t, &texAlpha[t], &texSoft[t]);
+		texScroll[t][0] = texScroll[t][1] = 0.0f;
+		gebeanLevelTextureScroll(level, t, &texScroll[t][0], &texScroll[t][1]);
 	}
+
+	numScrollSlots = 0;
 
 	mark[0] = sysGetMicroseconds();
 
@@ -6054,7 +7124,7 @@ static s32 build(void)
 		keyed = 1;
 		mark[1] = sysGetMicroseconds();
 
-		if (hdcacheLoad(key, levelname, n)) {
+		if (!hdPickPoint() && hdcacheLoad(key, levelname, n)) {
 			shellTake(filerooms, filelens, n);
 
 			for (s32 r = 0; r <= n; r++) {
@@ -6086,12 +7156,31 @@ static s32 build(void)
 	c.scale = row->scale;
 	c.offset = row->offset;
 	gebeanLevelTriangles(level, collectTri, &c);
+	hdPick(&c, "hdpick0");
 
 	levelHasWater = 0;
 
 	for (s32 t = 0; t < gebeanLevelNumTextures(level) && t < GEBEAN_MAXMATS; t++) {
 		texWater[t] = gebeanLevelTextureIsWater(level, t);
 		levelHasWater |= texWater[t];
+	}
+
+	{
+		const s32 untested = alphaTested(&c);
+
+		if (untested) {
+			sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d triangles the release's alpha test never passes left out",
+					row->bean, untested);
+		}
+	}
+
+	{
+		const s32 twins = dropTwins(&c);
+
+		if (twins) {
+			sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d triangles the release draws over a twin it shows instead, left out",
+					row->bean, twins);
+		}
 	}
 
 	{
@@ -6104,7 +7193,9 @@ static s32 build(void)
 
 	{
 		const u64 from = sysGetMicroseconds();
-		const s32 unlit = paintUnlit(&c);
+		s32 unlit;
+
+		unlit = paintUnlit(&c);
 
 		if (unlit) {
 			sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d black faces given the light of the lit faces beside them (%.1f ms)",
@@ -6191,6 +7282,11 @@ static s32 build(void)
 				sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d triangles of cast shadows drawn see-through", row->bean, shadows);
 			}
 		}
+		{
+			const s32 overlaps = markOverlaps(c.tris, c.num, &filetris);
+
+			sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d faces drawn culled over another room's space", row->bean, overlaps);
+		}
 		markWaterPictures(&c, filerooms, filelens, n);
 
 		mark[2] = sysGetMicroseconds();
@@ -6200,6 +7296,8 @@ static s32 build(void)
 		for (s32 t = 0; hdTarget && t < c.num; t++) {
 			hdTarget[t] = -1.0f;
 		}
+
+		farHit = calloc(c.num > 0 ? c.num : 1, 1);
 
 		// Deal each triangle to the room whose own triangle its middle lies
 		// on. Rooms share the vertices along their borders, so the nearest
@@ -6221,6 +7319,24 @@ static s32 build(void)
 				continue;
 			}
 
+			// A blended face a later blended one covers wholly (markDecals())
+			if (tri->painted) {
+				tri->room = 0;
+				paintedOver++;
+				continue;
+			}
+
+			// Any other face of such a draw is its vertices' colour alone,
+			// with no picture: Statue Park's strings of bulbs (stride 20,
+			// white bulbs and sockets on black wire) are lit white in the
+			// release, and ours read them through one texel of whatever
+			// picture the draw before had bound - a dull grey (F3
+			// 20260928-234109, "these lights are supposed to be lit")
+			if (tri->plain && tri->tex >= 0) {
+				tri->tex = -1;
+				plainUntextured++;
+			}
+
 			for (s32 j = 0; j < 3; j++) {
 				mid[j] = (tri->pos[0][j] + tri->pos[1][j] + tri->pos[2][j]) / 3.0f;
 			}
@@ -6232,16 +7348,112 @@ static s32 build(void)
 				const s32 file = near >= 0 ? filetris.room[near] : nearestRoomBox(mid, n);
 
 				tri->room = file & 0xffff;
+
+				// The grid's cells are hashed: with none of GoldenEye's
+				// triangles within the rings searched, one from a far cell
+				// sharing a bucket can answer (lampLit() below)
+				if (farHit) {
+					farHit[t] = near >= 0 && d > ASSIGN_RINGS * ASSIGN_CELL * ASSIGN_RINGS * ASSIGN_CELL;
+				}
 				tri->nofog = (file >> 16) & 1;
 
 				if (hdTarget) {
 					hdTarget[t] = near >= 0 && gridBright && near < gridBrightCap ? gridBright[near] : -1.0f;
 				}
 				nofogs += tri->nofog;
+
+				// A black face of a plain draw (no UV, no picture of its own:
+				// its vertices' colour is all there is) that paintUnlit() lit:
+				// black again where GoldenEye's own surface under it is dark
+				// too, so the black was paint and not light Rare left out.
+				// Bunker's monitor wall is such a panel, and lit with the
+				// grey of the wall beside it, it drew as a light grey card
+				// round the screens (F3 20261002-063602, 20261002-155304);
+				// Aztec's filler block at the top of a shaft is lit on
+				// GoldenEye's side and keeps its light (F3 20260929-055243)
+				if (tri->unlitplain && near >= 0 && d < UNLIT_GE_NEAR && gridBright && near < gridBrightCap) {
+					if (unlitLogOn()) {
+						sysLogPrintf(LOG_NOTE, "unlitplain ge %.1f d %.1f (%.0f %.0f %.0f)", gridBright[near], d, mid[0], mid[1], mid[2]);
+					}
+
+					if (gridBright[near] < UNLIT_GE_DARK) {
+						tri->argb[0] = tri->argb[1] = tri->argb[2] = 0xff000000;
+						plainBlack++;
+					}
+				}
 			}
 
 			if (tri->room > 0) {
 				listlen[tri->room]++;
+			}
+		}
+
+		// A triangle dealt by a far GoldenEye triangle of a hashed cell's
+		// bucket (farHit) to a room with lamps of its own wears that room's
+		// light: Dam's chasm walls went to room 101, a lamp-lit tunnel on the
+		// dam's top 10000 units away, and darkened in slivers across the
+		// cliff once that lamp was shot out with Mod.GeShotLightsDim on (F3
+		// 20261003-054133). It goes to the room without lamps nearest by box
+		// among those its other triangles already hold, and only from a room
+		// that keeps triangles of its own, so which rooms are Bean's and
+		// which are kept is as it was
+		if (farHit) {
+			s32 *own = calloc(n + 1, sizeof(s32));
+
+			for (s32 t = 0; own && t < c.num; t++) {
+				if (c.tris[t].room > 0 && !farHit[t]) {
+					own[c.tris[t].room]++;
+				}
+			}
+
+			for (s32 t = 0; own && t < c.num; t++) {
+				struct stri *tri = &c.tris[t];
+				f32 mid[3];
+				s32 best = -1;
+				f32 bestd = 0.0f;
+
+				if (!farHit[t] || tri->room <= 0 || g_Rooms[tri->room].numlights == 0 || own[tri->room] == 0) {
+					continue;
+				}
+
+				for (s32 j = 0; j < 3; j++) {
+					mid[j] = (tri->pos[0][j] + tri->pos[1][j] + tri->pos[2][j]) / 3.0f;
+				}
+
+				for (s32 r = 1; r < n; r++) {
+					f32 d = 0.0f;
+
+					if (listlen[r] == 0 || g_Rooms[r].numlights > 0 || !triFitsRoom(tri, r)) {
+						continue;
+					}
+
+					for (s32 k = 0; k < 3; k++) {
+						const f32 e = mid[k] < g_Rooms[r].bbmin[k] ? g_Rooms[r].bbmin[k] - mid[k]
+							: mid[k] > g_Rooms[r].bbmax[k] ? mid[k] - g_Rooms[r].bbmax[k] : 0.0f;
+
+						d += e * e;
+					}
+
+					if (best < 0 || d < bestd) {
+						best = r;
+						bestd = d;
+					}
+				}
+
+				if (best > 0) {
+					listlen[tri->room]--;
+					listlen[best]++;
+					tri->room = best;
+					unlampLit++;
+				}
+			}
+
+			free(own);
+			free(farHit);
+			farHit = NULL;
+
+			if (unlampLit) {
+				sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d triangles dealt by a far cell's triangle to a room with lamps moved to one without", row->bean, unlampLit);
 			}
 		}
 
@@ -6250,10 +7462,15 @@ static s32 build(void)
 		// 35000 nearer) goes to the nearest room of Bean's it fits. Every room
 		// is drawn, so where it is dealt changes nothing on the screen; left
 		// out, it was a hole onto the sky in the mountainside, hidden only
-		// while the fog there was whole
+		// while the fog there was whole.
+		//
+		// A room with lamps of its own is taken only where no room without
+		// any fits: the triangle wears its room's light, and a lamp shot out
+		// there would darken it far from the lamp (as with farHit above)
 		for (s32 t = 0; t < c.num; t++) {
 			struct stri *tri = &c.tris[t];
 			s32 best = -1;
+			s32 bestlit = 0;
 			f32 bestd = 0.0f;
 
 			if (tri->room <= 0 || triFitsRoom(tri, tri->room)) {
@@ -6266,9 +7483,11 @@ static s32 build(void)
 					const f32 dy = tri->pos[0][1] - g_BgRooms[r].pos.y;
 					const f32 dz = tri->pos[0][2] - g_BgRooms[r].pos.z;
 					const f32 d = dx * dx + dy * dy + dz * dz;
+					const s32 lit = g_Rooms[r].numlights > 0;
 
-					if (best < 0 || d < bestd) {
+					if (best < 0 || (lit == bestlit && d < bestd) || (!lit && bestlit)) {
 						best = r;
+						bestlit = lit;
 						bestd = d;
 					}
 				}
@@ -6297,6 +7516,35 @@ static s32 build(void)
 		if (plainDecals) {
 			sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d white decal triangles of draws with no UV or picture left out", row->bean, plainDecals);
 		}
+
+		if (plainUntextured) {
+			sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d triangles of draws with no UV or picture drawn in their vertices' colour", row->bean, plainUntextured);
+		}
+
+		if (plainBlack) {
+			sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d black faces of draws with no UV or picture kept black over GoldenEye's dark surface", row->bean, plainBlack);
+		}
+
+		if (paintedOver) {
+			sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d blended triangles a later blended one paints over left out", row->bean, paintedOver);
+		}
+
+		{
+			const s32 cornersmoved = markDecalCorners(c.tris, c.num);
+
+			sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d corners of decals kept in their mesh moved off their base's rounding", row->bean, cornersmoved);
+		}
+
+		{
+			const s32 keptout = keepOutOfRooms(&c, filerooms, filelens, n, listlen);
+
+			if (keptout) {
+				sysLogPrintf(LOG_NOTE, "gebeanstage: %s: %d triangles standing inside a room of GoldenEye's they are kept out of, left out",
+						row->bean, keptout);
+			}
+		}
+
+		hdPick(&c, "hdpick");
 
 		for (s32 r = 1; r < n; r++) {
 			lists[r] = listlen[r] ? malloc(sizeof(s32) * listlen[r]) : NULL;
@@ -6381,6 +7629,7 @@ static s32 build(void)
 	free(lists);
 	free(listlen);
 	free(c.tris);
+	free(farHit);
 
 	// The backdrop's draw order, once it has everything it takes: its
 	// pictures (takeBackdrop()) and what no room can reach
@@ -7021,6 +8270,70 @@ static int compareBackdropFar(const void *a, const void *b)
 	return da > db ? -1 : da < db ? 1 : *(const s32 *)a - *(const s32 *)b;
 }
 
+/**
+ * A scrolling picture's tiles, moved to where the release's texture matrix has
+ * them at the level's clock: the picture slides under the room's coordinates
+ * as the matrix slides the coordinates over it. The release reads at v + d
+ * in the file's UVs turned up (Maya's, which the export turned over), which
+ * the room has turned over again (writeLeaf()), so both axes move the tile's
+ * origin back by the slide. Whole quarter texels in the size, the rest as the
+ * tile's fraction, as gewater.c moves the reservoir.
+ */
+static void scrollBuild(s32 i, f32 clock)
+{
+	Gfx *gdl = scrollSlots[i].gdl;
+	const s32 t = scrollSlots[i].tex;
+	const s32 w = scrollSlots[i].w, h = scrollSlots[i].h;
+	f32 q[2];
+	s32 whole[2];
+	u32 frac[2];
+
+	for (s32 a = 0; a < 2; a++) {
+		const f32 size = (a == 0 ? w : h) * 4.0f;
+
+		q[a] = fmodf(-texScroll[t][a] * clock * size, size);
+
+		if (q[a] < 0.0f) {
+			q[a] += size;
+		}
+
+		whole[a] = (s32)floorf(q[a]);
+		frac[a] = (u32)((q[a] - whole[a]) * 0.25f * 65536.0f) & 0xffff;
+	}
+
+	gDPSetTileSize(gdl++, 0, whole[0], whole[1], whole[0] + ((w - 1) << 2), whole[1] + ((h - 1) << 2));
+	gDPSetTileSize(gdl++, 1, whole[0], whole[1], whole[0] + ((w - 1) << 2), whole[1] + ((h - 1) << 2));
+	gDPSetTileOffsetEXT(gdl++, 0, frac[0], frac[1]);
+	gDPSetTileOffsetEXT(gdl++, 1, frac[0], frac[1]);
+	gSPEndDisplayList(gdl++);
+}
+
+const Gfx *gebeanStageScrollSlot(u32 record, s32 w, s32 h)
+{
+	const u32 t = record - GEBEANSTAGE_TEXBASE;
+
+	if (!gebeanStageOwnsRecord(record) || t >= GEBEAN_MAXMATS || (texScroll[t][0] == 0.0f && texScroll[t][1] == 0.0f)) {
+		return NULL;
+	}
+
+	for (s32 i = 0; i < numScrollSlots; i++) {
+		if (scrollSlots[i].tex == (s32)t && scrollSlots[i].w == w && scrollSlots[i].h == h) {
+			return scrollSlots[i].gdl;
+		}
+	}
+
+	if (numScrollSlots >= SCROLL_SLOTS) {
+		return NULL;
+	}
+
+	scrollSlots[numScrollSlots].tex = (s32)t;
+	scrollSlots[numScrollSlots].w = w;
+	scrollSlots[numScrollSlots].h = h;
+	scrollBuild(numScrollSlots, g_Vars.lvframe60 / 60.0f);
+
+	return scrollSlots[numScrollSlots++].gdl;
+}
+
 Gfx *gebeanStageRenderBackdrop(Gfx *gdl)
 {
 	const s32 numvtx = numBackdrop * 3;
@@ -7035,6 +8348,14 @@ Gfx *gebeanStageRenderBackdrop(Gfx *gdl)
 	s32 curtex = -2;
 	f32 fm, fo;
 	u8 rgb[3];
+
+	// The clock GoldenEye XBLA's animated pictures are shown by
+	// (xblaTexBindAnimation()): the level's, as the frame is drawn
+	xblaTexSetAnimClock(g_Vars.lvframe60 / 60.0f);
+
+	for (s32 i = 0; i < numScrollSlots; i++) {
+		scrollBuild(i, g_Vars.lvframe60 / 60.0f);
+	}
 
 	if (numBackdrop == 0 || !xblaStageDrawsEveryRoom()
 			|| g_Vars.currentplayer->visionmode == VISIONMODE_XRAY) {
@@ -7235,6 +8556,73 @@ s32 gebeanStageRoomHidden(s32 roomnum)
 	return xblaStageDrawsEveryRoom() && roomHidden && roomnum > 0 && roomnum < numRooms && roomHidden[roomnum];
 }
 
+/**
+ * Whether a prop is left out of this frame's draw: one at a keptOutOf[] room
+ * (inside its box, g_Rooms[], or within KEPTOUT_PROPREACH of it across) that
+ * is not in that room itself, while the camera is in it and the HD rooms are
+ * drawn.
+ */
+/**
+ * Whether a room of the HD level is drawn only when GoldenEye's portal walk
+ * reaches it, rather than with every room: a keptOutOf[] room and the room
+ * whose wall runs through it, which overlap.
+ */
+s32 gebeanStageRoomByPortals(s32 room)
+{
+	if (!row || room <= 0 || room >= numRooms) {
+		return 0;
+	}
+
+	for (s32 i = 0; i < (s32)ARRAYCOUNT(keptOutOf); i++) {
+		if ((keptOutOf[i].room == room || keptOutOf[i].to == room) && strcmp(keptOutOf[i].key, row->key) == 0) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+s32 gebeanStageHidesProp(struct prop *prop)
+{
+	s32 cam;
+
+	if (!prop || !g_Vars.currentplayer || !xblaStageDrawsEveryRoom() || !gebeanStageDrawsEveryRoom()) {
+		return 0;
+	}
+
+	cam = g_Vars.currentplayer->cam_room;
+
+	for (s32 i = 0; i < (s32)ARRAYCOUNT(keptOutOf); i++) {
+		const s32 r = keptOutOf[i].room;
+		s32 inside = 1;
+
+		if (r != cam || r <= 0 || r >= numRooms || strcmp(keptOutOf[i].key, row->key) != 0) {
+			continue;
+		}
+
+		for (s32 k = 0; k < ARRAYCOUNT(prop->rooms) && prop->rooms[k] >= 0; k++) {
+			if (prop->rooms[k] == r) {
+				return 0;
+			}
+		}
+
+		// across, the room's box and a little more: the white post of the
+		// room beside (model 550, pad 139) stands 34 units off the closet's
+		// east wall, and the release's mesh of it stands through that wall
+		for (s32 j = 0; j < 3 && inside; j++) {
+			const f32 reach = j == 1 ? -KEPTOUT_MARGIN : KEPTOUT_PROPREACH;
+
+			inside = prop->pos.f[j] > g_Rooms[r].bbmin[j] - reach && prop->pos.f[j] < g_Rooms[r].bbmax[j] + reach;
+		}
+
+		if (inside) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
 const char *gebeanStageLevelKey(void)
 {
 	return gebeanStageDrawsEveryRoom() ? row->key : NULL;
@@ -7299,6 +8687,12 @@ s32 gebeanStageIsTile(uintptr_t tile)
 	return 0;
 }
 
+static bool shellTexIsWater(s32 t)
+{
+	return t >= 0 && t < NUM_TEXTURES
+		&& (g_Textures[t].surfacetype == SURFACETYPE_SHALLOWWATER || g_Textures[t].surfacetype == SURFACETYPE_DEEPWATER);
+}
+
 /**
  * The texture number of GoldenEye's own triangle a shot at pos in room hit.
  *
@@ -7307,7 +8701,8 @@ s32 gebeanStageIsTile(uintptr_t tile)
  * whatever bytes precede the tile - different from one build to the next
  * (F3 12th pass, W vs L). GoldenEye's room is still here (the shell), so the
  * hit takes the texture of its opaque triangle nearest the point, the one the
- * N64 look's hit reads: -1 (default) when none is within a few units.
+ * N64 look's hit reads (or of a translucent water triangle): -1 (default)
+ * when none is within a few units and no water is over the point.
  */
 s32 gebeanStageHitTexture(s32 room, const struct coord *pos)
 {
@@ -7315,14 +8710,22 @@ s32 gebeanStageHitTexture(s32 room, const struct coord *pos)
 	f32 best = 8.0f * 8.0f;
 	s32 tex = -1;
 
-	if (!built || !shellTri || !shellTex || !shellFirst || !shellCount || room <= 0 || room >= numRooms) {
+	if (!built || !shellTri || !shellTex || !shellFirst || !shellCount || !shellXlu || room <= 0 || room >= numRooms) {
 		return -1;
 	}
 
-	for (s32 i = shellFirst[room]; i < shellFirst[room] + shellCount[room]; i++) {
+	for (s32 i = shellFirst[room]; i < shellFirst[room] + shellCount[room] + shellXlu[room]; i++) {
 		const f32 *v = shellTri + i * 9;
 		f32 e1[3], e2[3], n[3], d[3], q[3];
 		f32 len, dist, u, w, d00, d01, d11, d20, d21, den;
+
+		// A translucent triangle is a decal, a pane or a sign laid over a wall
+		// as often as water, and one in the wall's plane must not give a hit
+		// on the wall its texture (and so its surface and sound): only water
+		// is taken from the translucent ones
+		if (i >= shellFirst[room] + shellCount[room] && !shellTexIsWater(shellTex[i])) {
+			continue;
+		}
 
 		for (s32 k = 0; k < 3; k++) {
 			e1[k] = v[3 + k] - v[k];
@@ -7372,7 +8775,57 @@ s32 gebeanStageHitTexture(s32 room, const struct coord *pos)
 		tex = shellTex[i];
 	}
 
-	return tex;
+	if (tex >= 0) {
+		return tex;
+	}
+
+	// Bean's reservoir is drawn on its own (the stride 36 water) and is no
+	// triangle a shot meets, so a shot went through it to the rock bed under
+	// it and left its hole there, seen through the water (F3
+	// 20260929-213318). GoldenEye's shot stops on its water (HIT_WATER: no
+	// hole). A hit under one of GoldenEye's water triangles of the room
+	// (opaque, as Dam's is, or translucent) was a shot through the water: it
+	// is the water's.
+	for (s32 i = shellFirst[room]; i < shellFirst[room] + shellCount[room] + shellXlu[room]; i++) {
+		const f32 *v = shellTri + i * 9;
+		f32 d1, d2, d3, ny, y;
+		s32 t = shellTex[i];
+
+		if (!shellTexIsWater(t)) {
+			continue;
+		}
+
+		// inside it seen from above
+		d1 = (p[0] - v[3]) * (v[2] - v[5]) - (v[0] - v[3]) * (p[2] - v[5]);
+		d2 = (p[0] - v[6]) * (v[5] - v[8]) - (v[3] - v[6]) * (p[2] - v[8]);
+		d3 = (p[0] - v[0]) * (v[8] - v[2]) - (v[6] - v[0]) * (p[2] - v[2]);
+
+		if ((d1 < 0.0f || d2 < 0.0f || d3 < 0.0f) && (d1 > 0.0f || d2 > 0.0f || d3 > 0.0f)) {
+			continue;
+		}
+
+		// the water's height there, over the hit
+		{
+			const f32 e1[3] = { v[3] - v[0], v[4] - v[1], v[5] - v[2] };
+			const f32 e2[3] = { v[6] - v[0], v[7] - v[1], v[8] - v[2] };
+			const f32 nx = e1[1] * e2[2] - e1[2] * e2[1];
+			const f32 nz = e1[0] * e2[1] - e1[1] * e2[0];
+
+			ny = e1[2] * e2[0] - e1[0] * e2[2];
+
+			if (fabsf(ny) < 1e-6f) {
+				continue;
+			}
+
+			y = v[1] - (nx * (p[0] - v[0]) + nz * (p[2] - v[2])) / ny;
+		}
+
+		if (y > p[1] && y - p[1] < 2000.0f) {
+			return t;
+		}
+	}
+
+	return -1;
 }
 
 void gebeanStageTrace(FILE *f)
@@ -7396,6 +8849,8 @@ void gebeanStageLevelReset(void) { }
 s32 gebeanStageDrawsEveryRoom(void) { return 0; }
 s32 gebeanStageRoomHidden(s32 roomnum) { return 0; }
 s32 gebeanStageRoomServed(s32 roomnum) { return 0; }
+s32 gebeanStageHidesProp(struct prop *prop) { return 0; }
+s32 gebeanStageRoomByPortals(s32 room) { return 0; }
 void gebeanStageTickCamera(s32 authored) { }
 s32 gebeanStageCullsBackFaces(void) { return 0; }
 const char *gebeanStageLevelKey(void) { return NULL; }
@@ -7407,6 +8862,7 @@ s32 gebeanStageIsTile(uintptr_t tile) { return 0; }
 s32 gebeanStageHitTexture(s32 room, const struct coord *pos) { return -1; }
 void gebeanStageTrace(FILE *f) { }
 Gfx *gebeanStageRenderBackdrop(Gfx *gdl) { return gdl; }
+const Gfx *gebeanStageScrollSlot(u32 record, s32 w, s32 h) { return NULL; }
 void gebeanStageTickFar(void) { }
 s32 gebeanStageFarOwn(f32 *far) { return 0; }
 s32 gebeanStageFogFactor(s32 min, s32 max, f32 *fm, f32 *fo) { return 0; }

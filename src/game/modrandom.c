@@ -36,6 +36,14 @@
 extern void sysLogPrintf(s32 level, const char *fmt, ...);
 #endif
 
+// The weapon rows a roll draws from: not a ROM hack's own pistols, added
+// after GoldenEye's guns, so a seed deals what it dealt before them
+#ifdef MPWEAPON_GE_EXTRA1
+#define MODRANDOM_MPWEAPONS MPWEAPON_GE_EXTRA1
+#else
+#define MODRANDOM_MPWEAPONS NUM_MPWEAPONS
+#endif
+
 /**
  * Randomizer: a mission dealt again from its own pieces.
  *
@@ -132,6 +140,13 @@ extern void sysLogPrintf(s32 level, const char *fmt, ...);
  * shoots: a grenade, a mine or a knife in a guard's hand is held and aimed
  * like a gun and never thrown (user, 2026-09-28). Stages whose guards drew a
  * throwable under v4 draw again, in the same stream.
+ *
+ * Version 6 never asks for a weapon the player cannot pick up. Villa keeps
+ * four tagged CMP150s on pad 0x19a for its script, uncollectable and
+ * invisible, and a "Recover the ..." dealt on one of them was a mission that
+ * could not be finished (F3 20261002-224232). And a run's landing on the Duel
+ * keeps out of, and a door away from, the three rooms whose doorways show the
+ * sky there (modrun.c, modRunRoomIsBare(); F3 20261002-082816).
  */
 #define MODRANDOM_VERSION MODRANDOM_VERSION_DEFAULT
 
@@ -818,7 +833,7 @@ static void modRandomRollWeapons(struct modrandomlists *lists)
 		modRandomOpen(&rng, MODRANDOM_STREAM_WEAPON, i);
 
 		for (tries = 0; tries < 16; tries++) {
-			struct mpweapon *mpweapon = &g_MpWeapons[1 + modRandomBelow(&rng, NUM_MPWEAPONS - 1)];
+			struct mpweapon *mpweapon = &g_MpWeapons[1 + modRandomBelow(&rng, MODRANDOM_MPWEAPONS - 1)];
 
 			// MPFEATURE_NEVER is a row switched off rather than a locked one:
 			// GoldenEye's 25 guns sit in the table whether or not they are
@@ -873,7 +888,7 @@ static void modRandomRollCrates(struct modrandomlists *lists)
 		modRandomOpen(&rng, MODRANDOM_STREAM_CRATE, i);
 
 		for (tries = 0; tries < 8; tries++) {
-			struct mpweapon *mpweapon = &g_MpWeapons[1 + modRandomBelow(&rng, NUM_MPWEAPONS - 1)];
+			struct mpweapon *mpweapon = &g_MpWeapons[1 + modRandomBelow(&rng, MODRANDOM_MPWEAPONS - 1)];
 
 			if (mpweapon->priammotype > 0) {
 				crate->ammotype = mpweapon->priammotype;
@@ -1353,7 +1368,7 @@ static void modRandomRollIntroWeapons(void)
 			struct mpweapon *mpweapon;
 
 			modRandomOpen(&rng, MODRANDOM_STREAM_INTROGUN, index++);
-			mpweapon = &g_MpWeapons[1 + modRandomBelow(&rng, NUM_MPWEAPONS - 1)];
+			mpweapon = &g_MpWeapons[1 + modRandomBelow(&rng, MODRANDOM_MPWEAPONS - 1)];
 
 			// A switched-off row is not a gun this game has (see above)
 			if (mpweapon->weaponnum != WEAPON_NONE && mpweapon->unlockfeature != MPFEATURE_NEVER
@@ -1467,6 +1482,12 @@ static bool modRandomDealObjective(struct modrandomlists *lists, u8 *reached, s3
 		struct weapon *weapondef = weaponFindById(weapon->weaponnum);
 		char *name = weapondef ? langGet(weapondef->name) : NULL;
 
+		// A weapon row with no name of its own reads "Recover the " - say
+		// what it is instead of nothing.
+		if (name && (name[0] == '\0' || name[0] == '\n')) {
+			name = NULL;
+		}
+
 		modRandomWriteObjective(cmd, slot, OBJECTIVETYPE_COLLECTOBJ,
 				modRandomTagNumOf(lists, &weapon->base));
 
@@ -1575,6 +1596,14 @@ static void modRandomGenerateObjectives(struct modrandomlists *lists, u8 *reache
 		s32 room;
 
 		if (!modRandomObjIsFreeStanding(&weapon->base)) {
+			continue;
+		}
+
+		// A weapon the stage keeps out of reach for its script is not one to
+		// send the player for: objTestForPickup() refuses an uncollectable
+		// one, and an invisible one is not there to find.
+		if (g_ModRandomVersion >= 6
+				&& ((weapon->base.flags & OBJFLAG_UNCOLLECTABLE) || (weapon->base.flags2 & OBJFLAG2_INVISIBLE))) {
 			continue;
 		}
 

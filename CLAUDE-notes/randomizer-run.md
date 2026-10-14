@@ -1,5 +1,13 @@
 # The Randomizer's run: a room at a time, across every map
 
+## Digest (moved from CLAUDE.md, 2026-09-30)
+
+The entries CLAUDE.md carried for this note, verbatim. The sections below are
+the long form.
+
+- **The Randomizer's run: a room at a time across every map** — [randomizer-run.md](CLAUDE-notes/randomizer-run.md): every door out of the landing room is a portal and a portal is a whole stage load (the co-operative Deep Sea chain is the pattern, and `mainChangeToStage()` takes effect at the *end* of the frame); a mission's opening cutscene held the first landing off for 45 seconds; the kit goes back through the spawn (inventory inside `playerStartNewLife()`, hands from `playerSpawnWeapons()`, health after `playerSpawn()`) and never from the tick, which left a hand drawing a model nothing had loaded; the door test is "not in `prop->rooms[]`", not "`rooms[0]` changed"; a death must not end the stage; no objective type fits one room, so the run owns the top bit of `g_StageFlags`; the room is sealed until that objective is done and the doorway is a wall from the inside, and what is sealed is the landing room **plus the rooms touching it** (`modRunBuildZone()`, one door deep, built at the landing and dropped back to the one room when it would swallow a whole small map) since a single room is sometimes a stairwell (a refused move must leave a collision behind it, or the push reads the last real one and a door damages the player through a wall that is not there), the barrier's test is the portal's own so the two cannot disagree, and a room sealed too long is dealt a clock; landings are waypoints in rooms that have a portal; guards are modalarm.c with the body overridden, and a body drawn from the whole game has to be spawned the way a setup spawns one (`bodyInitSpecialChr()`: the robot's fireslots, or the beam render dereferences them); `--random-run` and `--run-autohop N` drive it headlessly; the landing pad is checked for a floor before it is dealt, a sealed room's guards are dealt **into the zone** (the alarm's eight metre minimum is most of one, so every guard used to start outside it and some could never walk in) and a kill objective nothing has reached for forty seconds is re-dealt as a clock, and the doors out of the zone lose their key flags when the seal lifts; a room won is a room to rest in since 2026-09-12 - full health and shield, the hostiles in the zone killed and no more dealt until the next landing (modRunGetGuardCount() answering 0), and the guards halved to six up and six per ten seconds, both halves because the cap alone is answered by the rate; chrDamage() takes neither a NULL vector nor a NULL gset; a landing on a Stage Loader map froze the game outright, because a mod stage row carried the template's solo setup and Skedar's pad 99 over a 98 pad map unpacked room -256, which the collision walk indexed g_TileRooms with and then walked forever on a geo type with no length; and the room's objective is the whole objective list, so a stage script's "all objectives complete" ended the mission on it and Next Mission loaded a stock mission dealt as a landing - a run's map never ends by its script (`aiIfAllObjectivesComplete`, `aiEndLevel`), the endscreen ends the run (`mainEndStage()`), and a stage the run did not ask for stops it before the roll (`modRunCheckLoad()`)
+
+
 `src/game/modrun.c`, and the page it hangs off in `port/src/randommenu.c`. The
 mode drops the player into a random room of a random map, deals that room an
 objective, and treats **every door out of the room as a portal**: walking
@@ -522,6 +530,32 @@ the waypoint array at `padnum < 0`, the group array at `neighbours == NULL` -
 so a group with no neighbours needs a pointer to a lone `-1`, not NULL.
 Nothing random goes into the graph, so a seed's landing stays put.
 
+**A match's simulants get the floors too** (F3 20261001-145625, "sims don't
+move away from spawn points", GE Plus Complex): the builder also runs for a
+Combat Simulator match with simulants, and there the spawn points alone made
+Complex 49 waypoints in 24 pieces with 21 of 44 rooms holding none in or
+beside them - `waypointFindClosestToPos()` answered nothing, routes failed,
+and the sims stood (98-100% of one-second samples still on Complex and
+Cradle). In a match only (`wide`; runs are unchanged) the builder now:
+`modAlarmSampleFloors()` searches every room on a 50-unit grid (odd line
+count, so a corridor's middle is on it) top down for its own non-DIE floors
+that are tiles of GoldenEye's graph (`geStanFloorAt()`), keeps places 200
+apart per room (1.4x further, up to 4 tries, when 1500 is not enough -
+Statue Park), clear by 50 then by 20 (narrow corridors; Complex's are ~100
+wide), tested with a body's knee-to-head range (a -200 `ymin` puts
+`geStanLimit()` on the storey under and every raised wall counts);
+`modAlarmAppendPads()` appends them as real pads (copied pads file + own
+`g_PadOffsets`, 16-byte records, offsets must stay < 64K); pads floating more
+than 100 over their floor (Complex's walkway ones, 350 up) are left out as
+waypoints (a sim sent there never arrives); links among the floors are
+1000 at most, cross-room candidates do not count toward the ten and need no
+portal between the rooms (Cradle's platforms have none), and a link is made
+where either the cylinder walk or GoldenEye's tile walk (`geStanLinks()`)
+passes - the cylinder walk alone cut Cradle's platform from its walkways.
+Complex: 286 waypoints, 1 piece of 281, 6% of one-second samples still in a
+stock PD Complex match vs 9-14% here, 98% before; Cradle 100% -> 5%. Build
+times 0.1-0.7 s, Statue Park 1.1 s.
+
 A stage that still has no waypoints is never dealt a kill objective
 (`modRunDealObjective()`); the draw count is unchanged.
 
@@ -981,3 +1015,81 @@ this file.
 **Do not `pkill -f` a pattern that matches your own command line** — the shell
 running the test matches it too. `for p in $(pgrep -x pd.x86_64); do kill -9
 $p; done`.
+
+## A stage's opening moved the player off the landing: Defection
+
+F3 20260930-050837 / -054956 / -055246: every Defection landing stood the
+player at the stock rooftop start (room 2) while the log, the seal and the
+HUD had the dealt room (the HUD's "room N" is the hop count, as ever).
+Defection's first new life happens at level frame 3, *before* its intro
+cutscene starts, so the landing was taken; then the run skipped the intro and
+the skip path (`func0422_intro_042d`, setupame.c) plays
+`ANIM_CUT_AME_INTRO_JO_03` at its last frame on CHR_BOND, which poses Jo at
+the end of her rope on the roof and moves the player there. Not a pass 23
+regression: it reproduces without the XBLA rooms and has nothing to do with the
+dark-room test. The landing now remembers where `modRunTakeSpawn()` stood the
+player, and once the cutscene is over a player more than 200 units from it
+lands again (twice at most), logged as `run: stage 0x30 moved the player off
+the landing to room 2; landing again on pad N`. A 106-hop chain
+(`--random-run --run-autohop 200`) re-landed on Defection only, and every hop
+landed in its dealt room.
+
+## A map four missions share is furnished by one of them: Area 51's hangar
+
+F3 20261001-050231 / -050514 / -051654 (pass 28). Area 51's bg is
+Infiltration's, Rescue's, Escape's and Maian SOS's, but **each mission's setup
+only furnishes the part it plays in**: the hangar's two lifts (rooms 33/34, the
+cars, their rollertrain doors at both ends, the call buttons, the hangar floor's
+crates and monitors in room 2) exist in Infiltration's setup alone. A run on
+Rescue or Maian SOS landed beside open, empty shafts. Reading which rooms each
+setup puts objects in (a dump of every door/basic/lift prop's `rooms[0]` per
+stage) gives the lists in `modRunRoomIsBare()`: rooms where Infiltration has
+objects and the stage none - Rescue 2 9 10 19 33 34 65 73 75 77 79 80, Maian
+SOS 2 9 10 19 33 34 (it keeps the shafts' bottom doors). No landing in or one
+door from a bare room, and `modRunWalkRooms()` is handed it as `skip` for the
+zone and the ring, so a bare room is a way out rather than somewhere sealed in.
+Guarded by the stock room count (271) against a mod's own geometry.
+
+The outside of the same map: Infiltration and Escape draw the star field and
+the sky band (`starsReset()` in lv.c, the `text0f153628()` block in bg.c);
+Rescue and Maian SOS draw the far cliffs (room 15) over plain black, because
+their missions never go out. `modRunWantsStars()` adds them during a run only,
+so the missions and their random stream are untouched.
+
+## The doors inside the zone, and what feeds a kill objective's starvation
+
+F3 20261001-051509, Villa room 149 (Carrington's interrogation room): both its
+doors carry key flags and both lead to rooms *inside* the zone, so
+`modRunOpenExits()` (exits only) never touched them - the player was boxed in
+one fifth of the zone. The landing now calls `modRunOpenDoors(ring > 0, true)`:
+every keyed door whose portal has both rooms in the zone loses its keys, the
+exits as before.
+
+The same report showed why the starvation clock (`MODRUN_STARVE_SECS`) never
+came: it was fed by **any** living hostile in the zone, and Villa's own guard
+stood idle in room 148 behind those doors for good. It is now fed by a kill or
+by `modRunEnemyEngaged()` - a zone hostile on screen (`PROPFLAG_ONTHISSCREEN...`
+/ `ONANYSCREEN...`) or standing in the player's own room.
+
+`--run-room N` (with `--run-stage`) makes the first landing one in room N, when
+a waypoint there passes the landing tests; a room that fails them falls back to
+"the stage starts the player its own way".
+
+## Laser grids in the zone, and the Duel's doorways onto the sky (pass 29)
+
+F3 20261002-085425, Investigation room 75: a corridor with a laser grid at
+either end (pads 0x1f0-0x1fe, `DOORTYPE_LASER`, `OBJFLAG_CANNOT_ACTIVATE`,
+in no portal, so the zone walk went straight through them). The seal lifted
+and every way out burned. The landing's `modRunOpenDoors(..., inside)` now
+opens every laser door whose prop stands in the zone and sets
+`OBJFLAG_DOOR_KEEPOPEN` *after* the request (`doorStartOpen()` clears it, and
+the grid's own autoclose is 240 ticks). Log: `run: switched off 15 laser
+grid(s) in the zone of room 75 on stage 0x33`.
+
+F3 20261002-082816, Duel room 116: the Duel shares the Institute's map, and the
+Institute stands doors that never open over holes in its walls (no portal, no
+room behind). The Duel's setup has two doors (rooms 20/22). Every portal-less
+Institute door stood in front of on the Duel: rooms 70, 114 and 116 show the
+sky. They are `g_ModRunBareDuel` in `modRunRoomIsBare()` (room count 141,
+generator v6). `--run-stage 0x4f --run-room 115/116/117` now falls back to the
+stock start.

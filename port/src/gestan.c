@@ -8,10 +8,12 @@
 #include "bss.h"
 #include "data.h"
 #include "modloader.h"
+#include "geroom.h"
 #include "romdata.h"
 #include "fs.h"
 #include "system.h"
 #include "gestan.h"
+#include "game/prop.h"
 
 #ifndef PLATFORM_N64
 
@@ -26,7 +28,9 @@
 #define GESTAN_RISE      60.0f   // how far over a body's foot its own floor may be: two of a stair's steps
 
 struct stanpoint {
-	s16 x, y, z;
+	// 32 bits: a GoldenEye ROM hack's level can be wider than 16 hold
+	// (Goldfinger's Alpine Highway runs 233,000 units across, GST2)
+	s32 x, y, z;
 	s16 across;      // the tile across the edge to the next point, -1 a wall, -2 nothing
 	u8 climbwall;    // linked, and a wall raised on it all the same: the link climbs more than a step
 };
@@ -36,7 +40,7 @@ struct stantile {
 	u8 special;
 	u8 npts;
 	s32 first;       // its first point in `points`
-	s16 xmin, xmax, zmin, zmax;
+	s32 xmin, xmax, zmin, zmax;
 };
 
 struct stanwall {
@@ -80,6 +84,11 @@ static s32 stanBe16(const u8 *p)
 	return (s16)((p[0] << 8) | p[1]);
 }
 
+static u32 stanBe32(const u8 *p)
+{
+	return ((u32)p[0] << 24) | ((u32)p[1] << 16) | ((u32)p[2] << 8) | p[3];
+}
+
 static void stanFree(void)
 {
 	free(g_Stan.tiles);
@@ -104,7 +113,11 @@ static void stanFree(void)
 static u8 *stanLoadFile(u32 *len)
 {
 	const char *dir = modloaderGetStageModDir(g_Vars.stagenum);
-	const char *tilesname = romdataFileGetName(g_Stages[g_StageIndex].tilefileid);
+	// the graph beside the tiles the stage loaded (tilesReset()): the
+	// Community Edition's in the HD look where it mends one
+	const s32 tilefileid = geRoomCeData()
+		? modloaderGetStageCeFile(g_Vars.stagenum, g_Stages[g_StageIndex].tilefileid) : g_Stages[g_StageIndex].tilefileid;
+	const char *tilesname = romdataFileGetName(tilefileid);
 	char name[128];
 	char path[FS_MAXPATH + 1];
 	char *ending;
@@ -135,7 +148,7 @@ static s32 stanCellOf(f32 v, f32 origin, s32 count)
 
 static void stanBuildGrid(void)
 {
-	s32 xmin = 32767, xmax = -32768, zmin = 32767, zmax = -32768;
+	s32 xmin = 0x7fffffff, xmax = -0x7fffffff, zmin = 0x7fffffff, zmax = -0x7fffffff;
 	s32 *fill;
 	s32 total = 0;
 
@@ -219,6 +232,42 @@ static void stanBuildGrid(void)
  * shape means the two files are not one conversion's, and the graph is not
  * used.
  */
+/**
+ * A tile of the converted file: 16-bit vertices (GEOTYPE_TILE_I), or floats
+ * (GEOTYPE_TILE_F) where the level is too wide for 16 (a ROM hack's, GST2).
+ * Whether it has `npts` vertices (-1: any) and its first is the point's x
+ * and z, and the one after it.
+ */
+static bool stanGeoStartsAt(const struct geo *geo, s32 npts, const struct stanpoint *p)
+{
+	if (npts >= 0 && geo->numvertices != npts) {
+		return false;
+	}
+
+	if (geo->type == GEOTYPE_TILE_I) {
+		const struct geotilei *tile = (const struct geotilei *)geo;
+
+		return tile->vertices[0][0] == p->x && tile->vertices[0][2] == p->z;
+	}
+
+	if (geo->type == GEOTYPE_TILE_F) {
+		const struct geotilef *tile = (const struct geotilef *)geo;
+
+		return (s32)floorf(tile->vertices[0].x + 0.5f) == p->x && (s32)floorf(tile->vertices[0].z + 0.5f) == p->z;
+	}
+
+	return false;
+}
+
+static const struct geo *stanGeoNext(const struct geo *geo)
+{
+	if (geo->type == GEOTYPE_TILE_F) {
+		return (const struct geo *)((uintptr_t)geo + geo->numvertices * 12 + 0x10);
+	}
+
+	return (const struct geo *)((uintptr_t)geo + geo->numvertices * 6 + 0xe);
+}
+
 static bool stanMatchWalls(void)
 {
 	s32 numwalls = 0;
@@ -244,31 +293,24 @@ static bool stanMatchWalls(void)
 
 		for (s32 i = 0; i < g_Stan.numtiles; i++) {
 			const struct stantile *t = &g_Stan.tiles[i];
-			const struct geotilei *floor = (const struct geotilei *)geo;
 
 			if (t->room != room) {
 				continue;
 			}
 
-			if (geo >= end || geo->type != GEOTYPE_TILE_I || floor->header.numvertices != t->npts
-					|| floor->vertices[0][0] != g_Stan.points[t->first].x
-					|| floor->vertices[0][2] != g_Stan.points[t->first].z) {
+			if (geo >= end || !stanGeoStartsAt(geo, t->npts, &g_Stan.points[t->first])) {
 				sysLogPrintf(LOG_WARNING, "gestan: room %d's geometry is not tile %d's: the graph is not this conversion's", room, i);
 				return false;
 			}
 
-			geo = (const struct geo *)((uintptr_t)geo + floor->header.numvertices * 6 + 0xe);
+			geo = stanGeoNext(geo);
 
 			for (s32 k = 0; k < t->npts; k++) {
-				const struct geotilei *wall = (const struct geotilei *)geo;
-
 				if (g_Stan.points[t->first + k].across != GESTAN_UNLINKED && !g_Stan.points[t->first + k].climbwall) {
 					continue;
 				}
 
-				if (geo >= end || geo->type != GEOTYPE_TILE_I || at >= numwalls
-						|| wall->vertices[0][0] != g_Stan.points[t->first + k].x
-						|| wall->vertices[0][2] != g_Stan.points[t->first + k].z) {
+				if (geo >= end || at >= numwalls || !stanGeoStartsAt(geo, -1, &g_Stan.points[t->first + k])) {
 					sysLogPrintf(LOG_WARNING, "gestan: room %d has no wall for tile %d's edge %d: the graph is not this conversion's", room, i, k);
 					return false;
 				}
@@ -277,7 +319,7 @@ static bool stanMatchWalls(void)
 				g_Stan.walls[at].tile = i;
 				g_Stan.walls[at].point = t->first + k;
 				at++;
-				geo = (const struct geo *)((uintptr_t)geo + wall->header.numvertices * 6 + 0xe);
+				geo = stanGeoNext(geo);
 			}
 		}
 	}
@@ -303,6 +345,8 @@ static void stanBuild(void)
 	s32 numtiles;
 	s32 numpoints = 0;
 	u32 o;
+	bool wide;
+	u32 ptlen;
 
 	stanFree();
 	g_Stan.stagenum = g_Vars.stagenum;
@@ -314,19 +358,23 @@ static void stanBuild(void)
 
 	d = stanLoadFile(&len);
 
-	if (!d || len < 8 || memcmp(d, "GST1", 4)) {
+	if (!d || len < 8 || (memcmp(d, "GST1", 4) && memcmp(d, "GST2", 4))) {
 		sysLogPrintf(LOG_NOTE, "gestan: stage 0x%02x has no tile graph; its walls are all there for everybody", g_Vars.stagenum);
 		sysMemFree(d);
 		return;
 	}
 
 	numtiles = (s32)(((u32)d[4] << 24) | ((u32)d[5] << 16) | ((u32)d[6] << 8) | d[7]);
+	// GST2's points are 32 bits a coordinate (a level too wide for 16) and a
+	// 16-bit link, padded to 16 bytes; GST1's 16 bits a coordinate
+	wide = memcmp(d, "GST2", 4) == 0;
+	ptlen = wide ? 16 : 8;
 
 	for (o = 8; numtiles > 0 && o + 4 <= len; ) {
 		const s32 n = d[o + 3];
 
 		numpoints += n;
-		o += 4 + 8 * (u32)n;
+		o += 4 + ptlen * (u32)n;
 	}
 
 	if (numtiles <= 0 || o > len) {
@@ -355,17 +403,24 @@ static void stanBuild(void)
 		t->special = d[o + 2];
 		t->npts = d[o + 3];
 		t->first = numpoints;
-		t->xmin = t->zmin = 32767;
-		t->xmax = t->zmax = -32768;
+		t->xmin = t->zmin = 0x7fffffff;
+		t->xmax = t->zmax = -0x7fffffff;
 		o += 4;
 
-		for (s32 k = 0; k < t->npts; k++, o += 8) {
+		for (s32 k = 0; k < t->npts; k++, o += ptlen) {
 			struct stanpoint *p = &g_Stan.points[numpoints++];
 
-			p->x = (s16)stanBe16(d + o);
-			p->y = (s16)stanBe16(d + o + 2);
-			p->z = (s16)stanBe16(d + o + 4);
-			p->across = (s16)stanBe16(d + o + 6);
+			if (wide) {
+				p->x = (s32)stanBe32(d + o);
+				p->y = (s32)stanBe32(d + o + 4);
+				p->z = (s32)stanBe32(d + o + 8);
+				p->across = (s16)stanBe16(d + o + 12);
+			} else {
+				p->x = (s16)stanBe16(d + o);
+				p->y = (s16)stanBe16(d + o + 2);
+				p->z = (s16)stanBe16(d + o + 4);
+				p->across = (s16)stanBe16(d + o + 6);
+			}
 			p->climbwall = false;
 
 			// a link that climbs (GESTAN_CLIMBWALL): the conversion raised a
@@ -709,6 +764,12 @@ f32 geStanLimit(struct coord *pos, bool checkvertical, f32 ymin)
 	return checkvertical ? pos->y + ymin + 10.0f : pos->y - 60.0f;
 }
 
+static s32 stanMoverTile(f32 x, f32 z, f32 limit, f32 rise);
+
+// The player whose own move the walls are being asked about (geStanSetMover()),
+// or -1: a cylinder test for anyone else finds its tile by height alone
+static s32 g_StanMover = -1;
+
 /**
  * Which of the conversion's walls `geo` is, with the tiles a body at `pos`
  * reaches worked out (stanFlood()), or -1 for a wall that is not one of them.
@@ -752,7 +813,11 @@ static s32 stanWallFind(struct geo *geo, struct coord *pos, struct coord *to, f3
 
 	if (pos->x != g_Stan.lastx || pos->z != g_Stan.lastz || to->x != g_Stan.lastx2 || to->z != g_Stan.lastz2
 			|| limit != g_Stan.lastlimit || rise != g_Stan.lastrise || reach != g_Stan.lastreach) {
-		const s32 tile = stanTileUnder(pos->x, pos->z, limit, rise);
+		s32 tile = g_StanMover >= 0 ? stanMoverTile(pos->x, pos->z, limit, rise) : -1;
+
+		if (tile < 0) {
+			tile = stanTileUnder(pos->x, pos->z, limit, rise);
+		}
 
 		g_Stan.lastx = pos->x;
 		g_Stan.lastz = pos->z;
@@ -1061,6 +1126,96 @@ f32 geStanClimbFloor(struct coord *pos, struct coord *to, f32 ground, f32 radius
 }
 
 /**
+ * Whether a body's circle at `pos` still touches a floor at height `y` (a tile
+ * with an area in plan within 3 of it under the middle, or at the nearest
+ * point of an edge within the radius). bwalkUpdateVertical() holds a player lifted by
+ * geStanClimbFloor() on that floor while it does: he is lifted as his circle
+ * meets the floor across, with his middle still over the ground he climbed
+ * from, and Perfect Dark's ground is the floor under the middle - he fell
+ * back down the climb wall while walking on to it, stopped against it, and
+ * was lifted again (Streets' windows, F3 report 20260930-235737).
+ */
+bool geStanTouchesFloor(struct coord *pos, f32 radius, f32 y)
+{
+	s32 cx0, cx1, cz0, cz1;
+
+	if (g_Stan.stagenum != g_Vars.stagenum || g_Stan.tiledata != g_TileFileData.u8) {
+		stanBuild();
+	}
+
+	if (!g_Stan.active) {
+		return false;
+	}
+
+	cx0 = stanCellOf(pos->x - radius, g_Stan.gridx, g_Stan.gridw);
+	cx1 = stanCellOf(pos->x + radius, g_Stan.gridx, g_Stan.gridw);
+	cz0 = stanCellOf(pos->z - radius, g_Stan.gridz, g_Stan.gridh);
+	cz1 = stanCellOf(pos->z + radius, g_Stan.gridz, g_Stan.gridh);
+
+	for (s32 cz = cz0; cz <= cz1; cz++) {
+		for (s32 cx = cx0; cx <= cx1; cx++) {
+			const s32 c = cz * g_Stan.gridw + cx;
+
+			for (s32 k = g_Stan.cellstart[c]; k < g_Stan.cellstart[c + 1]; k++) {
+				const s32 i = g_Stan.celltiles[k];
+				const struct stantile *t = &g_Stan.tiles[i];
+				const struct stanpoint *p = &g_Stan.points[t->first];
+				s32 ymin = 0x7fff, ymax = -0x8000;
+				bool touches;
+
+				if (stanTileUpright(i)) {
+					continue;
+				}
+
+				for (s32 a = 0; a < t->npts; a++) {
+					if (p[a].y < ymin) ymin = p[a].y;
+					if (p[a].y > ymax) ymax = p[a].y;
+				}
+
+				if (y < ymin - 3.0f || y > ymax + 3.0f) {
+					continue;
+				}
+
+				// and at that height where it is touched: a tile that slopes
+				// spans every height between its ends, and Egyptian's tunnels
+				// are each one ramp from a lip 90 over the floor down 734.
+				// Asked by the tile's span, the lip's height held the player
+				// up the whole way down, walking out over the tunnel's roof
+				// (F3 report 20261002-211321)
+				if (stanHolds(t, pos->x, pos->z)) {
+					const f32 h = stanSurface(t, pos->x, pos->z);
+
+					touches = h >= y - 3.0f && h <= y + 3.0f;
+				} else {
+					touches = false;
+				}
+
+				for (s32 a = 0; a < t->npts && !touches; a++) {
+					const struct stanpoint *e0 = &p[a], *e1 = &p[(a + 1) % t->npts];
+
+					if (stanEdgeDistSq(e0, e1, pos->x, pos->z) <= radius * radius) {
+						const f32 ex = (f32)(e1->x - e0->x), ez = (f32)(e1->z - e0->z);
+						const f32 len = ex * ex + ez * ez;
+						f32 f = len > 0.0f ? ((pos->x - e0->x) * ex + (pos->z - e0->z) * ez) / len : 0.0f;
+						f32 h;
+
+						f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+						h = e0->y + (e1->y - e0->y) * f;
+						touches = h >= y - 3.0f && h <= y + 3.0f;
+					}
+				}
+
+				if (touches) {
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+/**
  * Whether GoldenEye would hold a body down here: a tile's special value 1 is
  * g_StanTileSpecialFlags[]'s STANTILEFLAG_FORCECROUCH - Facility's vents, the
  * crawl spaces of seven levels more - and bondview's move sets autocrouchpos
@@ -1237,12 +1392,90 @@ static bool stanTileSheer(s32 i)
 }
 
 static s32 g_StanPlayerTile[MAX_PLAYERS] = { -1, -1, -1, -1 };
+// and the tile the move it walked started on, under the player as they stand
+static s32 g_StanPlayerFromTile[MAX_PLAYERS] = { -1, -1, -1, -1 };
 static s32 g_StanPlayerTileStage = -1;
 
 void geStanForgetPlayerTile(s32 playernum)
 {
 	if (playernum >= 0 && playernum < MAX_PLAYERS) {
 		g_StanPlayerTile[playernum] = -1;
+		g_StanPlayerFromTile[playernum] = -1;
+	}
+}
+
+/**
+ * The tile a player's own move is tested on, as GoldenEye has it: the one its
+ * walk from Bond's tile through the links reaches (bondviewTryMoveToStan():
+ * stanTestLineUnobstructed() from current_tile_ptr, then stanTestVolume() from
+ * where that ended), not the one whose height is nearest the foot. Cartel's
+ * first silo (Goldfinger 64) has a sliver of floor along the top of its wall,
+ * thirty over the ground and linked to nothing, lying across the doorway in
+ * plan; found by height it was the floor under the player in the doorway,
+ * every wall of its own stood round him, and the mission could not be finished
+ * (F3 20261003-051322). geStanFloorAhead() leaves the walk's tile here for the
+ * move it is about to make. -1 where the player has none that holds x/z, at a
+ * height a foot could stand on, and the caller finds one by height.
+ */
+static s32 stanMoverTileFrom(s32 tile, f32 x, f32 z, f32 limit, f32 rise)
+{
+	const struct coord *from = &g_Vars.players[g_StanMover]->prop->pos;
+	f32 y;
+
+	if (tile < 0 || tile >= g_Stan.numtiles || stanTileUpright(tile)) {
+		return -1;
+	}
+
+	if (!stanHolds(&g_Stan.tiles[tile], x, z)) {
+		// a test between where the player stands and where they go: walked
+		// on from their tile, as GoldenEye's line test goes
+		if (!stanHolds(&g_Stan.tiles[tile], from->x, from->z)) {
+			return -1;
+		}
+
+		tile = stanWalkLine(tile, from->x, from->z, x, z, false);
+
+		if (!stanHolds(&g_Stan.tiles[tile], x, z) || stanTileUpright(tile)) {
+			return -1;
+		}
+	}
+
+	// a floor the body's foot is on: not one over its reach, nor a storey
+	// under it (a player who walked off a ledge where no wall was raised)
+	y = stanSurface(&g_Stan.tiles[tile], x, z);
+
+	if (y > limit + rise || y < limit - 160.0f) {
+		return -1;
+	}
+
+	return tile;
+}
+
+static s32 stanMoverTile(f32 x, f32 z, f32 limit, f32 rise)
+{
+	const s32 m = g_StanMover;
+	s32 tile;
+
+	if (m < 0 || m >= MAX_PLAYERS || g_StanPlayerTileStage != g_Stan.stagenum || !g_Vars.players[m]) {
+		return -1;
+	}
+
+	// where the move about to be made ends, then where it began (a test of
+	// the player standing where they are: getting up, a step up)
+	tile = stanMoverTileFrom(g_StanPlayerTile[m], x, z, limit, rise);
+
+	if (tile < 0) {
+		tile = stanMoverTileFrom(g_StanPlayerFromTile[m], x, z, limit, rise);
+	}
+
+	return tile;
+}
+
+void geStanSetMover(s32 playernum)
+{
+	if (g_StanMover != playernum) {
+		g_StanMover = playernum;
+		g_Stan.lastreach = -1.0f;
 	}
 }
 
@@ -1261,6 +1494,7 @@ bool geStanFloorAhead(s32 playernum, struct coord *pos, struct coord *to, f32 gr
 	if (g_StanPlayerTileStage != g_Stan.stagenum) {
 		for (s32 i = 0; i < MAX_PLAYERS; i++) {
 			g_StanPlayerTile[i] = -1;
+			g_StanPlayerFromTile[i] = -1;
 		}
 
 		g_StanPlayerTileStage = g_Stan.stagenum;
@@ -1280,6 +1514,7 @@ bool geStanFloorAhead(s32 playernum, struct coord *pos, struct coord *to, f32 gr
 	}
 
 	g_StanPlayerTile[playernum] = tile;
+	g_StanPlayerFromTile[playernum] = tile;
 
 	if (tile < 0) {
 		return false;
@@ -1356,6 +1591,55 @@ bool geStanDoorSideRooms(struct coord *padpos, struct coord *centre, struct coor
 
 	tile = stanTileUnderPrefer(padpos->x, padpos->z, padpos->y + 5.0f, GESTAN_RISE, -1);
 
+	// A door pad standing in the wall's thickness has no tile of its own
+	// storey under it, and the tile found is the floor of the deck below.
+	// The conversion filed the pad in that deck's room too (roomsFind() takes
+	// the highest tile under a point), so every walk from it stayed down
+	// there: six of Frigate's upper-deck doors (pads 247-266) were rooms of
+	// the lower deck alone, where no guard's sight, shot or body on their own
+	// deck ever met them - guards saw, shot and walked through them shut, and
+	// they closed no portal (F3 20260930-004609, 20260929-214745). GoldenEye
+	// starts from the tile its pad names, on the door's own floor; take the
+	// floor either side of the leaf at the door's height instead.
+	if (tile >= 0) {
+		s32 side[2] = { -1, -1 };
+		f32 sidey[2];
+		struct coord at[2];
+
+		for (s32 s = 0; s < 2; s++) {
+			const f32 sign = s == 0 ? 1.0f : -1.0f;
+
+			for (f32 d = 10.0f; d <= 60.0f && side[s] < 0; d += 10.0f) {
+				const f32 x = centre->x + nx * d * sign, z = centre->z + nz * d * sign;
+				const s32 t = stanTileUnderPrefer(x, z, padpos->y + 5.0f, GESTAN_RISE, -1);
+
+				if (t >= 0) {
+					side[s] = t;
+					sidey[s] = stanSurface(&g_Stan.tiles[t], x, z);
+					at[s].x = x;
+					at[s].y = centre->y;
+					at[s].z = z;
+				}
+			}
+		}
+
+		if (side[0] >= 0 && side[1] >= 0
+				&& tile >= 0
+				&& sidey[0] - stanSurface(&g_Stan.tiles[tile], padpos->x, padpos->z) > GESTAN_RISE
+				&& sidey[1] - stanSurface(&g_Stan.tiles[tile], padpos->x, padpos->z) > GESTAN_RISE) {
+			*pt1 = at[0];
+			*pt2 = at[1];
+			*room1 = g_Stan.tiles[side[0]].room;
+			*room2 = g_Stan.tiles[side[1]].room;
+
+			if (*room2 == *room1) {
+				*room2 = -1;
+			}
+
+			return true;
+		}
+	}
+
 	if (tile < 0) {
 		return false;
 	}
@@ -1391,6 +1675,209 @@ bool geStanDoorSideRooms(struct coord *padpos, struct coord *centre, struct coor
 bool geStanWalk(struct coord *from, struct coord *to, s32 *room, f32 *ground)
 {
 	return geStanWalkFromRoom(from, -1, to, room, ground);
+}
+
+/**
+ * stan.c's walkTilesBetweenPoints_NoCallback() (sub_GAME_7F0B0914()) as it
+ * is: from `*tile` along the line, true when the end is reached; `*tile` is the
+ * last tile walked onto either way (stanWalkLine() is the same walk without
+ * the answer).
+ */
+static bool stanWalkTo(s32 *tile, f32 x0, f32 z0, f32 x1, f32 z1)
+{
+	s32 cur = *tile, prev = *tile, prevprev = *tile, next = -1;
+	const f32 negdz = -(z1 - z0);
+	const f32 dx = x1 - x0;
+
+	for (s32 iter = 0;; iter++) {
+		const struct stantile *t = &g_Stan.tiles[cur];
+		const struct stanpoint *p = &g_Stan.points[t->first];
+		s32 crossings = 0;
+
+		for (s32 k = 0; k < t->npts; k++) {
+			const struct stanpoint *a = &p[k], *b = &p[(k + 1) % t->npts];
+			const bool linked = a->across >= 0;
+
+			if (negdz * (b->x - a->x) + dx * (b->z - a->z) <= 0.0f
+					&& stanCrosses(x0, z0, x1, z1, a->x, a->z, b->x, b->z, linked)) {
+				crossings++;
+
+				if (!linked || (a->across != prev && a->across != prevprev)) {
+					next = linked ? a->across : -1;
+				}
+			}
+		}
+
+		prevprev = prev;
+		prev = cur;
+
+		if (cur == next || crossings == 0) {
+			return true;
+		}
+
+		if (iter >= 0x1f5 || next < 0) {
+			return false;
+		}
+
+		cur = next;
+		*tile = next;
+	}
+}
+
+/**
+ * The tile and the place an object's rooms are counted from, as GoldenEye
+ * keeps them in its prop (prop->stan and prop->pos; prop.c's
+ * domakedefaultobj() and propobj.c's sub_GAME_7F04088C()). From the pad's own
+ * tile - the one under the pad in its own room (the conversion files a pad in
+ * the room of the tile GoldenEye names for it) - a bound pad's object first
+ * walks to its box's middle (`centre`, NULL for none) or stays at the pad,
+ * then from there to where the object stands: that is prop->pos where the
+ * walk gets there, and where it does not, prop->pos stays where it started.
+ * False with no tile at all.
+ */
+bool geStanObjectTile(struct coord *padpos, s32 padroom, struct coord *centre, struct coord *objpos,
+		s32 *tile, struct coord *seed)
+{
+	struct coord start = *padpos;
+	s32 t, t0;
+
+	if (g_Stan.stagenum != g_Vars.stagenum || g_Stan.tiledata != g_TileFileData.u8) {
+		stanBuild();
+	}
+
+	if (!g_Stan.active) {
+		return false;
+	}
+
+	t0 = stanTileUnderPrefer(padpos->x, padpos->z, padpos->y + 5.0f, GESTAN_RISE, padroom);
+
+	if (t0 < 0) {
+		t0 = stanTileUnderPrefer(objpos->x, objpos->z, objpos->y + 5.0f, GESTAN_RISE, padroom);
+
+		if (t0 < 0) {
+			return false;
+		}
+
+		*tile = t0;
+		*seed = *objpos;
+		return true;
+	}
+
+	*tile = t0;
+
+	if (centre) {
+		t = t0;
+
+		if (stanWalkTo(&t, padpos->x, padpos->z, centre->x, centre->z)) {
+			*tile = t;
+			start = *centre;
+		}
+	}
+
+	t = *tile;
+
+	if (stanWalkTo(&t, start.x, start.z, objpos->x, objpos->z)) {
+		*tile = t;
+		*seed = *objpos;
+	} else {
+		*seed = start;
+	}
+
+	return true;
+}
+
+/** A tile's room, or -1. */
+s32 geStanTileRoom(s32 tile)
+{
+	return g_Stan.active && tile >= 0 && tile < g_Stan.numtiles ? g_Stan.tiles[tile].room : -1;
+}
+
+/** stan.c's getShortest2dDispToInfTileEdge(): the signed distance from the edge's line. */
+static f32 stanEdgeDisp(const struct stantile *t, s32 k, f32 x, f32 z)
+{
+	const struct stanpoint *p = &g_Stan.points[t->first];
+	const struct stanpoint *a = &p[k], *b = &p[(k + 1) % t->npts];
+	const f32 ex = (f32)(b->x - a->x), ez = (f32)(b->z - a->z);
+	const f32 len = sqrtf(ex * ex + ez * ez);
+
+	if (len == 0.0f) {
+		const f32 vx = x - b->x, vz = z - b->z;
+		return sqrtf(vx * vx + vz * vz);
+	}
+
+	return (ez * (x - a->x) + -ex * (z - a->z)) / len;
+}
+
+/** stan.c's stanPointProjectsOntoTileEdge(). */
+static bool stanProjectsOntoEdge(const struct stantile *t, s32 k, f32 x, f32 z)
+{
+	const struct stanpoint *p = &g_Stan.points[t->first];
+	const struct stanpoint *a = &p[k], *b = &p[(k + 1) % t->npts];
+	const f32 ex = (f32)(b->x - a->x), ez = (f32)(b->z - a->z);
+	const f32 len2 = ex * ex + ez * ez;
+	const f32 dot = (x - a->x) * ex + (z - a->z) * ez;
+
+	return (len2 < dot && dot < 0.0f) || (0.0f < dot && dot < len2);
+}
+
+/**
+ * The rooms of the tiles round a place (stan.c's sub_GAME_7F0B21B0() through
+ * sub_GAME_7F0B1DDC()): from `tile`, every tile across a linked edge that
+ * comes within `radius` of x/z, breadth first, at most 41 tiles; each new
+ * tile's room appended to `rooms` while there is room for it. Returns the
+ * count. GoldenEye's own units are its level's scaled by a constant, which
+ * every comparison here is free of.
+ */
+s32 geStanLocusRooms(s32 tile, f32 x, f32 z, f32 radius, s32 *rooms, s32 max)
+{
+	s32 stack[48];
+	s32 cat = 1;
+	s32 visited = 0;
+	s32 count = 0;
+
+	if (!g_Stan.active || tile < 0 || tile >= g_Stan.numtiles) {
+		return 0;
+	}
+
+	stack[0] = tile;
+
+	do {
+		const s32 cur = stack[visited++];
+		const struct stantile *t = &g_Stan.tiles[cur];
+		const struct stanpoint *p = &g_Stan.points[t->first];
+		s32 i;
+
+		// stanLocusAddTileRoomIfNew()
+		for (i = 0; i < count && rooms[i] != t->room; i++);
+
+		if (i == count && count < max) {
+			rooms[count++] = t->room;
+		}
+
+		for (s32 k = 0; k < t->npts; k++) {
+			const s32 k2 = (k + 1) % t->npts;
+			const f32 edge = stanEdgeDisp(t, k, x, z);
+			const f32 da = sqrtf((x - p[k].x) * (x - p[k].x) + (z - p[k].z) * (z - p[k].z));
+			const f32 db = sqrtf((x - p[k2].x) * (x - p[k2].x) + (z - p[k2].z) * (z - p[k2].z));
+
+			if (edge < radius && (da < radius || db < radius || stanProjectsOntoEdge(t, k, x, z))
+					&& p[k].across >= 0) {
+				s32 j;
+
+				for (j = cat - 1; j >= 0 && stack[j] != p[k].across; j--);
+
+				if (j < 0 && cat < (s32)ARRAYCOUNT(stack)) {
+					stack[cat++] = p[k].across;
+				}
+			}
+		}
+
+		if (cat >= 41) {
+			break;
+		}
+	} while (visited < cat);
+
+	return count;
 }
 
 s32 geStanRoomUnder(struct coord *pos, f32 ground, s32 prefer)
@@ -1468,6 +1955,54 @@ bool geStanReaches(struct coord *from, f32 ground, struct coord *to)
 		&& fabsf(stanSurface(&g_Stan.tiles[tile], to->x, to->z) - stanSurface(&g_Stan.tiles[totile], to->x, to->z)) < 1.0f;
 }
 
+s32 geStanLinks(struct coord *from, f32 fromground, struct coord *to, f32 toground, bool climbs)
+{
+	s32 fromtile;
+	s32 totile;
+	s32 tile;
+
+	if (g_Stan.stagenum != g_Vars.stagenum || g_Stan.tiledata != g_TileFileData.u8) {
+		stanBuild();
+	}
+
+	if (!g_Stan.active) {
+		return -1;
+	}
+
+	fromtile = stanTileUnder(from->x, from->z, fromground + 10.0f, 0.0f);
+	totile = stanTileUnder(to->x, to->z, toground + 10.0f, 0.0f);
+
+	if (fromtile < 0 || totile < 0) {
+		return -1;
+	}
+
+	tile = stanWalkLine(fromtile, from->x, from->z, to->x, to->z, !climbs);
+
+	if (tile == totile) {
+		return 1;
+	}
+
+	return stanHolds(&g_Stan.tiles[tile], to->x, to->z)
+		&& fabsf(stanSurface(&g_Stan.tiles[tile], to->x, to->z) - stanSurface(&g_Stan.tiles[totile], to->x, to->z)) < 1.0f;
+}
+
+f32 geStanFloorAt(struct coord *pos)
+{
+	s32 tile;
+
+	if (g_Stan.stagenum != g_Vars.stagenum || g_Stan.tiledata != g_TileFileData.u8) {
+		stanBuild();
+	}
+
+	if (!g_Stan.active) {
+		return -1e30f;
+	}
+
+	tile = stanTileUnder(pos->x, pos->z, pos->y + 5.0f, 0.0f);
+
+	return tile >= 0 ? stanSurface(&g_Stan.tiles[tile], pos->x, pos->z) : -1e30f;
+}
+
 /**
  * An autogun's pad is where GoldenEye stands the object (autogunGeEye()), and
  * its tile is the pad's; the gun sees Bond where stanTestLineUnobstructed()
@@ -1510,6 +2045,57 @@ s32 geStanAutogunSees(struct coord *from, s32 fromroom, struct coord *to, f32 to
 	// the target on the seam between two tiles at the same height
 	return stanHolds(&g_Stan.tiles[tile], to->x, to->z)
 		&& fabsf(stanSurface(&g_Stan.tiles[tile], to->x, to->z) - stanSurface(&g_Stan.tiles[totile], to->x, to->z)) < 1.0f;
+}
+
+/**
+ * Whether a player standing at `from` (feet at `ground`) may pick up the
+ * collectable at `to`: GoldenEye's objTestForPickup() (propobj.c) walks
+ * stanTestLineUnobstructed() in plan from Bond's tile to the object and takes
+ * it only where the walk ends on the object's own tile (`stan == prop->stan`).
+ * No wall, grate or floor in three dimensions comes into it, which is how the
+ * watch magnet lifts Bunker 2's throwing knives out of the cell's drain: they
+ * lie 240 under the drain's tile, and Perfect Dark's line of sight from the
+ * player's eye to them went through its floor (F3 20260929-215647,
+ * 20260930-030654).
+ *
+ * The object's tile is the one under it; one under every floor (the knives in
+ * the drain) is on the tile over it, whichever the walk ends on there. 1 may,
+ * 0 may not, -1 where the level has no graph or the player is over no tile.
+ */
+s32 geStanPickupReaches(struct coord *from, f32 ground, struct coord *to)
+{
+	s32 fromtile;
+	s32 totile;
+	s32 tile;
+
+	if (g_Stan.stagenum != g_Vars.stagenum || g_Stan.tiledata != g_TileFileData.u8) {
+		stanBuild();
+	}
+
+	if (!g_Stan.active) {
+		return -1;
+	}
+
+	fromtile = stanTileUnder(from->x, from->z, ground + 10.0f, GESTAN_RISE);
+
+	if (fromtile < 0) {
+		return -1;
+	}
+
+	tile = stanWalkLine(fromtile, from->x, from->z, to->x, to->z, false);
+
+	if (!stanHolds(&g_Stan.tiles[tile], to->x, to->z)) {
+		return 0;
+	}
+
+	totile = stanTileUnder(to->x, to->z, to->y + 10.0f, GESTAN_RISE);
+
+	if (totile < 0 || totile == tile) {
+		return 1;
+	}
+
+	// on the seam between two tiles at the same height
+	return fabsf(stanSurface(&g_Stan.tiles[tile], to->x, to->z) - stanSurface(&g_Stan.tiles[totile], to->x, to->z)) < 1.0f;
 }
 
 /**
@@ -1673,6 +2259,183 @@ bool geStanSightClear(struct coord *a, struct coord *b)
 	}
 
 	return true;
+}
+
+/**
+ * GoldenEye's own test of a guard's pad as the setup is loaded: expand_09_
+ * characters() (chraction.c) makes a guard only where getposstan(&pad->pos,
+ * pad->stan, 20, ...) holds, and getposstan() (loadobjectmodel.c) neither moves
+ * the guard nor looks for a clear spot - it asks stanTestVolume() whether a
+ * circle of 20 at the pad itself is legal, and the guard stands at the pad or
+ * is not made at all. stanTestVolume() (stan.c) is two tests, both in plan:
+ *
+ * - the tile walk (sub_GAME_7F0B21B0): out from the pad's tile through every
+ *   linked edge the circle touches; an unlinked edge it touches is a wall and
+ *   refuses the guard, and so does a walk of 41 tiles or more;
+ * - the props in the rooms of the tiles walked, of the types objects, doors,
+ *   players, chrs and path blockers: refused where the circle comes within 20
+ *   of an *edge* of a prop's collision outline. Only the edges: a pad inside a
+ *   big object's outline with every edge further than 20 is legal, and nothing
+ *   is asked about height at all (its y range is off: arg5 0, arg6 1).
+ *
+ * Perfect Dark's bodyAllocateChr() asks cdTestVolume() instead - the
+ * converted level's raised walls in the pad's room within 200 up or down,
+ * and any prop whose block the circle overlaps or is inside - which refused
+ * guards GoldenEye makes (Facility 51 and Caverns 33 at a raised wall,
+ * Frigate 26 and Caverns 10 standing on an object) and made one it refuses
+ * (Caverns 41).
+ *
+ * 1 legal, 0 refused, -1 where the level has no graph or the pad is over no
+ * tile (the caller keeps Perfect Dark's own test).
+ */
+#define GESTAN_SPAWN_MAXTILES 41
+#define GESTAN_SPAWN_MAXROOMS 20
+// The graph's points are GoldenEye's tile units rounded to whole units of the
+// converted level (geconvert.c's writeStan()), up to half a unit out on each
+// axis: an edge GoldenEye measures 20.4 from Aztec's pad 92 is 19.99 here, and
+// its guard 9 was refused. The tile walk is taken that much short of the
+// radius. GoldenEye's nearest wall to a pad it refuses is 17.6 (Streets 170).
+#define GESTAN_SPAWN_ROUNDING 0.75f
+
+static bool stanSpawnEdgeNear(f32 ax, f32 az, f32 bx, f32 bz, f32 x, f32 z, f32 radius)
+{
+	const f32 ex = bx - ax, ez = bz - az;
+	const f32 len = ex * ex + ez * ez;
+	f32 f = len > 0.0f ? ((x - ax) * ex + (z - az) * ez) / len : 0.0f;
+	f32 dx, dz;
+
+	f = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+	dx = x - (ax + ex * f);
+	dz = z - (az + ez * f);
+
+	return dx * dx + dz * dz < radius * radius;
+}
+
+/** Whether the circle at x/z touches an edge of the prop's collision outline (chraiGetCollisionBounds()). */
+static bool stanSpawnPropNear(struct prop *prop, f32 x, f32 z, f32 radius)
+{
+	u8 *start;
+	u8 *end;
+	struct geo *geo;
+
+	if (!propUpdateGeometry(prop, &start, &end)) {
+		return false;
+	}
+
+	geo = (struct geo *)start;
+
+	while (geo < (struct geo *)end) {
+		if (geo->type == GEOTYPE_BLOCK) {
+			struct geoblock *block = (struct geoblock *)geo;
+			const s32 n = block->header.numvertices;
+
+			for (s32 i = 0; i < n; i++) {
+				const s32 j = (i + 1) % n;
+
+				if (stanSpawnEdgeNear(block->vertices[i][0], block->vertices[i][1],
+							block->vertices[j][0], block->vertices[j][1], x, z, radius)) {
+					return true;
+				}
+			}
+
+			geo = (struct geo *)((uintptr_t)geo + 0x4c);
+		} else if (geo->type == GEOTYPE_CYL) {
+			// GoldenEye's chr is a diamond chrwidth from its middle to each
+			// corner (chrUpdateCollisionBounds()), its player the same
+			struct geocyl *cyl = (struct geocyl *)geo;
+			const f32 c[4][2] = {
+				{ cyl->x + cyl->radius, cyl->z }, { cyl->x, cyl->z + cyl->radius },
+				{ cyl->x - cyl->radius, cyl->z }, { cyl->x, cyl->z - cyl->radius },
+			};
+
+			for (s32 i = 0; i < 4; i++) {
+				if (stanSpawnEdgeNear(c[i][0], c[i][1], c[(i + 1) % 4][0], c[(i + 1) % 4][1], x, z, radius)) {
+					return true;
+				}
+			}
+
+			geo = (struct geo *)((uintptr_t)geo + 0x18);
+		} else {
+			// a lift's tiles: GoldenEye has no such outline
+			break;
+		}
+	}
+
+	return false;
+}
+
+s32 geStanSpawnLegal(struct coord *pos, s32 padroom, f32 radius)
+{
+	s32 queue[GESTAN_MAXFLOOD];
+	RoomNum rooms[GESTAN_SPAWN_MAXROOMS + 1];
+	s16 propnums[MAX_ROOMPROPS];
+	const f32 reach = radius - GESTAN_SPAWN_ROUNDING;
+	s32 numrooms = 0;
+	s32 tile;
+	s32 n;
+
+	if (g_Stan.stagenum != g_Vars.stagenum || g_Stan.tiledata != g_TileFileData.u8) {
+		stanBuild();
+	}
+
+	if (!g_Stan.active) {
+		return -1;
+	}
+
+	// the pad's own tile (pad->stan): the one of the pad's room at or under it,
+	// as an autogun's pad finds its tile
+	tile = stanTileUnderPrefer(pos->x, pos->z, pos->y + 5.0f, GESTAN_RISE, padroom);
+
+	if (tile < 0) {
+		return -1;
+	}
+
+	n = stanFloodList(tile, pos->x, pos->z, pos->x, pos->z, reach, true, false, queue);
+
+	if (n >= GESTAN_SPAWN_MAXTILES) {
+		sysLogPrintf(LOG_NOTE, "gestan: pad (%.0f %.0f %.0f) refused: its circle walks %d tiles", pos->x, pos->y, pos->z, n);
+		return 0;
+	}
+
+	for (s32 q = 0; q < n; q++) {
+		const struct stantile *t = &g_Stan.tiles[queue[q]];
+		const struct stanpoint *p = &g_Stan.points[t->first];
+		s32 r;
+
+		for (s32 k = 0; k < t->npts; k++) {
+			if (p[k].across < 0 && stanEdgeDistSq(&p[k], &p[(k + 1) % t->npts], pos->x, pos->z) < reach * reach) {
+				sysLogPrintf(LOG_NOTE, "gestan: pad (%.0f %.0f %.0f) refused: tile %d's edge %d is a wall",
+						pos->x, pos->y, pos->z, queue[q], k);
+				return 0;
+			}
+		}
+
+		for (r = 0; r < numrooms; r++) {
+			if (rooms[r] == t->room) {
+				break;
+			}
+		}
+
+		if (r == numrooms && numrooms < GESTAN_SPAWN_MAXROOMS) {
+			rooms[numrooms++] = t->room;
+		}
+	}
+
+	rooms[numrooms] = -1;
+	roomGetProps(rooms, propnums, MAX_ROOMPROPS);
+
+	for (s16 *pn = propnums; *pn >= 0; pn++) {
+		struct prop *prop = &g_Vars.props[*pn];
+
+		if (propIsOfCdType(prop, CDTYPE_OBJS | CDTYPE_DOORS | CDTYPE_PLAYERS | CDTYPE_CHRS | CDTYPE_PATHBLOCKER)
+				&& stanSpawnPropNear(prop, pos->x, pos->z, radius)) {
+			sysLogPrintf(LOG_NOTE, "gestan: pad (%.0f %.0f %.0f) refused: prop type %d at (%.0f %.0f %.0f)",
+					pos->x, pos->y, pos->z, prop->type, prop->pos.x, prop->pos.y, prop->pos.z);
+			return 0;
+		}
+	}
+
+	return 1;
 }
 
 #endif

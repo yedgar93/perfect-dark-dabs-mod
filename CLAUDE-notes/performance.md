@@ -1,5 +1,13 @@
 # Performance: measuring a crowded match, and what was found
 
+## Digest (moved from CLAUDE.md, 2026-09-30)
+
+The entries CLAUDE.md carried for this note, verbatim. The sections below are
+the long form.
+
+- **Measuring a crowded match, `--rng-seed`/`--fixed-step`/`--exit-frame`, where the frame goes** — [performance.md](CLAUDE-notes/performance.md): compare instructions per frame on a seeded fixed-step match; the renderer is 60% of the main thread and is built at -O2; why the decomp at -O2 played a different game (game-defined sinf/cosf, an uninitialised pad flag) and how a divergence is bisected; run to a level frame rather than a wall-clock span, and check a renderer change with a pixel diff; why every model is full detail (the distance checks, and the GE code that turned them back on)
+
+
 A Combat Simulator match with 80 simulants and 80 alerted guards is the
 fork's heaviest ordinary load. This is how it was measured on 2026-09-06 and
 what the frame was spending its time on; read it before touching the renderer
@@ -186,6 +194,57 @@ The method, for the next time a build diverges:
 A solo mission (`--boot-stage 0x34`, no `--mpsims`) is a second replay
 worth running for anything that touches chr code; the match alone missed
 the `pad2.flags` read.
+
+## Did it play the same game: the state hash, and the sanitizers (2026-09-30)
+
+`--state-hash N` (`port/src/statehash.c`) logs `statehash: frame F H` every N
+level frames, hashing the state as the frame starts: the RNG, every prop on
+the active and paused lists, every chr in a slot. `tools/ci/replaytest.sh`
+runs the seeded match (0x32, 80 sims) and the solo mission (0x34) and compares
+two binaries (`compare A B`), one with itself (`self A`), or one with golden
+hashes (`record` / `check`), naming the first frame that differs. It replaces
+diffing `--gfxstats` vertex counts for this purpose: the hash sees a
+divergence the frame it reaches the state, not when it reaches the screen.
+Golden hashes depend on the data in `build/` and stay local.
+
+Eight cases since 2026-09-30, all run by default (under two minutes for a
+`self` of all eight at 1500 frames): the PD match and mission, GE Plus's
+Complex arena and Dam mission (`--boot-map`, `--boot-ge-mission`: converted
+ids depend on the mods installed, and `--moddir` mounts no map mods, so these
+seed `Mod.MapMods` in their save dir's pd.ini instead), the match with the
+mod's movement options on, the mission with Guards Alerted (the alarm raised
+by `--alarm-at 200`, since nobody trips one), a Randomizer run landing on G5
+(capped at 750 frames: the unattended player dies near 815 and the level
+loads again) and a Randomizer-dealt mission. **Every mission case passes
+`--skip-cutscenes`**: Attack Ship's opening is still playing at frame 1400,
+so the solo case had been hashing little but the cutscene. The hash covers,
+besides the RNG, props and chrs: door and lift positions, each chr's AI
+variables (flags, morale, alertness, timer, target, cover), every player's
+health, armour, ammo and inventory, and the objectives. Widening the hash
+changes every value, so golden hashes recorded before it are void, and two
+binaries only compare if both have the same hash code.
+
+An ASan + UBSan build, configured through the environment because
+`target_architecture()` try-compiles with the flags and fails to link
+without them in `LDFLAGS`:
+
+```sh
+SAN="-fsanitize=address,undefined -fno-omit-frame-pointer"
+CFLAGS="$SAN" CXXFLAGS="$SAN" LDFLAGS="-fsanitize=address,undefined" \
+    cmake -G"Unix Makefiles" -Bbuild-asan . && cmake --build build-asan -j8
+# link data/ and mod_allinone/ from build/, then run the replay cases with
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=0 UBSAN_OPTIONS=print_stacktrace=1
+```
+
+First run (ad4d887ba, 1500 frames of both cases): **ASan found nothing.**
+UBSan reported 28 source lines, 26 of them misaligned access to N64-layout
+data loaded at 4-byte alignment (model rodata/rwdata, waypoints, door and
+lift objs, audio bank structs) - harmless on x86 and ARM64, noise. The two
+others are harmless too: `liftUpdateTiles()` (propobj.c:5464) takes
+`&rodata->type19` of a NULL `rodata` when a bbox was found, address only;
+`animReadSignedShort()` (anim.c:690) shifts by -1 when `readbitlen` is 0, and
+`result` is 0 then, so the test is false either way. Filter with
+`grep "runtime error" | grep -v misaligned`.
 
 ## Run to a level frame, not for a wall-clock span
 

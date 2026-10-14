@@ -55,6 +55,17 @@ enum {
 // GoldenEye XBLA release draws it. Bit 28: 16-27 are cleared for a draw
 // without alpha (gfx_derive_batch_state()).
 #define SHADER_OPT_FOG_LINEAR (1 << 28)
+// G_ALPHA_CORE_EXT: a texture-edge cutout keeps only its texels of at least
+// three quarters alpha, where the plain one keeps everything over 0.19.
+#define SHADER_OPT_ALPHA_CORE (1 << 29)
+// G_FOG_VERTEX_EXT: the fog line's offset slot carries each vertex's own
+// clamped factor times its w, and the multiplier is 0 - divided by the
+// interpolated w per fragment that is the factor carried linearly across the
+// screen, as the N64 carries its per-vertex fog in the shade alpha.
+#define SHADER_OPT_FOG_VERTEX (1u << 30)
+// G_SHADE_LINEAR_EXT: the combiner's inputs are carried across the triangle
+// linearly on the screen (noperspective), as the RDP carries its shade.
+#define SHADER_OPT_SHADE_LINEAR (1u << 31)
 
 struct ColorCombinerKey {
     uint64_t combine_mode;
@@ -80,6 +91,9 @@ struct CCFeatures {
     bool opt_envmap;
     bool opt_fog_fade;
     bool opt_fog_linear;
+    bool opt_alpha_core;
+    bool opt_fog_vertex;
+    bool opt_shade_linear;
     bool used_textures[2];
     bool clamp[2][2];
     int num_inputs;
@@ -90,5 +104,11 @@ struct CCFeatures {
 };
 
 void gfx_cc_get_features(uint64_t shader_id0, uint32_t shader_id1, struct CCFeatures* cc_features);
+
+#ifdef __cplusplus
+#include <string>
+// The mesh vertex shader's functions and main(), for both backends (gfx_pc.cpp)
+std::string gfx_mesh_vs_main(const struct CCFeatures& cc, bool depth_clamp_hack, bool vulkan_depth);
+#endif
 
 #endif

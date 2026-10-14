@@ -35,6 +35,11 @@ s32 gegunsShootSound(s32 weaponnum);
 // its ammunition and sound) or as the Moonraker (0); gegadgets.c on stage load
 void gegunsSetWatchLaser(s32 on);
 
+// Whether this is the watch laser's shot (the Moonraker's number while the
+// watch laser is in): GoldenEye starts its sound with each shot and lets the
+// last one ring (gunfire.c, sndPlaySfx() with no handle), never cut off.
+s32 gegunsWatchLaserShot(s32 weaponnum);
+
 // GoldenEye's SoundTriggerRate for one of its guns: the sixtieths between one
 // start of its shot sound and the next while the trigger is held, 0 for a
 // sound with every shot. -1 for any other weapon.
@@ -67,8 +72,29 @@ u16 gegunsOwnModel(s32 index);
 // muzzle (bondgun.c asks)
 void gegunsSetOwnModelInUse(s32 index, s32 inuse);
 s32 gegunsOwnModelInUse(s32 weaponnum);
+// The lights and LookAt GoldenEye draws one of its guns under in first person
+Gfx *gegunsLightsAndLookAt(Gfx *gdl, s32 weaponnum);
 s32 gegunsOwnModelHidden(s32 weaponnum);
 s32 gegunsTriggerDelay60(s32 weaponnum);
+// Ticks between the clicks of one of GoldenEye's guns held empty, or 0 for any other
+s32 gegunsDryFireInterval60(s32 weaponnum);
+// 1 if one of GoldenEye's guns clicks held empty, 0 if it reloads, -1 not GoldenEye's
+s32 gegunsClicksEmpty(s32 weaponnum);
+// GoldenEye's grenade and mines, which bondgun.c throws by GoldenEye's rule
+s32 gegunsThrowsAsGoldenEye(s32 weaponnum);
+// GoldenEye's mines, which stick where they first land
+s32 gegunsMineAttaches(s32 weaponnum);
+// GoldenEye draws nothing of it in the hand, so its reload neither lowers nor raises
+s32 gegunsHidesHand(s32 weaponnum);
+// GoldenEye's Moonraker, which marks what it hits and sounds its surface
+s32 gegunsMoonrakerMarks(s32 weaponnum);
+// Where GoldenEye's grenade and mines leave the hand, in camera space; 1 if it is one
+struct coord;
+s32 gegunsThrowOrigin(s32 weaponnum, struct coord *campos);
+// the extra lift a GoldenEye gun is given coming up to the eye under COD Style Aiming
+f32 gegunsCodAimLift(s32 weaponnum);
+// ticks after a single shot a GoldenEye gun is ready once its trigger was let go, -1 not one
+s32 gegunsReleasedReady(s32 weaponnum, s32 speeds, s32 hasanim);
 // Where GoldenEye holds the gun in front of the eye, and where its host is held
 s32 gegunsViewPlacement(s32 index, f32 *own, f32 *host);
 
@@ -103,18 +129,25 @@ s32 gegunsEnemyRocketModel(void);
 
 // Whether drawing one of GoldenEye's weapons makes no sound: its gadgets
 s32 gegunsEquipSilent(s32 weaponnum);
+s32 gegunsSwitchAtOnce(s32 weaponnum);
 
 // Whether one of GoldenEye's weapons is never a pair, not even under Akimbo:
 // the watch's detonator
 s32 gegunsNeverPairs(s32 weaponnum);
+// Whether GoldenEye's All Guns cheat pairs it (its CAN_DUAL_WIELD; inv.c)
+s32 gegunsAllGunsPairs(s32 weaponnum);
 
 // How long one of GoldenEye's mines takes, thrown, to arm or (the timed mine)
 // to go off, in sixtieths; 0 for any other weapon, which keeps its function's
 s32 gegunsThrownFuse60(s32 weaponnum);
+// GoldenEye's three seconds on a grenade a guard throws, or 0 for Perfect Dark's one
+s32 gegunsChrGrenadeFuse60(s32 weaponnum);
 void gegunsOwnModelParts(struct hand *hand, struct model *model);
+void gegunsShellsLoaded(struct hand *hand);
 // The same for the gun shown bare in a menu: no hand, cuff or flash
 void gegunsOwnModelMenuParts(s32 weaponnum, struct model *model);
 void gegunsOwnModelFlash(struct hand *hand, struct model *model);
+void gegunsCardsLit(s32 handnum, s32 on);
 s32 gegunsOwnModelRevolver(s32 weaponnum);
 void gegunsOwnModelRevolverBegin(struct hand *hand, struct model *model);
 void gegunsOwnModelRevolverEnd(void);
@@ -151,6 +184,21 @@ struct geknifekey {
 // gunSample1PTransform(): a track `time` sixtieths in, into `mtx` (an Mtxf),
 // mirrored for the left hand; 0 once the track has ended
 s32 gegunsSampleTrack(const struct geknifekey *keys, f32 time, void *mtx, s32 left);
+
+/**
+ * The guns of the stage about to load: a converted ROM hack's own on a stage
+ * of its own (menu/geguns.bin), GoldenEye's everywhere else.
+ */
+void gegunsStageSet(s32 stagenum);
+s32 gegunsHackSetIn(void); // a ROM hack's own gun set is in: its stage is loaded
+u16 gegunsMenuNameId(s32 weaponnum); // the menus' name of a GoldenEye gun: a hack's mode's, or 0
+void gegunsExtraRowsRefresh(void); // a hack's own pistols' Combat Simulator rows shown or hidden
+
+/** Weapon `index`'s own name (its text id), the gun set's. */
+u16 gegunsNameId(s32 index);
+
+/** A gun's GoldenEye AmmoType (its AMMOTYPES index), the gun set's; -1 where it has no row. */
+s32 gegunsGeAmmoType(s32 weaponnum);
 
 #ifdef __cplusplus
 }
