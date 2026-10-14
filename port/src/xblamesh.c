@@ -57,6 +57,9 @@
 #include "modelpack.h"
 #include "roomsheen.h"
 #include "game/bg.h"
+#include "game/gfxmemory.h"
+#include "game/chr.h"
+#include "game/tex.h"
 #include "game/camera.h"
 #include "game/dlights.h"
 #include "game/game_0b0fd0.h"
@@ -292,6 +295,7 @@ static void xblaMeshBruiseFree(struct xblameshuse *use)
 // The title logos' materials: see xblaMeshBuildLogo().
 #define XBLAMESH_LOGO_MATS 3
 
+struct xblacutedge { s32 a, b, group, count; };
 struct xblameshbuilt {
 	Gfx *gdl;
 	Vtx *vertices;
@@ -332,6 +336,10 @@ struct xblameshbuilt {
     u32 cutmask;
     f32 *cutweights;
     s16 *cutpieces;
+    f32 *cutpositions;
+    s16 *cutrim;
+    struct xblacutedge *cutedges;
+    s32 numcutedges;
     Gfx *cutlists[11];
 	const struct model *posedmodel;
 	u32 posedframe;
@@ -7916,6 +7924,8 @@ static f32 *xblaMeshGpuPalette(struct xblameshbuilt *m, struct model *model, Mtx
  *
  * NULL when there is no room this frame, and the caller draws the bind pose.
  */
+static void xblaMeshRememberCutCaps(struct xblameshbuilt *m, struct model *model, const Mtxf *root, const Vtx *pose);
+
 static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *root,
 		Mtxf **outmtx, s32 *outfine, s32 normals, const f32 *headshift, const f32 *disp, const f32 *skinweights)
 {
@@ -8083,7 +8093,7 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 	m->posednrm = nrm;
 
 	for (s32 i = 0; i < m->numvertices; i++) {
-		const f32 *pos = &m->bindpos[i * 3];
+		const f32 *pos = &(skinweights && m->cutpositions ? m->cutpositions : m->bindpos)[i * 3];
 		const f32 *weight = &(skinweights ? skinweights : m->weights)[i * 3];
 		const u8 *bone = &m->bones[i * 4];
 		const s32 num = bone[3] < 3 ? bone[3] : 3;
@@ -8132,6 +8142,11 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 			}
 		}
 
+        if (skinweights && m->cutrim && m->cutrim[i] >= 0) {
+            mtx4TransformVec(&pal[m->cutrim[i]], &in, &moved);
+            x = moved.x; y = moved.y; z = moved.z;
+        }
+
 		out[i] = m->vertices[i];
 		out[i].x = xblaMeshRound(x * fine);
 		out[i].y = xblaMeshRound(y * fine);
@@ -8157,6 +8172,12 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 				oz += (p->m[0][2] * n[0] + p->m[1][2] * n[1] + p->m[2][2] * n[2]) * w;
 			}
 
+            if (skinweights && m->cutrim && m->cutrim[i] >= 0) {
+                const Mtxf *p = &pal[m->cutrim[i]];
+                ox = p->m[0][0]*n[0]+p->m[1][0]*n[1]+p->m[2][0]*n[2];
+                oy = p->m[0][1]*n[0]+p->m[1][1]*n[1]+p->m[2][1]*n[2];
+                oz = p->m[0][2]*n[0]+p->m[1][2]*n[1]+p->m[2][2]*n[2];
+            }
 			nrm[i * 3] = ox;
 			nrm[i * 3 + 1] = oy;
 			nrm[i * 3 + 2] = oz;
@@ -8187,6 +8208,7 @@ static Vtx *xblaMeshPose(struct xblameshbuilt *m, struct model *model, Mtxf *roo
 				hi[0] / fine, hi[1] / fine, hi[2] / fine, fine);
 	}
 
+	if (skinweights) xblaMeshRememberCutCaps(m, model, root, out);
 	return out;
 }
 
@@ -11294,6 +11316,8 @@ static const f32 *xblaMeshRestShift(const struct xblameshbuilt *m, struct xblame
  * influences and triangles would connect independently moving pieces, making
  * long elastic strips. Split only this model's frame copy; living characters
  * and uncut corpses retain the ordinary GPU path and shared mesh data. */
+static void xblaMeshPrepareCutRims(struct xblameshbuilt *m, struct model *model);
+
 static s32 xblaMeshPrepareCut(struct xblameshbuilt *m, struct model *model)
 {
 #ifdef PD_PHYSICS
@@ -11321,12 +11345,252 @@ static s32 xblaMeshPrepareCut(struct xblameshbuilt *m, struct model *model)
     m->cutmask = mask;
     m->cutweights = weights;
     m->cutpieces = owners;
+    m->cutpositions = NULL; m->cutrim = NULL; m->cutedges = NULL; m->numcutedges = 0;
+    xblaMeshPrepareCutRims(m, model);
     memset(m->cutlists, 0, sizeof(m->cutlists));
     m->posedmodel = NULL;
     return 1;
 #else
     return 0;
 #endif
+}
+
+/* The original PD cap outline cannot fit the HD mesh. Build a planar HD rim
+ * from kept triangles beside each removed cross-piece strip, and cap that
+ * exact rim. All storage belongs to the current instance and frame. */
+struct xblacapframe {
+    const struct model *model;
+    struct xblacapframe *next;
+    Mtxf matrix;
+    Vtx *vertices;
+    s32 numtriangles;
+};
+static struct xblacapframe *cutCapFrames;
+static u32 cutCapFrameNumber;
+
+static void xblaMeshCutTriangles(struct xblameshbuilt *m,
+        void (*fn)(struct xblameshbuilt *, s32, s32, s32, void *), void *arg)
+{
+    s32 slots[32];
+    for (s32 k = 0; k < 32; k++) slots[k] = -1;
+    for (s32 c = 0; c < m->numgfx; c++) {
+        const Gfx *cmd = &m->gdl[c];
+        u32 op = (u8)(cmd->words.w0 >> 24);
+        if (op == (u8)G_VTX) {
+            uintptr_t ptr = cmd->words.w1;
+            s32 first = (cmd->words.w0 >> 16) & 0xf;
+            s32 count = (cmd->words.w0 & 0xffff) / sizeof(Vtx);
+            s32 index = -1;
+            if (ptr <= 0xffffffff && ((ptr >> 24) & 0xf) == SPSEGMENT_MODEL_VTX)
+                index = (UNSEGADDR(ptr) & 0xffffff) / sizeof(Vtx);
+            for (s32 k = 0; k < count && first+k < 32; k++)
+                slots[first+k] = index >= 0 && index+k < m->numvertices ? index+k : -1;
+        } else if (op == (u8)G_TRI1 || op == (u8)G_TRI4) {
+            u32 w0 = cmd->words.w0, w1 = cmd->words.w1;
+            for (s32 t = 0; t < (op == (u8)G_TRI1 ? 1 : 4); t++) {
+                s32 a, b, d;
+                if (op == (u8)G_TRI1) {
+                    a = ((w1>>16)&0xff)/10; b = ((w1>>8)&0xff)/10; d = (w1&0xff)/10;
+                } else {
+                    a = (w1>>(t*8))&0xf; b = (w1>>(t*8+4))&0xf; d = (w0>>(t*4))&0xf;
+                    if (!a && !b && !d) continue;
+                }
+                if (a < 32 && b < 32 && d < 32 && slots[a] >= 0 && slots[b] >= 0 && slots[d] >= 0)
+                    fn(m, slots[a], slots[b], slots[d], arg);
+            }
+        } else if (op == (u8)G_ENDDL) {
+            for (s32 k = 0; k < 32; k++) slots[k] = -1;
+        }
+    }
+}
+
+#ifdef PD_PHYSICS
+struct xblarimcontext { struct ragdollcutjoint joints[32]; s32 count; };
+static void xblaMeshMarkRim(struct xblameshbuilt *m, s32 a, s32 b, s32 c, void *arg)
+{
+    struct xblarimcontext *ctx = arg;
+    s32 v[3] = {a,b,c};
+    if (ragdollSkinTriangle(m->cutpieces, m->numvertices, a,b,c)) return;
+    for (s32 e = 0; e < 3; e++) {
+        s32 x = v[e], y = v[(e+1)%3];
+        s32 px = m->cutpieces[x], py = m->cutpieces[y];
+        if (px < 0 || py < 0 || px == py) continue;
+        for (s32 k = 0; k < ctx->count; k++) {
+            struct ragdollcutjoint *j = &ctx->joints[k];
+            if ((px == j->piece && py == j->parentpiece) || (py == j->piece && px == j->parentpiece)) {
+                m->cutrim[x] = k*2 + (px == j->piece);
+                m->cutrim[y] = k*2 + (py == j->piece);
+                break;
+            }
+        }
+    }
+}
+#endif
+
+static s32 xblaMeshSameRimPoint(struct xblameshbuilt *m, s32 a, s32 b)
+{
+    f32 d = 0;
+    for (s32 k = 0; k < 3; k++) { f32 t = m->cutpositions[a*3+k]-m->cutpositions[b*3+k]; d += t*t; }
+    return d < 0.0001f;
+}
+static void xblaMeshRimEdges(struct xblameshbuilt *m, s32 a, s32 b, s32 c, void *arg)
+{
+    s32 v[3] = {a,b,c};
+    if (!ragdollSkinTriangle(m->cutpieces, m->numvertices, a,b,c)) return;
+    for (s32 e = 0; e < 3; e++) {
+        s32 x = v[e], y = v[(e+1)%3], group = m->cutrim[x];
+        if (group < 0 || group != m->cutrim[y] || xblaMeshSameRimPoint(m,x,y)) continue;
+        s32 i;
+        for (i = 0; i < m->numcutedges; i++) {
+            struct xblacutedge *edge = &m->cutedges[i];
+            if (edge->group == group &&
+                    ((xblaMeshSameRimPoint(m,x,edge->a) && xblaMeshSameRimPoint(m,y,edge->b)) ||
+                     (xblaMeshSameRimPoint(m,x,edge->b) && xblaMeshSameRimPoint(m,y,edge->a)))) {
+                edge->count++; break;
+            }
+        }
+        if (i == m->numcutedges)
+            m->cutedges[m->numcutedges++] = (struct xblacutedge){x,y,group,1};
+    }
+}
+
+static void xblaMeshPrepareCutRims(struct xblameshbuilt *m, struct model *model)
+{
+#ifdef PD_PHYSICS
+    struct xblarimcontext ctx;
+    ctx.count = ragdollGetModelCutJoints(model, ctx.joints, ARRAYCOUNT(ctx.joints));
+    if (!ctx.count || !m->invbind) return;
+    s16 *rim = xblaMeshFrameAlloc(m->numvertices * sizeof(s16));
+    f32 *positions = xblaMeshFrameAlloc(m->numvertices * 3 * sizeof(f32));
+    struct xblacutedge *edges = xblaMeshFrameAlloc((u32)m->numgfx * 12 * sizeof(*edges));
+    if (!rim || !positions || !edges) return;
+    m->cutrim = rim; m->cutpositions = positions; m->cutedges = edges;
+    for (s32 i = 0; i < m->numvertices; i++) rim[i] = -1;
+    memcpy(positions, m->bindpos, m->numvertices * 3 * sizeof(f32));
+    xblaMeshCutTriangles(m, xblaMeshMarkRim, &ctx);
+    // Batches/material seams duplicate vertices. Give every copy of the same
+    // position/piece the same rim, so a neighboring batch cannot leave a spike.
+    u32 tablesize = 1;
+    while (tablesize < (u32)m->numvertices * 2) tablesize <<= 1;
+    s32 *table = xblaMeshFrameAlloc(tablesize * sizeof(s32));
+    if (!table) { m->cutpositions = NULL; m->cutrim = NULL; m->cutedges = NULL; return; }
+    for (u32 k = 0; k < tablesize; k++) table[k] = -1;
+    for (s32 pass = 0; pass < 2; pass++) {
+        for (s32 i = 0; i < m->numvertices; i++) {
+            u32 hash = 2166136261u ^ (u32)m->cutpieces[i];
+            for (s32 k = 0; k < 3; k++) {
+                u32 bits; memcpy(&bits, &m->bindpos[i*3+k], sizeof(bits));
+                hash = (hash ^ bits) * 16777619u;
+            }
+            u32 slot = hash & (tablesize-1);
+            while (table[slot] >= 0) {
+                s32 other = table[slot];
+                if (m->cutpieces[other] == m->cutpieces[i] &&
+                        !memcmp(&m->bindpos[other*3], &m->bindpos[i*3], 3*sizeof(f32))) break;
+                slot = (slot+1) & (tablesize-1);
+            }
+            if (pass == 0) {
+                if (table[slot] < 0 || rim[i] >= 0) table[slot] = i;
+            } else {
+                rim[i] = rim[table[slot]];
+            }
+        }
+    }
+
+    for (s32 i = 0; i < m->numvertices; i++) {
+        if (rim[i] < 0) continue;
+        struct ragdollcutjoint *j = &ctx.joints[rim[i]/2];
+        if (j->childmtx < 0 || j->parentmtx < 0 || j->childmtx >= m->nummatrices || j->parentmtx >= m->nummatrices) {
+            rim[i] = -1; continue;
+        }
+        Mtxf child, parent;
+        f32 normal[3];
+        xblaMeshInvert(&m->invbind[j->childmtx], &child);
+        xblaMeshInvert(&m->invbind[j->parentmtx], &parent);
+        for (s32 k = 0; k < 3; k++) normal[k] = child.m[3][k]-parent.m[3][k];
+        ragdollSkinProject(&positions[i*3], &m->bindpos[i*3], child.m[3], normal);
+    }
+    xblaMeshCutTriangles(m, xblaMeshRimEdges, NULL);
+    // Pose rim points rigidly in the joint frame on their own side of the cut.
+    for (s32 i = 0; i < m->numvertices; i++) {
+        if (rim[i] >= 0) {
+            struct ragdollcutjoint *j = &ctx.joints[rim[i]/2];
+            rim[i] = (rim[i]&1) ? j->childmtx : j->parentmtx;
+        }
+    }
+#endif
+}
+
+static void xblaMeshRememberCutCaps(struct xblameshbuilt *m, struct model *model, const Mtxf *root, const Vtx *pose)
+{
+    if (cutCapFrameNumber != frameCount) { cutCapFrameNumber = frameCount; cutCapFrames = NULL; }
+    if (!m->cutedges || !m->numcutedges) return;
+    s32 count = 0;
+    f32 centre[64][3] = {{0}};
+    s32 samples[64] = {0};
+    for (s32 i = 0; i < m->numcutedges; i++) {
+        const struct xblacutedge *e = &m->cutedges[i];
+        if (e->count != 1 || e->group >= 64) continue;
+        count++; samples[e->group] += 2;
+        const Vtx *a = &pose[e->a], *b = &pose[e->b];
+        centre[e->group][0] += a->x+b->x;
+        centre[e->group][1] += a->y+b->y;
+        centre[e->group][2] += a->z+b->z;
+    }
+    if (!count) return;
+    struct xblacapframe *cap = xblaMeshFrameAlloc(sizeof(*cap));
+    Vtx *vertices = xblaMeshFrameAlloc(count * 3 * sizeof(Vtx));
+    if (!cap || !vertices) return;
+    cap->model = model; cap->vertices = vertices; cap->numtriangles = count;
+    cap->matrix = *root; mtxApplyGfxScale(&cap->matrix);
+    s32 at = 0;
+    for (s32 i = 0; i < m->numcutedges; i++) {
+        const struct xblacutedge *e = &m->cutedges[i];
+        if (e->count != 1 || e->group >= 64) continue;
+        Vtx *v = &vertices[at];
+        v[0] = pose[e->a]; v[1] = pose[e->a]; v[2] = pose[e->b];
+        v[0].x = xblaMeshRound(centre[e->group][0]/samples[e->group]);
+        v[0].y = xblaMeshRound(centre[e->group][1]/samples[e->group]);
+        v[0].z = xblaMeshRound(centre[e->group][2]/samples[e->group]);
+        for (s32 k = 0; k < 3; k++) { v[k].s = v[k].t = 0; v[k].flags = 0; v[k].colour = k ? 4 : 0; }
+        at += 3;
+    }
+    cap->next = cutCapFrames; cutCapFrames = cap;
+}
+
+s32 xblaMeshRenderCutCaps(Gfx **out, struct chrdata *chr, u32 alpha)
+{
+    if (!chr || cutCapFrameNumber != frameCount) return 0;
+    s32 found = 0;
+    for (struct xblacapframe *cap = cutCapFrames; cap; cap = cap->next)
+        if (cap->model == chr->model) found = 1;
+    if (!found) return 0;
+    Gfx *gdl = *out;
+    if (!alpha) return 1;
+    if (gfxGetFreeGfx(gdl) < 32) return 1;
+    Col *colours = gfxAllocateColours(2);
+    u32 blood[3];
+    chrGetBloodColour(chr->bodynum, NULL, blood);
+    for (s32 k = 0; k < 2; k++) colours[k].word = PD_BE32((blood[k ? 0 : 1] & 0xffffff00) | alpha);
+    gSPClearGeometryMode(gdl++, G_CULL_BOTH | G_LIGHTING);
+    gSPSetGeometryMode(gdl++, G_SHADE | G_SHADING_SMOOTH);
+    texSelect(&gdl, NULL, 2, 0, 2, 1, NULL);
+    gDPSetCycleType(gdl++, G_CYC_1CYCLE);
+    gDPSetCombineMode(gdl++, G_CC_SHADE, G_CC_SHADE);
+    if (alpha < 255) { gDPSetRenderMode(gdl++, G_RM_AA_ZB_XLU_SURF, G_RM_AA_ZB_XLU_SURF2); }
+    else { gDPSetRenderMode(gdl++, G_RM_AA_ZB_OPA_SURF, G_RM_AA_ZB_OPA_SURF2); }
+    gSPColor(gdl++, osVirtualToPhysical(colours), 2);
+    for (struct xblacapframe *cap = cutCapFrames; cap; cap = cap->next) {
+        if (cap->model != chr->model) continue;
+        gSPMatrix(gdl++, osVirtualToPhysical(&cap->matrix), G_MTX_NOPUSH | G_MTX_LOAD | G_MTX_MODELVIEW | G_MTX_FLOATS);
+        for (s32 t = 0; t < cap->numtriangles; t += 5) {
+            s32 n = cap->numtriangles-t < 5 ? cap->numtriangles-t : 5;
+            if (gfxGetFreeGfx(gdl) < 16) { *out = gdl; return 1; }
+            gSPVertex(gdl++, osVirtualToPhysical(&cap->vertices[t*3]), n*3, 0);
+            for (s32 j = 0; j < n; j++) gSP1Triangle(gdl++, j*3, j*3+1, j*3+2, 0);
+        }
+    }
+    *out = gdl; return 1;
 }
 
 static const Gfx *xblaMeshCutList(struct xblameshbuilt *m, struct model *model, const Gfx *list)

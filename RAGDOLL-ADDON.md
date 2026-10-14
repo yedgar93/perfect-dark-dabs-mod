@@ -1,6 +1,6 @@
 # Dab's Mod + Chesluk Physics â€” Yedgar Hybrid
 
-Unofficial integration for Jon / yedgar93. Windows 64-bit, revision 6.
+Unofficial integration for Jon / yedgar93. Windows 64-bit, revision 7.
 Base: DabDavis's official Dab's Mod v3.14.0 release, commit
 90c8622e74b35be669d60d177effc6d7d2d7621c.
 
@@ -115,3 +115,27 @@ The accompanying source patch is applied to the official v3.14.0 checkout
 with git apply --index. Build using Dab's MSYS2 MINGW64 instructions, CMake
 3.20+ and Jolt v5.6.0. Jolt is fetched automatically, or set JOLT_DIR to a
 local checkout. Pass UPDATE_CHANNEL=stable. PD_PHYSICS=OFF omits physics.
+
+## Revision 7: fitted XBLA cut rims
+
+Jon's r6 gameplay test showed that piece separation worked but exposed jagged
+HD triangle edges and oversized original-model caps. Revision 7 projects the
+HD cut-rim vertices onto the severed joint plane, aligns duplicated vertices
+across material/batch seams, and poses each rim rigidly in its own side's
+joint frame. Cap fans use the retained HD boundary edges and the same posed
+vertices; interior edges cancel. Prepared HD caps replace the original PD
+caps for that body. Regular PD rendering, blood amount and corpse cleanup
+remain unchanged. No blood/gore overhaul is included in this revision.
+
+The startup now identifies revision 7. Windows x64 compilation/linking passed.
+Synthetic checks covered axis-aligned and oblique plane projection, degenerate
+planes, a fitted quad rim, cancellation of interior edges, and rejection of
+cross-piece triangles, alongside the r6 connected-piece weight checks.
+These do not establish the appearance of every real model: Jon must test
+fresh PD XBLA and GoldenEye XBLA corpses, including single and multiple cuts,
+dragging, reflections and fades. No r7 gameplay runs were performed.
+
+This cleans the existing mesh seam; it does not introduce a general-purpose
+triangle slicing engine or new gore artwork. OpenAI Codex implemented this
+adaptation with AI assistance at Jon / yedgar93's direction. Original authors
+retain their existing credits.

@@ -40,4 +40,11 @@ static inline int ragdollSkinTriangle(const short *pieces, int count, int a, int
     return a >= 0 && b >= 0 && c >= 0 && a < count && b < count && c < count
         && pieces[a] >= 0 && pieces[a] == pieces[b] && pieces[a] == pieces[c];
 }
+// Project a cut-rim point onto its joint plane; interior vertices are untouched.
+static inline void ragdollSkinProject(float out[3], const float point[3], const float centre[3], const float normal[3])
+{
+    float dot = 0.0f, norm = 0.0f;
+    for (int k = 0; k < 3; k++) { dot += (point[k]-centre[k])*normal[k]; norm += normal[k]*normal[k]; }
+    for (int k = 0; k < 3; k++) out[k] = point[k] - (norm > 1e-12f ? normal[k]*dot/norm : 0.0f);
+}
 #endif

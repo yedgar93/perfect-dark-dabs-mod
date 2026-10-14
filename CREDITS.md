@@ -445,3 +445,9 @@ Yedgar Hybrid name. OpenAI Codex used AI assistance to adapt HD skinning
 and triangle separation and fit the startup attribution. Chesluk-Industries
 retains credit for the underlying physics and dismemberment implementation;
 DabDavis and all original contributors retain their existing credits.
+
+Revision 7: Jon / yedgar93's gameplay feedback prompted fitted XBLA joint
+rims and caps from the HD boundary geometry. OpenAI Codex implemented the
+mesh adaptation and geometry checks with AI assistance. Chesluk-Industries
+retains attribution for the original cuts, physics and cap implementation;
+DabDavis and all original contributors retain their existing credits.

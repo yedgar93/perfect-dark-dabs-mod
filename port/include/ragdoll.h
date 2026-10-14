@@ -185,6 +185,10 @@ s32 ragdollGetExtraChrSlots(void);
 s32 ragdollModelHasPose(struct model *model);
 // Matrix palette entry -> connected piece after cuts; 0 when not severed.
 s32 ragdollGetModelCutPieces(struct model *model, s16 *pieces, s32 count);
+// A severed joint and the palette frames on either side of its cut.
+struct ragdollcutjoint { s16 piece, parentpiece, childmtx, parentmtx; };
+s32 ragdollGetModelCutJoints(struct model *model, struct ragdollcutjoint *out, s32 count);
+
 s32 ragdollUpdateNodeMtx(struct modelrenderdata *renderdata, struct model *model, struct modelnode *node);
 
 #endif

@@ -426,7 +426,7 @@ Gfx *titleRenderLegal(Gfx *gdl)
 				font2 = g_FontHandelGothicLg;
 #if !defined(PLATFORM_N64) && defined(VERSION_HASH)
 				if (elem->textid == L_OPTIONS_084) {
-					elem->textptr = "Yedgar Hybrid v3.14.0 r6";
+					elem->textptr = "Yedgar Hybrid v3.14.0 r7";
 
 					// Gold, once, when this is the first run of a build Check
 					// for Updates put in place. The version is already the

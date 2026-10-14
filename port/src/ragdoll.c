@@ -1815,6 +1815,21 @@ s32 ragdollGetModelCutPieces(struct model *model, s16 *pieces, s32 count)
     return (s32)rd->severed;
 }
 
+s32 ragdollGetModelCutJoints(struct model *model, struct ragdollcutjoint *out, s32 count)
+{
+    struct ragdoll *rd = ragdollFindByModel(model);
+    s32 n = 0;
+    if (!rd || !out) return 0;
+    for (s32 i = 1; i < rd->numparts && n < count; i++) {
+        if (rd->severed & (1u << i)) {
+            s32 parent = rd->skel->parent[i];
+            if (parent < 0 || parent >= rd->numparts) continue;
+            out[n++] = (struct ragdollcutjoint){i, ragdollPieceOf(rd, parent), rd->mtxindex[i], rd->mtxindex[parent]};
+        }
+    }
+    return n;
+}
+
 bool ragdollModelHasPose(struct model *model)
 {
 	return ragdollFindByModel(model) != NULL;
@@ -1997,6 +2012,7 @@ struct prop *ragdollAimAtDeadPlayerBegin(struct chrdata *chr, struct coord *save
 void ragdollAimAtDeadPlayerEnd(struct prop *target, struct coord *saved) {}
 s32 ragdollShotNearCutPiece(struct chrdata *chr, struct coord *gunpos, struct coord *gundir, f32 radius) { return false; }
 s32 ragdollGetModelCutPieces(struct model *model, s16 *pieces, s32 count) { return 0; }
+s32 ragdollGetModelCutJoints(struct model *model, struct ragdollcutjoint *out, s32 count) { return 0; }
 bool ragdollModelHasPose(struct model *model) { return false; }
 bool ragdollUpdateNodeMtx(struct modelrenderdata *renderdata, struct model *model, struct modelnode *node) { return false; }
 #endif

@@ -5,6 +5,7 @@
  */
 
 #include "rd_internal.h"
+#include "xblamesh.h"
 
 #ifdef PD_PHYSICS
 
@@ -1658,6 +1659,8 @@ Gfx *ragdollRenderCaps(Gfx *gdl, struct chrdata *chr)
 	if (alpha == 0) {
 		return gdl;
 	}
+
+	if (xblaMeshRenderCutCaps(&gdl, chr, alpha)) return gdl;
 
 	gSPClearGeometryMode(gdl++, G_CULL_BOTH);
 	gSPSetGeometryMode(gdl++, G_SHADE | G_SHADING_SMOOTH);
